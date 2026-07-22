@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minoflux"
+version = "0.1.0"
+description = "Pure-Python tetromino game and AI learning laboratory"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+game = ["pygame>=2.6,<3"]
+ui = ["gradio>=6.14,<7", "pygame>=2.6,<3"]
+rl = ["gymnasium>=1.2,<2", "numpy>=2,<3"]
+ml = ["torch>=2.7"]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+minoflux = "minoflux.cli:main"
+minoflux-game = "minoflux.game:main"
+minoflux-lab = "minoflux.lab:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
