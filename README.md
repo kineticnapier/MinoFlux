@@ -12,13 +12,14 @@ MinoFlux uses one shared rule engine: the Pygame client, headless simulations, s
 - movement, soft/hard drop, hold, CW/CCW/180 rotation
 - configurable DAS, ARR, and soft-drop speed
 - frame-rate-independent held-key repeat and in-game key rebinding
-- 500 ms lock delay with move/rotation reset and a 15-reset limit
-- exact SRS 90-degree kick tables, separated for I and JLSTZ pieces
-- project-specific 180-degree kicks because SRS does not define 180-degree rotation
+- 500 ms lock delay with a 15-reset move/rotation limit
+- JLSTZ and I-piece SRS kick tables
 - line clears, combo, B2B, attack, and approximate spin detection
 - direct legal-placement actions for search and reinforcement learning
 - board feature extraction and a deterministic heuristic placement bot
 - fixed-seed heuristic benchmark in CLI and Gradio
+- CEM heuristic-weight training with separate validation seeds
+- best-game replay recording and a Pygame replay viewer
 - Pygame game client, Gradio experiment lab, and local JSON run folders
 
 ## Windows
@@ -54,7 +55,7 @@ uv run minoflux smoke --games 4 --max-pieces 200 --save
 uv run minoflux benchmark --games 8 --max-pieces 500 --save
 ```
 
-A saved benchmark contains its exact seeds, built-in weights, aggregate result, and per-game result under `data/runs/`.
+A saved benchmark contains its exact seeds, built-in weights, aggregate result, per-game result, and best replay under `data/runs/`.
 
 ## Input settings
 
@@ -73,36 +74,6 @@ Handling values:
 - **SDS**: delay per soft-drop cell; `0` moves instantly to the floor without locking
 
 Settings are stored at `~/.minoflux/settings.json`. Set `MINOFLUX_SETTINGS` to use another path.
-
-Default bindings:
-
-```text
-Left / Right     move
-Down             soft drop
-Z                rotate counter-clockwise
-X                rotate clockwise
-A                rotate 180 degrees
-C                hold
-Space            hard drop
-P                pause
-R                restart
-F1               settings
-Esc              quit
-```
-
-## Lock behavior
-
-`Game` defaults to a 500 ms lock delay and permits 15 successful grounded movement/rotation resets per piece. Hard drop and direct placement actions still lock immediately.
-
-The engine owns the timer. Real-time clients call `game.advance_time(delta_ms)` every frame, while deterministic tests or environments can advance it with controlled values.
-
-```python
-from minoflux_engine import Game
-
-game = Game(seed=1234, lock_delay_ms=500, lock_reset_limit=15)
-game.gravity_step()
-result = game.advance_time(16.67)
-```
 
 ## Baseline AI
 
@@ -128,7 +99,28 @@ while not game.game_over:
     game.place(choice.placement)
 ```
 
-Weights use the JSON format `minoflux_heuristic_v1`; `save_weights()` and `load_weights()` are provided for the next CEM stage.
+Weights use the JSON format `minoflux_heuristic_v1`; `save_weights()` and `load_weights()` are used by the CEM trainer.
+
+## Heuristic benchmark replay
+
+Benchmarks can record the strongest game in `minoflux_replay_v1` format.
+
+```powershell
+uv run minoflux benchmark --games 8 --max-pieces 500 --replay-out data/replays/best.json
+uv run minoflux replay data/replays/best.json
+```
+
+The Pygame replay viewer supports pause, single-step forward/backward, speed changes, and jump-to-start/end. The Gradio benchmark tab saves the best replay automatically and provides a **Replay best game** button.
+
+## CEM weight training
+
+The Cross-Entropy Method samples heuristic weight vectors, evaluates every candidate on the same fixed training seeds, keeps the elite fraction, and updates the sampling mean and standard deviation. A separate validation seed set is used after training.
+
+```powershell
+uv run minoflux train-cem --generations 8 --population 16 --games 3 --max-pieces 200 --model-out data/models/cem.json --replay-out data/replays/cem-best.json
+```
+
+Small settings are useful for checking the pipeline. Larger populations, more games per candidate, and longer piece limits produce steadier weights but take substantially longer. The Gradio **CEM weight training** tab saves a model and the best validation replay.
 
 ## Python API
 
@@ -146,8 +138,8 @@ result = game.place(placements[0])
 
 ## Recommended next steps
 
-1. Implement CEM over the existing heuristic weight vector.
-2. Separate training seeds from validation seeds and track both curves.
-3. Add Hold candidates.
-4. Add SRS-reachable placement generation rather than direct drops only.
-5. Add replay recording before neural or reinforcement-learning experiments.
+1. Add Hold candidates.
+2. Add SRS-reachable placement generation rather than direct drops only.
+3. Parallelize CEM candidate evaluation and rotate training seed sets.
+4. Add replay timelines and placement-score inspection.
+5. Add imitation learning and reinforcement-learning environments.
