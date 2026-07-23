@@ -7,7 +7,9 @@ from typing import Mapping, Sequence
 
 from minoflux_engine import Game, LockResult, Placement
 
-REPLAY_FORMAT = "minoflux_replay_v1"
+REPLAY_FORMAT = "minoflux_replay_v2"
+LEGACY_REPLAY_FORMAT = "minoflux_replay_v1"
+SUPPORTED_REPLAY_FORMATS = (REPLAY_FORMAT, LEGACY_REPLAY_FORMAT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +23,7 @@ class ReplayStep:
     score: int
     total_lines: int
     total_attack: int
+    hold: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -37,6 +40,7 @@ class ReplayStep:
             score=int(value.get("score", 0)),
             total_lines=int(value.get("total_lines", value.get("totalLines", 0))),
             total_attack=int(value.get("total_attack", value.get("totalAttack", 0))),
+            hold=bool(value.get("hold", False)),
         )
 
 
@@ -69,32 +73,39 @@ class Replay:
     weights: dict[str, float]
     steps: tuple[ReplayStep, ...]
     final: ReplaySummary
+    search_config: dict[str, object] | None = None
     format: str = REPLAY_FORMAT
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "format": self.format,
+        result: dict[str, object] = {
+            "format": REPLAY_FORMAT,
             "seed": self.seed,
             "maxPieces": self.max_pieces,
             "weights": dict(self.weights),
             "steps": [step.to_dict() for step in self.steps],
             "final": self.final.to_dict(),
         }
+        if self.search_config is not None:
+            result["searchConfig"] = dict(self.search_config)
+        return result
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> "Replay":
         replay_format = str(value.get("format", ""))
-        if replay_format != REPLAY_FORMAT:
+        if replay_format not in SUPPORTED_REPLAY_FORMATS:
             raise ValueError(f"Unsupported replay format: {replay_format!r}")
         raw_weights = value.get("weights", {})
         raw_steps = value.get("steps", ())
         raw_final = value.get("final")
+        raw_search = value.get("searchConfig")
         if not isinstance(raw_weights, Mapping):
             raise ValueError("Replay weights must be an object")
         if not isinstance(raw_steps, Sequence) or isinstance(raw_steps, (str, bytes)):
             raise ValueError("Replay steps must be an array")
         if not isinstance(raw_final, Mapping):
             raise ValueError("Replay final summary must be an object")
+        if raw_search is not None and not isinstance(raw_search, Mapping):
+            raise ValueError("Replay searchConfig must be an object")
         return cls(
             seed=int(value["seed"]),
             max_pieces=int(value.get("maxPieces", len(raw_steps))),
@@ -105,6 +116,12 @@ class Replay:
                 if isinstance(step, Mapping)
             ),
             final=ReplaySummary.from_mapping(raw_final),
+            search_config=(
+                {str(key): item for key, item in raw_search.items()}
+                if isinstance(raw_search, Mapping)
+                else None
+            ),
+            format=REPLAY_FORMAT,
         )
 
 
@@ -123,6 +140,8 @@ def load_replay(path: str | Path) -> Replay:
 
 
 def apply_replay_step(game: Game, step: ReplayStep, *, strict: bool = True) -> LockResult:
+    if step.hold and not game.hold():
+        raise ValueError("Replay requested an unavailable Hold")
     if game.current != step.piece:
         raise ValueError(f"Replay expected {step.piece}, but engine produced {game.current}")
     cells = game.cells(step.piece, step.x, step.y, step.rotation)
