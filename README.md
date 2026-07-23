@@ -13,7 +13,9 @@ MinoFlux uses one shared rule engine: the Pygame client, headless simulations, s
 - configurable DAS, ARR, and soft-drop speed
 - frame-rate-independent held-key repeat
 - in-game key rebinding
-- simple wall and floor kicks
+- 500 ms lock delay with move/rotation reset and a 15-reset limit
+- exact SRS 90-degree kick tables, separated for I and JLSTZ pieces
+- project-specific 180-degree kicks because SRS does not define 180-degree rotation
 - line clears, combo, B2B, attack, and approximate spin detection
 - direct legal-placement actions for search and reinforcement learning
 - Pygame game client
@@ -86,6 +88,20 @@ F1               settings
 Esc              quit
 ```
 
+## Lock behavior
+
+`Game` defaults to a 500 ms lock delay and permits 15 successful grounded movement/rotation resets per piece. Hard drop and direct placement actions still lock immediately.
+
+The engine owns the timer. Real-time clients call `game.advance_time(delta_ms)` every frame, while deterministic tests or environments can advance it with controlled values.
+
+```python
+from minoflux_engine import Game
+
+game = Game(seed=1234, lock_delay_ms=500, lock_reset_limit=15)
+game.gravity_step()
+result = game.advance_time(16.67)
+```
+
 ## Python API
 
 ```python
@@ -102,8 +118,8 @@ result = game.place(placements[0])
 
 ## Recommended next steps
 
-1. Add lock delay and move-reset limits.
-2. Replace the approximate rotation system with exact SRS kick tables.
-3. Add configurable gravity, 20G behavior, and level progression.
-4. Add replay recording and deterministic playback.
-5. Then add board features and a baseline placement heuristic before CEM or reinforcement learning.
+1. Add configurable gravity, 20G behavior, and level progression.
+2. Add replay recording and deterministic playback.
+3. Tighten T-Spin and All-Spin classification using kick metadata.
+4. Add board features and a baseline placement heuristic.
+5. Add Python CEM, then imitation learning and reinforcement learning.
