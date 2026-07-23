@@ -42,4 +42,9 @@ class GameSnapshot:
     pieces_placed: int
     game_over: bool
     paused: bool
+    grounded: bool
+    lock_elapsed_ms: float
+    lock_delay_ms: float
+    lock_resets: int
+    lock_reset_limit: int
     last_lock: LockResult | None
