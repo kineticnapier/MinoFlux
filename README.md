@@ -13,7 +13,8 @@ MinoFlux uses one shared rule engine: the Pygame client, headless simulations, s
 - board-only heuristic placement evaluation
 - Hold-aware action generation
 - configurable future-piece lookahead and beam search
-- fixed-seed benchmarks and deterministic JSON replays
+- bounded top-K ranking and lightweight search-state cloning
+- parallel fixed-seed benchmarks and deterministic JSON replays
 - CEM weight training with worker processes and candidate screening
 - Pygame game/replay clients and a Gradio experiment lab
 
@@ -43,9 +44,10 @@ uv run --no-sync minoflux-lab
 0 = current placement only
 1 = current placement + next piece
 2 = current placement + next two pieces
+3 = current placement + next three pieces
 ```
 
-After each ply, only the strongest `beam_width` states remain. The search is deterministic for the same engine state, weights, and configuration.
+After each ply, only the strongest `beam_width` states remain. Future scores are accumulated as `immediate + discount × next + discount² × next-next`. The search is deterministic for the same engine state, weights, and configuration.
 
 ```python
 from minoflux_ai import SearchConfig, apply_search_action, choose_search_action
@@ -69,6 +71,7 @@ The benchmark defaults to Hold plus one future piece and beam width 4:
 uv run minoflux benchmark `
   --games 20 `
   --max-pieces 1000 `
+  --workers 0 `
   --hold `
   --lookahead-pieces 1 `
   --beam-width 4 `
@@ -76,13 +79,23 @@ uv run minoflux benchmark `
   --replay-out data/replays/best.json
 ```
 
+`--workers 0` automatically uses up to the available logical CPUs minus one, capped by the game count. Independent games run in separate processes and results remain ordered by seed. Use `--workers 1` for a serial timing comparison.
+
+The Gradio benchmark uses automatic game-level parallelism when it records the best replay. The result JSON includes the resolved `workers` count.
+
 The old direct-drop greedy behavior remains available:
 
 ```powershell
 uv run minoflux benchmark --no-hold --lookahead-pieces 0 --beam-width 1
 ```
 
-Lookahead is substantially more expensive than greedy evaluation. Increase `beam-width` only after measuring runtime on representative games.
+Lookahead is still substantially more expensive than greedy evaluation. Increase `beam-width` only after measuring runtime on representative games.
+
+## Search acceleration details
+
+Beam search requests only the top `beam_width` placements from each normal/Hold branch instead of sorting and retaining every candidate. Search clones copy the board and queue but do not clone the large Python random-generator state: the engine already keeps seven preview pieces, which is enough for the supported maximum three-piece lookahead.
+
+CEM candidate evaluation remains parallelized by candidate rather than by game, preventing nested process pools. Its final validation benchmark may use game-level parallelism after the candidate pool has shut down.
 
 ## CEM training
 
