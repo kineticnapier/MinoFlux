@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 
+from .b2b import resolve_b2b_charging, split_surge
 from .pieces import (
     BOARD_HEIGHT,
     BOARD_WIDTH,
@@ -16,6 +17,7 @@ from .state import GameSnapshot, LockResult, Placement
 
 DEFAULT_LOCK_DELAY_MS = 500.0
 DEFAULT_LOCK_RESET_LIMIT = 15
+GARBAGE_CELL = "G"
 
 
 class Game:
@@ -55,6 +57,8 @@ class Game:
         self.attack = 0
         self.combo = -1
         self.back_to_back = False
+        self.b2b_chain = 0
+        self.surge_charge = 0
         self.pieces_placed = 0
         self.game_over = False
         self.paused = False
@@ -85,7 +89,10 @@ class Game:
         self._clear_rotation_metadata()
         self.score = self.lines = self.attack = self.pieces_placed = 0
         self.combo = -1
-        self.back_to_back = self.game_over = self.paused = False
+        self.back_to_back = False
+        self.b2b_chain = 0
+        self.surge_charge = 0
+        self.game_over = self.paused = False
         self.last_lock = None
         self._reset_lock_state()
         self.game_over = self._collides(self.current, self.x, self.y, self.rotation)
@@ -291,9 +298,15 @@ class Game:
         spin = t_spin_event(spin_kind, lines)
         perfect_clear = all(cell is None for row in self.board for cell in row)
         difficult = is_difficult_clear(lines, spin)
-        sent = base_attack(lines, spin)
-        if difficult and self.back_to_back:
-            sent += 1
+        b2b = resolve_b2b_charging(
+            active=self.back_to_back,
+            chain=self.b2b_chain,
+            difficult=difficult,
+            lines=lines,
+            perfect_clear=perfect_clear and lines > 0,
+        )
+
+        sent = base_attack(lines, spin) + b2b.attack_bonus
         if lines:
             self.combo += 1
             if self.combo > 0:
@@ -303,17 +316,19 @@ class Game:
         if perfect_clear and lines:
             sent += 10
 
+        attack_packets = ((sent,) if sent > 0 else ()) + split_surge(b2b.released)
+        total_sent = sum(attack_packets)
+
         level = self.lines // 10 + 1
         gained = base_score(lines, spin)
-        if difficult and self.back_to_back:
+        if b2b.attack_bonus:
             gained = int(gained * 1.5)
         self.score += gained * level
         self.lines += lines
-        self.attack += sent
-        if difficult:
-            self.back_to_back = True
-        elif lines:
-            self.back_to_back = False
+        self.attack += total_sent
+        self.back_to_back = b2b.active
+        self.b2b_chain = b2b.chain
+        self.surge_charge = b2b.charge
 
         self.pieces_placed += 1
         hidden_occupied = any(cell is not None for row in self.board[: self.hidden_rows] for cell in row)
@@ -325,14 +340,38 @@ class Game:
 
         self.last_lock = LockResult(
             lines=lines,
-            attack=sent,
+            attack=total_sent,
             spin=spin,
             perfect_clear=perfect_clear,
             combo=self.combo,
             back_to_back=self.back_to_back,
             game_over=self.game_over,
+            b2b_chain=self.b2b_chain,
+            surge_charge=self.surge_charge,
+            surge_released=b2b.released,
+            attack_packets=attack_packets,
         )
         return self.last_lock
+
+    def add_garbage(self, lines: int, hole: int) -> bool:
+        """Raise solid garbage lines and return whether the game remains alive."""
+
+        if self.game_over:
+            return False
+        count = max(0, int(lines))
+        gap = max(0, min(self.width - 1, int(hole)))
+        topped_out = False
+        for _ in range(count):
+            removed = self.board.pop(0)
+            if any(cell is not None for cell in removed):
+                topped_out = True
+            row: list[str | None] = [GARBAGE_CELL] * self.width
+            row[gap] = None
+            self.board.append(row)
+        hidden_occupied = any(cell is not None for row in self.board[: self.hidden_rows] for cell in row)
+        active_collision = self._collides(self.current, self.x, self.y, self.rotation)
+        self.game_over = topped_out or hidden_occupied or active_collision
+        return not self.game_over
 
     def legal_placements(self) -> tuple[Placement, ...]:
         if self.game_over:
@@ -391,6 +430,8 @@ class Game:
             attack=self.attack,
             combo=self.combo,
             back_to_back=self.back_to_back,
+            b2b_chain=self.b2b_chain,
+            surge_charge=self.surge_charge,
             pieces_placed=self.pieces_placed,
             game_over=self.game_over,
             paused=self.paused,
