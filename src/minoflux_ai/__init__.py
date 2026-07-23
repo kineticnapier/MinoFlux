@@ -34,6 +34,7 @@ from .heuristic import (
     save_weights,
     score_features,
 )
+from .reachability import reachable_placements
 from .promotion import (
     PromotionConfig,
     PromotionResult,
@@ -43,6 +44,7 @@ from .promotion import (
 )
 from .replay import (
     LEGACY_REPLAY_FORMAT,
+    LEGACY_REPLAY_FORMAT_V2,
     REPLAY_FORMAT,
     Replay,
     ReplayStep,
@@ -64,16 +66,17 @@ from .search import (
 )
 
 __all__ = [
-    "ATTACK_SPIN_FITNESS", "BALANCED_FITNESS", "BenchmarkGame", "BenchmarkResult", "BoardFeatures",
-    "CEMConfig", "CEMGeneration", "CEMResult", "DEFAULT_SEARCH_CONFIG", "DEFAULT_WEIGHTS",
-    "DIRECT_SEARCH_CONFIG", "FITNESS_PROFILE_ATTACK_SPIN", "FITNESS_PROFILE_BALANCED",
-    "FITNESS_PROFILE_NAMES", "FitnessProfile", "HeuristicWeights", "LEGACY_REPLAY_FORMAT", "MODEL_FORMAT",
-    "PlacementEvaluation", "PlacementFeatures", "PromotionConfig", "PromotionResult", "REPLAY_FORMAT",
-    "Replay", "ReplayStep", "ReplaySummary", "SearchAction", "SearchChoice", "SearchConfig",
-    "TRAINABLE_WEIGHT_NAMES", "apply_replay_step", "apply_search_action", "benchmark_fitness",
-    "bootstrap_champion", "choose_placement", "choose_search_action", "column_heights",
-    "compare_candidate_to_champion", "evaluate_and_promote_model", "evaluate_placement",
-    "extract_board_features", "load_replay", "load_weights", "rank_placements", "rank_search_actions",
-    "record_heuristic_game", "replay_to_game", "resolve_fitness_profile", "run_heuristic_benchmark",
-    "run_heuristic_game", "save_replay", "save_weights", "score_features", "train_cem",
+    "ATTACK_SPIN_FITNESS", "BALANCED_FITNESS", "BenchmarkGame", "BenchmarkResult",
+    "BoardFeatures", "CEMConfig", "CEMGeneration", "CEMResult", "DEFAULT_SEARCH_CONFIG",
+    "DEFAULT_WEIGHTS", "DIRECT_SEARCH_CONFIG", "FITNESS_PROFILE_ATTACK_SPIN",
+    "FITNESS_PROFILE_BALANCED", "FITNESS_PROFILE_NAMES", "FitnessProfile", "HeuristicWeights",
+    "LEGACY_REPLAY_FORMAT", "LEGACY_REPLAY_FORMAT_V2", "MODEL_FORMAT", "PlacementEvaluation",
+    "PlacementFeatures", "PromotionConfig", "PromotionResult", "REPLAY_FORMAT", "Replay", "ReplayStep", "ReplaySummary", "SearchAction",
+    "SearchChoice", "SearchConfig", "TRAINABLE_WEIGHT_NAMES", "apply_replay_step",
+    "apply_search_action", "benchmark_fitness", "bootstrap_champion", "choose_placement", "choose_search_action", "compare_candidate_to_champion",
+    "column_heights", "evaluate_and_promote_model", "evaluate_placement", "extract_board_features", "load_replay",
+    "load_weights", "rank_placements", "rank_search_actions", "reachable_placements",
+    "record_heuristic_game", "replay_to_game", "resolve_fitness_profile",
+    "run_heuristic_benchmark", "run_heuristic_game", "save_replay", "save_weights",
+    "score_features", "train_cem",
 ]
