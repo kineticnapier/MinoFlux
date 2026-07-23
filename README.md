@@ -13,9 +13,9 @@ MinoFlux uses one shared rule engine: the Pygame client, headless simulations, s
 - board-only heuristic placement evaluation
 - Hold-aware action generation
 - configurable future-piece lookahead and beam search
-- bounded top-K ranking and lightweight search-state cloning
 - parallel fixed-seed benchmarks and deterministic JSON replays
 - CEM weight training with worker processes and candidate screening
+- Attack/Spin-oriented fitness and champion-versus-candidate model promotion
 - Pygame game/replay clients and a Gradio experiment lab
 
 ## Windows
@@ -44,10 +44,9 @@ uv run --no-sync minoflux-lab
 0 = current placement only
 1 = current placement + next piece
 2 = current placement + next two pieces
-3 = current placement + next three pieces
 ```
 
-After each ply, only the strongest `beam_width` states remain. Future scores are accumulated as `immediate + discount × next + discount² × next-next`. The search is deterministic for the same engine state, weights, and configuration.
+After each ply, only the strongest `beam_width` states remain. The search is deterministic for the same engine state, weights, and configuration.
 
 ```python
 from minoflux_ai import SearchConfig, apply_search_action, choose_search_action
@@ -65,13 +64,14 @@ if choice is not None:
     apply_search_action(game, choice.action)
 ```
 
-The benchmark defaults to Hold plus one future piece and beam width 4:
+The benchmark defaults to Hold plus one future piece and beam width 4. Independent games run in separate worker processes.
 
 ```powershell
 uv run minoflux benchmark `
   --games 20 `
   --max-pieces 1000 `
   --workers 0 `
+  --fitness-profile attack_spin `
   --hold `
   --lookahead-pieces 1 `
   --beam-width 4 `
@@ -79,49 +79,72 @@ uv run minoflux benchmark `
   --replay-out data/replays/best.json
 ```
 
-`--workers 0` automatically uses up to the available logical CPUs minus one, capped by the game count. Independent games run in separate processes and results remain ordered by seed. Use `--workers 1` for a serial timing comparison.
-
-The Gradio benchmark uses automatic game-level parallelism when it records the best replay. The result JSON includes the resolved `workers` count.
-
 The old direct-drop greedy behavior remains available:
 
 ```powershell
 uv run minoflux benchmark --no-hold --lookahead-pieces 0 --beam-width 1
 ```
 
-Lookahead is still substantially more expensive than greedy evaluation. Increase `beam-width` only after measuring runtime on representative games.
+## Attack and Spin fitness
 
-## Search acceleration details
+The default `attack_spin` profile directly rewards:
 
-Beam search requests only the top `beam_width` placements from each normal/Hold branch instead of sorting and retaining every candidate. Search clones copy the board and queue but do not clone the large Python random-generator state: the engine already keeps seven preview pieces, which is enough for the supported maximum three-piece lookahead.
+- Attack
+- Spin count
+- lines cleared by Spins
+- perfect clears
+- survival, with a smaller weight than the offensive terms
 
-CEM candidate evaluation remains parallelized by candidate rather than by game, preventing nested process pools. Its final validation benchmark may use game-level parallelism after the candidate pool has shut down.
+The older survival-oriented formula remains available as `balanced`.
+
+Benchmark output now includes `spins`, `spinLines`, `perfectClears`, their per-game means, and the selected fitness score.
+
+## Champion model protection
+
+CEM no longer overwrites the main model unconditionally.
+
+```text
+training result
+→ data/models/candidate-cem.json
+→ promotion benchmark on separate unseen seeds
+→ winner replaces data/models/champion-cem.json
+→ rejected candidates remain in data/models/history/
+```
+
+The promotion check compares candidate and champion on identical seeds and rejects candidates that lose more completed games than the configured safety limit.
+
+The stronger model recovered from the 2026-07-23 benchmark is stored at:
+
+```text
+presets/recovered-attack-20260723.json
+```
+
+On the first launch after upgrading, it bootstraps `champion-cem.json` when no champion exists. `data/models/latest-cem.json` is maintained as a compatibility alias.
 
 ## CEM training
 
-CEM can train weights under the same Hold/search policy. Training defaults to Hold enabled but no future lookahead, because evaluating every candidate with lookahead is expensive.
+Train a Hold-aware Attack/Spin candidate and challenge the champion:
 
 ```powershell
 uv run minoflux train-cem `
-  --initial-model data/models/latest-cem.json `
-  --generations 20 `
-  --population 64 `
+  --generations 15 `
+  --population 32 `
   --workers 0 `
   --screen-games 1 `
   --screen-max-pieces 60 `
   --screen-fraction 0.5 `
+  --fitness-profile attack_spin `
   --hold `
   --lookahead-pieces 0 `
   --beam-width 4 `
-  --model-out data/models/latest-cem.json `
-  --replay-out data/replays/cem-best.json
+  --promotion-games 10 `
+  --promotion-max-pieces 1000
 ```
 
-After a stable Hold-aware model is trained, a smaller lookahead run can refine it:
+Training defaults to no future lookahead because evaluating every candidate with lookahead is expensive. A smaller follow-up run can refine a stable champion under lookahead:
 
 ```powershell
 uv run minoflux train-cem `
-  --initial-model data/models/latest-cem.json `
   --generations 5 `
   --population 16 `
   --games 2 `
@@ -130,9 +153,11 @@ uv run minoflux train-cem `
   --beam-width 2
 ```
 
+Use `--no-promote` for an experimental run that should only save a candidate.
+
 ## Replays
 
-New replays use `minoflux_replay_v2` and record whether Hold was used before every placement. The loader remains compatible with `minoflux_replay_v1` files.
+New replays use `minoflux_replay_v2` and record Hold, Spin, and perfect-clear metadata for every placement. The loader remains compatible with older v1 and v2 files.
 
 ```powershell
 uv run minoflux replay data/replays/best.json
@@ -156,6 +181,6 @@ Search candidates still come from `Game.legal_placements()`, so each selected pi
 
 1. Add SRS-reachable placement-path generation.
 2. Add transposition caching for deeper beam search.
-3. Train and compare separate greedy, Hold, and lookahead models.
+3. Train separate greedy, Hold, and lookahead champions.
 4. Add garbage and versus-state evaluation.
 5. Then add imitation learning or reinforcement learning.
