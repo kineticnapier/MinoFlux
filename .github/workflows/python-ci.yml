@@ -27,3 +27,5 @@ jobs:
         run: uv run --no-sync python -m pytest -q
       - name: Run headless smoke simulation
         run: uv run --no-sync python -m minoflux smoke --games 2 --max-pieces 30
+      - name: Run heuristic benchmark fixture
+        run: uv run --no-sync python -m minoflux benchmark --games 1 --max-pieces 20
