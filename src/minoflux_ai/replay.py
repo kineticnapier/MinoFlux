@@ -24,12 +24,15 @@ class ReplayStep:
     total_lines: int
     total_attack: int
     hold: bool = False
+    spin: str | None = None
+    perfect_clear: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> "ReplayStep":
+        raw_spin = value.get("spin")
         return cls(
             piece=str(value["piece"]),
             x=int(value["x"]),
@@ -41,6 +44,8 @@ class ReplayStep:
             total_lines=int(value.get("total_lines", value.get("totalLines", 0))),
             total_attack=int(value.get("total_attack", value.get("totalAttack", 0))),
             hold=bool(value.get("hold", False)),
+            spin=None if raw_spin is None else str(raw_spin),
+            perfect_clear=bool(value.get("perfect_clear", value.get("perfectClear", False))),
         )
 
 
@@ -152,6 +157,12 @@ def apply_replay_step(game: Game, step: ReplayStep, *, strict: bool = True) -> L
         expected = (step.lines, step.attack, step.score, step.total_lines, step.total_attack)
         if actual != expected:
             raise ValueError(f"Replay state mismatch: expected {expected}, got {actual}")
+        # Spin metadata was added after replay v2 originally shipped. Validate it
+        # only when it is present so old v1/v2 files remain readable.
+        if step.spin is not None and result.spin != step.spin:
+            raise ValueError(f"Replay spin mismatch: expected {step.spin!r}, got {result.spin!r}")
+        if step.perfect_clear and not result.perfect_clear:
+            raise ValueError("Replay expected a perfect clear")
     return result
 
 
