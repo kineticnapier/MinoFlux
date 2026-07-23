@@ -2,24 +2,20 @@
 
 A pure-Python tetromino game and AI learning laboratory.
 
-MinoFlux uses one shared rule engine: the Pygame client, headless simulations, search agents, and future reinforcement-learning environments all call `minoflux_engine.Game` directly. The rules are Tetris-like rather than a strict Guideline clone.
+MinoFlux uses one shared rule engine: the Pygame client, headless simulations, search agents, replay viewer, and CEM trainer all call `minoflux_engine.Game` directly. The rules are Tetris-like rather than a strict Guideline clone.
 
 ## Included
 
-- dependency-free game engine
-- 10×20 visible board with four hidden rows
-- deterministic 7-bag randomizer
-- movement, soft/hard drop, hold, CW/CCW/180 rotation
-- configurable DAS, ARR, soft-drop speed, and in-game key rebinding
-- 500 ms lock delay with movement/rotation reset and a 15-reset limit
-- exact SRS 90-degree kick tables, separated for I and JLSTZ pieces
-- project-specific 180-degree kicks because SRS does not define 180-degree rotation
-- line clears, combo, B2B, attack, and approximate spin detection
-- board feature extraction and a deterministic heuristic placement bot
-- board-only candidate simulation without copying the full `Game`
+- dependency-free 10×20 game engine with four hidden rows
+- deterministic 7-bag, Hold, CW/CCW/180 rotation, lock delay, combo, B2B, attack, and approximate spins
+- exact 90-degree SRS kick tables and project-specific 180-degree kicks
+- configurable DAS, ARR, soft-drop speed, and key bindings
+- board-only heuristic placement evaluation
+- Hold-aware action generation
+- configurable future-piece lookahead and beam search
 - fixed-seed benchmarks and deterministic JSON replays
-- CEM weight training with worker processes and optional candidate screening
-- Pygame game/replay clients, Gradio experiment lab, and local JSON run folders
+- CEM weight training with worker processes and candidate screening
+- Pygame game/replay clients and a Gradio experiment lab
 
 ## Windows
 
@@ -32,121 +28,104 @@ start-lab.bat
 
 The launchers use `uv sync` and `uv run`; they do not invoke `pip` directly.
 
-## Manual setup
+Manual setup:
 
 ```powershell
-uv sync --extra game
-uv run --no-sync minoflux-game
-```
-
-Lab:
-
-```powershell
-uv sync --extra ui
+uv sync --extra ui --extra dev
 uv run --no-sync minoflux-lab
 ```
 
-Headless commands:
+## Hold, lookahead, and beam search
 
-```powershell
-uv run minoflux info
-uv run minoflux smoke --games 4 --max-pieces 200 --save
-uv run minoflux benchmark --games 8 --max-pieces 500 --save
-uv run minoflux train-cem --generations 8 --population 16 --save
-```
-
-## Input settings
-
-Press `F1` while playing.
-
-- Up / Down: select a setting
-- Left / Right: adjust DAS, ARR, or SDS
-- Enter: rebind the selected action, then press the new key
-- Backspace: restore all defaults
-- F1 / Esc: save and close
-
-Settings are stored at `~/.minoflux/settings.json`. Set `MINOFLUX_SETTINGS` to use another path.
-
-Default bindings:
+`SearchConfig.lookahead_pieces` counts pieces after the current action:
 
 ```text
-Left / Right     move
-Down             soft drop
-Z                rotate counter-clockwise
-X                rotate clockwise
-A                rotate 180 degrees
-C                hold
-Space            hard drop
-P                pause
-R                restart
-F1               settings
-Esc              quit
+0 = current placement only
+1 = current placement + next piece
+2 = current placement + next two pieces
 ```
 
-## Lock behavior
-
-`Game` defaults to a 500 ms lock delay and permits 15 successful grounded movement/rotation resets per piece. Hard drop and direct placement actions still lock immediately.
-
-The engine owns the timer. Real-time clients call `game.advance_time(delta_ms)` every frame, while deterministic tests or environments can advance it with controlled values.
-
-## Baseline AI
-
-The baseline considers the direct-drop placements returned by `Game.legal_placements()`. It does not use Hold or search SRS movement routes yet.
-
-Each candidate is scored from aggregate/maximum height, holes, hole depth, new holes, bumpiness, wells, lines, attack, spin lines, perfect clears, and game over.
-
-Candidate evaluation copies only the 24×10 board and reproduces the immediate line-clear, combo, B2B, attack, spin, perfect-clear, and top-out result. It no longer calls `deepcopy(Game)` for every possible placement.
+After each ply, only the strongest `beam_width` states remain. The search is deterministic for the same engine state, weights, and configuration.
 
 ```python
-from minoflux_ai import choose_placement
+from minoflux_ai import SearchConfig, apply_search_action, choose_search_action
 from minoflux_engine import Game
 
 game = Game(seed=1234)
-while not game.game_over:
-    choice = choose_placement(game)
-    if choice is None:
-        break
-    game.place(choice.placement)
+config = SearchConfig(
+    allow_hold=True,
+    lookahead_pieces=1,
+    beam_width=4,
+    discount=0.90,
+)
+choice = choose_search_action(game, config=config)
+if choice is not None:
+    apply_search_action(game, choice.action)
 ```
 
-## Accelerated CEM
+The benchmark defaults to Hold plus one future piece and beam width 4:
 
-CEM candidate evaluations are independent, so MinoFlux can distribute them across worker processes. `--workers 0` automatically uses the available logical CPUs minus one; use `--workers 1` for serial execution.
+```powershell
+uv run minoflux benchmark `
+  --games 20 `
+  --max-pieces 1000 `
+  --hold `
+  --lookahead-pieces 1 `
+  --beam-width 4 `
+  --lookahead-discount 0.9 `
+  --replay-out data/replays/best.json
+```
 
-An optional screening round first evaluates every candidate on shorter games. Only the strongest fraction receives the full expensive evaluation.
+The old direct-drop greedy behavior remains available:
+
+```powershell
+uv run minoflux benchmark --no-hold --lookahead-pieces 0 --beam-width 1
+```
+
+Lookahead is substantially more expensive than greedy evaluation. Increase `beam-width` only after measuring runtime on representative games.
+
+## CEM training
+
+CEM can train weights under the same Hold/search policy. Training defaults to Hold enabled but no future lookahead, because evaluating every candidate with lookahead is expensive.
 
 ```powershell
 uv run minoflux train-cem `
+  --initial-model data/models/latest-cem.json `
   --generations 20 `
   --population 64 `
   --workers 0 `
   --screen-games 1 `
   --screen-max-pieces 60 `
   --screen-fraction 0.5 `
-  --games 4 `
-  --max-pieces 500 `
-  --model-out data/models/cem.json `
+  --hold `
+  --lookahead-pieces 0 `
+  --beam-width 4 `
+  --model-out data/models/latest-cem.json `
   --replay-out data/replays/cem-best.json
 ```
 
-Screening can miss a candidate that starts poorly but performs well over long games. Disable it for maximum evaluation accuracy:
+After a stable Hold-aware model is trained, a smaller lookahead run can refine it:
 
 ```powershell
-uv run minoflux train-cem --screen-games 0
+uv run minoflux train-cem `
+  --initial-model data/models/latest-cem.json `
+  --generations 5 `
+  --population 16 `
+  --games 2 `
+  --max-pieces 150 `
+  --lookahead-pieces 1 `
+  --beam-width 2
 ```
-
-Training results include the resolved worker count, total elapsed time, each generation's elapsed time, the number of fully evaluated candidates, and the number rejected by screening.
 
 ## Replays
 
-A benchmark or CEM validation run can save its best game:
+New replays use `minoflux_replay_v2` and record whether Hold was used before every placement. The loader remains compatible with `minoflux_replay_v1` files.
 
 ```powershell
-uv run minoflux benchmark --replay-out data/replays/best.json
 uv run minoflux replay data/replays/best.json
 ```
 
-Replay controls:
+Controls:
 
 ```text
 Space          pause / resume
@@ -156,10 +135,14 @@ Home / End     first / final state
 Esc            quit
 ```
 
+## Current search limits
+
+Search candidates still come from `Game.legal_placements()`, so each selected piece is dropped vertically into its final position. The search does not yet enumerate placements that require a sequence of SRS moves or rotations to reach.
+
 ## Recommended next steps
 
-1. Add Hold candidates to the heuristic search.
-2. Add SRS-reachable placement generation rather than direct drops only.
-3. Benchmark process count and screening settings on representative hardware.
-4. Add lookahead and beam search.
+1. Add SRS-reachable placement-path generation.
+2. Add transposition caching for deeper beam search.
+3. Train and compare separate greedy, Hold, and lookahead models.
+4. Add garbage and versus-state evaluation.
 5. Then add imitation learning or reinforcement learning.
