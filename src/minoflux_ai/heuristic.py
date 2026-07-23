@@ -4,10 +4,10 @@ from dataclasses import asdict, dataclass, fields
 from heapq import nlargest
 import json
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping
 
 from minoflux_engine import Game, Placement
-from minoflux_engine.pieces import LINE_ATTACK, SHAPES
+from minoflux_engine.spin import base_attack, classify_t_spin, is_difficult_clear, t_spin_event
 
 from .features import BoardFeatures, extract_board_features
 
@@ -55,6 +55,7 @@ class PlacementFeatures:
     spin_lines: int
     perfect_clear: bool
     game_over: bool
+    spin: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = self.board.to_dict()
@@ -65,6 +66,7 @@ class PlacementFeatures:
             "spin_lines": self.spin_lines,
             "perfect_clear": self.perfect_clear,
             "game_over": self.game_over,
+            "spin": self.spin,
         })
         return value
 
@@ -94,63 +96,17 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
     )
 
 
-def _collides(
-    board: Sequence[Sequence[object | None]],
-    piece: str,
-    x: int,
-    y: int,
-    rotation: int,
-) -> bool:
-    height = len(board)
-    width = len(board[0]) if board else 0
-    for dx, dy in SHAPES[piece][rotation % 4]:
-        cell_x, cell_y = x + dx, y + dy
-        if cell_x < 0 or cell_x >= width or cell_y >= height:
-            return True
-        if cell_y >= 0 and board[cell_y][cell_x] is not None:
-            return True
-    return False
-
-
-def _detect_direct_placement_spin(game: Game, placement: Placement) -> str | None:
-    if placement.rotation == game.rotation or placement.piece == "O":
-        return None
-    board = game.board
-    if placement.piece == "T":
-        pivot_x, pivot_y = placement.x + 1, placement.y + 1
-        occupied = 0
-        for cell_x, cell_y in (
-            (pivot_x - 1, pivot_y - 1),
-            (pivot_x + 1, pivot_y - 1),
-            (pivot_x - 1, pivot_y + 1),
-            (pivot_x + 1, pivot_y + 1),
-        ):
-            if (
-                cell_x < 0
-                or cell_x >= game.width
-                or cell_y < 0
-                or cell_y >= game.height
-                or board[cell_y][cell_x] is not None
-            ):
-                occupied += 1
-        if occupied >= 3:
-            return "T"
-    blocked = (
-        _collides(board, placement.piece, placement.x - 1, placement.y, placement.rotation)
-        and _collides(board, placement.piece, placement.x + 1, placement.y, placement.rotation)
-        and _collides(board, placement.piece, placement.x, placement.y + 1, placement.rotation)
-    )
-    return placement.piece if blocked else None
-
-
-def _placement_features_fast(
-    game: Game,
-    placement: Placement,
-    before: BoardFeatures,
-) -> PlacementFeatures:
-    # Only the 24x10 board is copied. Bag, queue, RNG and the rest of Game are not.
+def _placement_features_fast(game: Game, placement: Placement, before: BoardFeatures) -> PlacementFeatures:
     board = [row.copy() for row in game.board]
-    spin = _detect_direct_placement_spin(game, placement)
+    spin_kind = classify_t_spin(
+        board,
+        piece=placement.piece,
+        x=placement.x,
+        y=placement.y,
+        rotation=placement.rotation,
+        last_move_was_rotation=placement.last_move_was_rotation,
+        rotation_kick_index=placement.rotation_kick_index,
+    )
     topped_out = False
     for cell_x, cell_y in placement.cells:
         if cell_y < 0:
@@ -166,11 +122,10 @@ def _placement_features_fast(
             row for index, row in enumerate(board) if index not in full_set
         ]
 
+    spin = t_spin_event(spin_kind, lines)
     perfect_clear = all(cell is None for row in board for cell in row)
-    difficult = lines == 4 or (spin is not None and lines > 0)
-    attack = LINE_ATTACK.get(lines, 0)
-    if spin is not None and lines:
-        attack += max(1, lines)
+    difficult = is_difficult_clear(lines, spin)
+    attack = base_attack(lines, spin)
     if difficult and game.back_to_back:
         attack += 1
     combo = game.combo + 1 if lines else -1
@@ -179,11 +134,7 @@ def _placement_features_fast(
     if perfect_clear and lines:
         attack += 10
 
-    hidden_occupied = any(
-        cell is not None
-        for row in board[: game.hidden_rows]
-        for cell in row
-    )
+    hidden_occupied = any(cell is not None for row in board[: game.hidden_rows] for cell in row)
     after = extract_board_features(board)
     return PlacementFeatures(
         board=after,
@@ -193,6 +144,7 @@ def _placement_features_fast(
         spin_lines=lines if spin is not None else 0,
         perfect_clear=perfect_clear,
         game_over=topped_out or hidden_occupied,
+        spin=spin,
     )
 
 
@@ -210,10 +162,11 @@ def evaluate_placement(
     )
 
 
-def _placement_key(item: PlacementEvaluation) -> tuple[float, int, int, int, int, int, int]:
+def _placement_key(item: PlacementEvaluation) -> tuple[float, int, int, int, int, int, int, int]:
     return (
         item.score,
         item.features.attack,
+        item.features.spin_lines,
         item.features.lines,
         -item.features.board.holes,
         -item.features.board.max_height,
@@ -226,16 +179,18 @@ def rank_placements(
     game: Game,
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
     *,
+    placements: Iterable[Placement] | None = None,
     limit: int | None = None,
 ) -> tuple[PlacementEvaluation, ...]:
     before = extract_board_features(game.board)
+    source = game.legal_placements() if placements is None else placements
     evaluated = [
         PlacementEvaluation(
             placement=placement,
             score=score_features(features, weights),
             features=features,
         )
-        for placement in game.legal_placements()
+        for placement in source
         for features in (_placement_features_fast(game, placement, before),)
     ]
     if limit is not None:
@@ -248,10 +203,7 @@ def rank_placements(
     return tuple(evaluated)
 
 
-def choose_placement(
-    game: Game,
-    weights: HeuristicWeights = DEFAULT_WEIGHTS,
-) -> PlacementEvaluation | None:
+def choose_placement(game: Game, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> PlacementEvaluation | None:
     ranked = rank_placements(game, weights, limit=1)
     return ranked[0] if ranked else None
 
