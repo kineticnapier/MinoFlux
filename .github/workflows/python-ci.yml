@@ -29,7 +29,7 @@ jobs:
         run: uv run --no-sync python -m minoflux smoke --games 2 --max-pieces 30
       - name: Run heuristic benchmark and replay fixture
         run: uv run --no-sync python -m minoflux benchmark --games 1 --max-pieces 20 --replay-out data/replays/ci-benchmark.json
-      - name: Run CEM model and replay fixture
-        run: uv run --no-sync python -m minoflux train-cem --generations 1 --population 3 --games 1 --max-pieces 8 --validation-games 1 --model-out data/models/ci-cem.json --replay-out data/replays/ci-cem.json
+      - name: Run parallel screened CEM fixture
+        run: uv run --no-sync python -m minoflux train-cem --generations 1 --population 4 --games 1 --max-pieces 10 --validation-games 1 --workers 2 --screen-games 1 --screen-max-pieces 4 --screen-fraction 0.5 --model-out data/models/ci-cem.json --replay-out data/replays/ci-cem.json
       - name: Import replay viewer
         run: uv run --no-sync python -c "from minoflux.replay import build_parser; print(build_parser().prog)"
