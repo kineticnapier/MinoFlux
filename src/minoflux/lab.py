@@ -10,9 +10,16 @@ from typing import Any
 from minoflux_ai import (
     CEMConfig,
     DEFAULT_WEIGHTS,
+    FITNESS_PROFILE_ATTACK_SPIN,
+    FITNESS_PROFILE_NAMES,
     HeuristicWeights,
+    PromotionConfig,
     SearchConfig,
+    benchmark_fitness,
+    bootstrap_champion,
+    evaluate_and_promote_model,
     load_weights,
+    resolve_fitness_profile,
     run_heuristic_benchmark,
     save_replay,
     save_weights,
@@ -24,16 +31,37 @@ from .simulation import run_smoke
 
 LATEST_BENCHMARK_REPLAY = Path("data/replays/latest-benchmark.json")
 LATEST_CEM_REPLAY = Path("data/replays/latest-cem.json")
-LATEST_CEM_MODEL = Path("data/models/latest-cem.json")
+CHAMPION_CEM_MODEL = Path("data/models/champion-cem.json")
+CANDIDATE_CEM_MODEL = Path("data/models/candidate-cem.json")
+LEGACY_LATEST_CEM_MODEL = Path("data/models/latest-cem.json")
+MODEL_HISTORY_DIR = Path("data/models/history")
+RECOVERED_ATTACK_MODEL = Path("presets/recovered-attack-20260723.json")
+
+# Kept for compatibility with existing imports/tests. It now means champion.
+LATEST_CEM_MODEL = CHAMPION_CEM_MODEL
 
 MODEL_SOURCE_BUILTIN = "Built-in weights"
-MODEL_SOURCE_LATEST = "Previous latest-cem.json"
+MODEL_SOURCE_LATEST = "Champion model"
+MODEL_SOURCE_RECOVERED = "Recovered attack model (2026-07-23)"
 MODEL_SOURCE_CUSTOM = "Custom model path"
 MODEL_SOURCE_CHOICES = (
-    MODEL_SOURCE_BUILTIN,
     MODEL_SOURCE_LATEST,
+    MODEL_SOURCE_RECOVERED,
+    MODEL_SOURCE_BUILTIN,
     MODEL_SOURCE_CUSTOM,
 )
+
+
+def _bootstrap_champion() -> Path | None:
+    champion = bootstrap_champion(
+        LATEST_CEM_MODEL,
+        recovery_path=RECOVERED_ATTACK_MODEL,
+        legacy_path=LEGACY_LATEST_CEM_MODEL,
+    )
+    if champion is not None:
+        # Keep the old filename as a compatibility alias and overwrite stale models.
+        save_weights(LEGACY_LATEST_CEM_MODEL, load_weights(champion))
+    return champion
 
 
 def _default_model_source() -> str:
@@ -47,6 +75,8 @@ def _load_selected_weights(model_source: str, custom_model_path: str = "") -> tu
 
     if source == MODEL_SOURCE_LATEST:
         model_path = LATEST_CEM_MODEL
+    elif source == MODEL_SOURCE_RECOVERED:
+        model_path = RECOVERED_ATTACK_MODEL
     elif source == MODEL_SOURCE_CUSTOM:
         value = str(custom_model_path or "").strip()
         if not value:
@@ -95,10 +125,12 @@ def run_heuristic_experiment(
     lookahead_pieces: int,
     beam_width: int,
     lookahead_discount: float,
+    fitness_profile: str,
     save: bool,
 ) -> tuple[str, dict[str, Any], str]:
     weights, weight_source = _load_selected_weights(model_source, custom_model_path)
     search_config = _search_config(allow_hold, lookahead_pieces, beam_width, lookahead_discount)
+    profile = resolve_fitness_profile(fitness_profile)
     benchmark = run_heuristic_benchmark(
         max(1, int(games)),
         max(1, int(max_pieces)),
@@ -111,13 +143,15 @@ def run_heuristic_experiment(
     result = benchmark.to_dict()
     result["weights"] = weights.to_dict()
     result["weightSource"] = weight_source
+    result["fitnessProfile"] = profile.to_dict()
+    result["fitness"] = benchmark_fitness(benchmark, profile)
     replay_path = ""
     if benchmark.best_replay is not None:
         replay_path = str(save_replay(LATEST_BENCHMARK_REPLAY, benchmark.best_replay).resolve())
     status = (
-        f"Completed with `{weight_source}` and search `{search_config.to_dict()}`. Best replay: `{replay_path}`"
+        f"Completed with `{weight_source}`; fitness {result['fitness']:.3f}; best replay `{replay_path}`"
         if replay_path
-        else f"Completed with `{weight_source}` without a replay."
+        else f"Completed with `{weight_source}`; fitness {result['fitness']:.3f}."
     )
     if save:
         config = {
@@ -128,6 +162,7 @@ def run_heuristic_experiment(
             "weights": weights.to_dict(),
             "weightSource": weight_source,
             "searchConfig": search_config.to_dict(),
+            "fitnessProfile": profile.to_dict(),
         }
         run = RunStore().create("heuristic-benchmark", config)
         if benchmark.best_replay is not None:
@@ -138,11 +173,15 @@ def run_heuristic_experiment(
             "type": "complete",
             "meanPieces": result["meanPieces"],
             "meanLines": result["meanLines"],
+            "meanAttack": result["meanAttack"],
+            "meanSpins": result["meanSpins"],
+            "meanSpinLines": result["meanSpinLines"],
+            "fitness": result["fitness"],
             "topouts": result["topouts"],
             "weightSource": weight_source,
             "searchConfig": search_config.to_dict(),
         })
-        status = f"Saved to `{run.path}` using `{weight_source}` and search `{search_config.to_dict()}`"
+        status = f"Saved to `{run.path}` using `{weight_source}`; fitness {result['fitness']:.3f}"
     result["bestReplayPath"] = replay_path
     return status, result, replay_path
 
@@ -168,10 +207,17 @@ def run_cem_experiment(
     lookahead_pieces: int,
     beam_width: int,
     lookahead_discount: float,
+    fitness_profile: str,
+    promotion_games: int,
+    promotion_max_pieces: int,
+    minimum_fitness_gain: float,
+    max_completion_loss: int,
     save: bool,
 ) -> tuple[str, dict[str, Any], str, str]:
+    _bootstrap_champion()
     initial_weights, weight_source = _load_selected_weights(model_source, custom_model_path)
     search_config = _search_config(allow_hold, lookahead_pieces, beam_width, lookahead_discount)
+    profile = resolve_fitness_profile(fitness_profile)
     config = CEMConfig(
         generations=int(generations),
         population=int(population),
@@ -191,6 +237,7 @@ def run_cem_experiment(
         lookahead_pieces=search_config.lookahead_pieces,
         beam_width=search_config.beam_width,
         lookahead_discount=search_config.discount,
+        fitness_profile=profile.name,
     ).normalized()
     run = (
         RunStore().create(
@@ -200,6 +247,7 @@ def run_cem_experiment(
                 "initialWeights": initial_weights.to_dict(),
                 "initialWeightSource": weight_source,
                 "searchConfig": search_config.to_dict(),
+                "fitnessProfile": profile.to_dict(),
             },
         )
         if save
@@ -212,23 +260,43 @@ def run_cem_experiment(
 
     trained = train_cem(config, initial_weights, on_generation)
     elapsed = trained.elapsed_seconds
-    model_path = save_weights(LATEST_CEM_MODEL, trained.best_weights).resolve()
     replay_path = ""
     if trained.validation.best_replay is not None:
         replay_path = str(save_replay(LATEST_CEM_REPLAY, trained.validation.best_replay).resolve())
+
+    promotion_config = PromotionConfig(
+        games=int(promotion_games),
+        max_pieces=int(promotion_max_pieces),
+        seed_base=int(seed_base) + 2_000_033,
+        seed_step=97,
+        minimum_fitness_gain=float(minimum_fitness_gain),
+        max_completion_loss=int(max_completion_loss),
+        workers=0,
+    )
+    promotion = evaluate_and_promote_model(
+        trained.best_weights,
+        search_config,
+        champion_path=LATEST_CEM_MODEL,
+        candidate_path=CANDIDATE_CEM_MODEL,
+        history_dir=MODEL_HISTORY_DIR,
+        compatibility_latest_path=LEGACY_LATEST_CEM_MODEL,
+        fitness_profile=profile,
+        config=promotion_config,
+    )
+    model_path = LATEST_CEM_MODEL if promotion.promoted else CANDIDATE_CEM_MODEL
+
     result = trained.to_dict()
     result["initialWeightSource"] = weight_source
-    result["modelPath"] = str(model_path)
+    result["candidateModelPath"] = str(CANDIDATE_CEM_MODEL.resolve())
+    result["championModelPath"] = str(LATEST_CEM_MODEL.resolve())
+    result["modelPath"] = str(model_path.resolve())
     result["bestReplayPath"] = replay_path
-    status = (
-        f"Completed in {elapsed}s using {trained.workers} worker(s), starting from `{weight_source}`, "
-        f"search `{search_config.to_dict()}`. Model: `{model_path}`"
-    )
+    result["promotion"] = promotion.to_dict()
+
     if run is not None:
-        model_path = save_weights(run.path / "model.json", trained.best_weights).resolve()
+        save_weights(run.path / "candidate_model.json", trained.best_weights)
         if trained.validation.best_replay is not None:
             replay_path = str(save_replay(run.path / "best_validation_replay.json", trained.validation.best_replay).resolve())
-        result["modelPath"] = str(model_path)
         result["bestReplayPath"] = replay_path
         run.save_result(result)
         run.append_metric({
@@ -239,12 +307,16 @@ def run_cem_experiment(
             "elapsedSeconds": trained.elapsed_seconds,
             "initialWeightSource": weight_source,
             "searchConfig": search_config.to_dict(),
+            "fitnessProfile": profile.to_dict(),
+            "promoted": promotion.promoted,
+            "promotionFitnessGain": promotion.fitness_gain,
         })
-        status = (
-            f"Saved to `{run.path}` in {elapsed}s using {trained.workers} worker(s), "
-            f"starting from `{weight_source}`, search `{search_config.to_dict()}`"
-        )
-    return status, result, str(model_path), replay_path
+
+    status = (
+        f"Completed in {elapsed}s. {promotion.reason} "
+        f"Candidate: `{CANDIDATE_CEM_MODEL}`; champion: `{LATEST_CEM_MODEL}`"
+    )
+    return status, result, str(model_path.resolve()), replay_path
 
 
 def launch_game() -> str:
@@ -266,24 +338,25 @@ def build_app():
     except ImportError as error:
         raise RuntimeError("Gradio is not installed. Run: uv sync --extra ui") from error
 
+    _bootstrap_champion()
     default_model_source = _default_model_source()
-    latest_model_note = (
-        f"Previous model found at `{LATEST_CEM_MODEL}`; it is selected by default."
-        if default_model_source == MODEL_SOURCE_LATEST
-        else f"No previous model exists at `{LATEST_CEM_MODEL}`; built-in weights are selected."
+    champion_note = (
+        f"Champion: `{LATEST_CEM_MODEL}`. A new CEM result replaces it only after winning a separate promotion benchmark."
+        if LATEST_CEM_MODEL.is_file()
+        else "No champion exists yet; the first candidate will be promoted automatically."
     )
 
     with gr.Blocks(title="MinoFlux Lab") as app:
-        gr.Markdown("# MinoFlux Lab\nGame, benchmark, Hold/lookahead beam search, replay, and CEM experiments.")
+        gr.Markdown("# MinoFlux Lab\nGame, attack/Spin training, champion promotion, replay, and beam-search experiments.")
         launch = gr.Button("Launch Pygame")
         launch_status = gr.Markdown()
 
         with gr.Tab("Heuristic benchmark"):
-            gr.Markdown("Benchmarks Hold-aware beam search and records the best game as a replay.")
-            gr.Markdown(latest_model_note)
+            gr.Markdown("Benchmarks a selected model. Attack/Spin fitness is shown directly in the result.")
+            gr.Markdown(champion_note)
             with gr.Row():
-                ai_games = gr.Number(label="Games", value=4, precision=0, minimum=1)
-                ai_max_pieces = gr.Number(label="Max pieces", value=300, precision=0, minimum=1)
+                ai_games = gr.Number(label="Games", value=10, precision=0, minimum=1)
+                ai_max_pieces = gr.Number(label="Max pieces", value=1000, precision=0, minimum=1)
                 ai_seed_base = gr.Number(label="Seed base", value=1, precision=0, minimum=0)
                 ai_seed_step = gr.Number(label="Seed step", value=31, precision=0, minimum=1)
             with gr.Row():
@@ -291,6 +364,9 @@ def build_app():
                     choices=list(MODEL_SOURCE_CHOICES), value=default_model_source, label="Weight model"
                 )
                 ai_custom_model = gr.Textbox(label="Custom model path", placeholder="data/models/example.json")
+                ai_fitness_profile = gr.Dropdown(
+                    choices=list(FITNESS_PROFILE_NAMES), value=FITNESS_PROFILE_ATTACK_SPIN, label="Fitness profile"
+                )
             with gr.Row():
                 ai_hold = gr.Checkbox(label="Allow Hold", value=True)
                 ai_lookahead = gr.Number(label="Future lookahead pieces", value=1, precision=0, minimum=0, maximum=3)
@@ -307,25 +383,25 @@ def build_app():
 
         with gr.Tab("CEM weight training"):
             gr.Markdown(
-                "CEM can train with Hold and beam search. Lookahead makes each candidate much more expensive; "
-                "the default training lookahead is 0."
+                "The default objective prioritizes Attack and Spin lines. Every trained model is saved as a candidate; "
+                "the champion is replaced only when the candidate wins on separate unseen seeds."
             )
-            gr.Markdown(latest_model_note)
+            gr.Markdown(champion_note)
             with gr.Row():
-                cem_generations = gr.Number(label="Generations", value=5, precision=0, minimum=1)
-                cem_population = gr.Number(label="Population", value=12, precision=0, minimum=2)
+                cem_generations = gr.Number(label="Generations", value=10, precision=0, minimum=1)
+                cem_population = gr.Number(label="Population", value=24, precision=0, minimum=2)
                 cem_elite = gr.Number(label="Elite fraction", value=0.25, minimum=0.05, maximum=1.0)
             with gr.Row():
-                cem_games = gr.Number(label="Full games / retained candidate", value=2, precision=0, minimum=1)
-                cem_max_pieces = gr.Number(label="Full max pieces", value=150, precision=0, minimum=1)
-                cem_validation = gr.Number(label="Validation games", value=4, precision=0, minimum=1)
+                cem_games = gr.Number(label="Full games / retained candidate", value=3, precision=0, minimum=1)
+                cem_max_pieces = gr.Number(label="Full max pieces", value=300, precision=0, minimum=1)
+                cem_validation = gr.Number(label="Validation games", value=6, precision=0, minimum=1)
             with gr.Row():
                 cem_workers = gr.Number(label="Worker processes (0 = auto)", value=0, precision=0, minimum=0)
                 cem_screen_games = gr.Number(label="Screen games (0 = off)", value=1, precision=0, minimum=0)
                 cem_screen_pieces = gr.Number(label="Screen max pieces", value=60, precision=0, minimum=0)
                 cem_screen_fraction = gr.Number(label="Fraction kept", value=0.5, minimum=0.05, maximum=1.0)
             with gr.Row():
-                cem_sigma = gr.Number(label="Initial sigma", value=0.35, minimum=0)
+                cem_sigma = gr.Number(label="Initial sigma", value=0.25, minimum=0)
                 cem_learning_rate = gr.Number(label="Learning rate", value=0.7, minimum=0.01, maximum=1.0)
                 cem_seed_base = gr.Number(label="Training seed base", value=1, precision=0)
                 cem_random_seed = gr.Number(label="Sampler seed", value=12345, precision=0)
@@ -336,19 +412,27 @@ def build_app():
                 cem_custom_model = gr.Textbox(
                     label="Custom starting model path", placeholder="data/models/example.json"
                 )
+                cem_fitness_profile = gr.Dropdown(
+                    choices=list(FITNESS_PROFILE_NAMES), value=FITNESS_PROFILE_ATTACK_SPIN, label="Fitness profile"
+                )
             with gr.Row():
                 cem_hold = gr.Checkbox(label="Allow Hold", value=True)
                 cem_lookahead = gr.Number(label="Future lookahead pieces", value=0, precision=0, minimum=0, maximum=3)
                 cem_beam = gr.Number(label="Beam width", value=4, precision=0, minimum=1, maximum=128)
                 cem_discount = gr.Number(label="Lookahead discount", value=0.90, minimum=0, maximum=1)
+            with gr.Row():
+                promotion_games = gr.Number(label="Promotion games", value=10, precision=0, minimum=1)
+                promotion_pieces = gr.Number(label="Promotion max pieces", value=1000, precision=0, minimum=1)
+                promotion_gain = gr.Number(label="Required fitness gain", value=0.0)
+                promotion_completion_loss = gr.Number(label="Max completion loss", value=1, precision=0, minimum=0)
             cem_save = gr.Checkbox(label="Save run files", value=True)
-            cem_run = gr.Button("Train weights", variant="primary")
-            cem_replay = gr.Button("Replay best validation game")
+            cem_run = gr.Button("Train candidate and challenge champion", variant="primary")
+            cem_replay = gr.Button("Replay candidate validation game")
             cem_status = gr.Markdown()
             cem_replay_status = gr.Markdown()
-            cem_result = gr.JSON(label="Training result")
-            cem_model_path = gr.Textbox(label="Model path", interactive=False)
-            cem_replay_path = gr.Textbox(label="Best replay path", interactive=False)
+            cem_result = gr.JSON(label="Training and promotion result")
+            cem_model_path = gr.Textbox(label="Selected model path", interactive=False)
+            cem_replay_path = gr.Textbox(label="Candidate replay path", interactive=False)
 
         with gr.Tab("Random smoke simulation"):
             with gr.Row():
@@ -367,7 +451,7 @@ def build_app():
                 ai_games, ai_max_pieces, ai_seed_base, ai_seed_step,
                 ai_model_source, ai_custom_model,
                 ai_hold, ai_lookahead, ai_beam, ai_discount,
-                ai_save,
+                ai_fitness_profile, ai_save,
             ],
             outputs=[ai_status, ai_result, ai_replay_path],
         )
@@ -381,6 +465,8 @@ def build_app():
                 cem_workers, cem_screen_games, cem_screen_pieces, cem_screen_fraction,
                 cem_model_source, cem_custom_model,
                 cem_hold, cem_lookahead, cem_beam, cem_discount,
+                cem_fitness_profile,
+                promotion_games, promotion_pieces, promotion_gain, promotion_completion_loss,
                 cem_save,
             ],
             outputs=[cem_status, cem_result, cem_model_path, cem_replay_path],
