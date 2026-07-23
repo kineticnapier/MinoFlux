@@ -7,23 +7,11 @@ from heapq import nlargest
 
 from minoflux_engine import Game, LockResult, Placement
 
-from .heuristic import (
-    DEFAULT_WEIGHTS,
-    HeuristicWeights,
-    PlacementEvaluation,
-    rank_placements,
-)
+from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights, PlacementEvaluation, rank_placements
+from .reachability import reachable_placements
 
 
 class _PreviewBag:
-    """Stateless filler used only by bounded search clones.
-
-    Game keeps seven queued pieces. Search looks ahead by at most three future
-    placements, so pieces appended while simulating cannot become current within
-    the search horizon. Avoiding Random.getstate/setstate makes every child clone
-    substantially cheaper while preserving the exact visible search sequence.
-    """
-
     __slots__ = ()
 
     def pop(self) -> str:
@@ -34,8 +22,6 @@ _PREVIEW_BAG = _PreviewBag()
 
 
 def clone_game(game: Game) -> Game:
-    """Clone the state needed by bounded Hold/lookahead search."""
-
     cloned = copy(game)
     cloned.board = [row.copy() for row in game.board]
     cloned.queue = deque(game.queue)
@@ -45,16 +31,13 @@ def clone_game(game: Game) -> Game:
 
 @dataclass(frozen=True, slots=True)
 class SearchConfig:
-    """Configuration for Hold-aware beam search.
-
-    ``lookahead_pieces`` counts future pieces beyond the current placement:
-    0 is greedy one-ply search, 1 considers the next piece, and so on.
-    """
-
     allow_hold: bool = True
     lookahead_pieces: int = 1
     beam_width: int = 4
     discount: float = 0.90
+    srs_reachable: bool = True
+    allow_180: bool = False
+    reachability_node_limit: int = 8_000
 
     def normalized(self) -> "SearchConfig":
         return SearchConfig(
@@ -62,6 +45,9 @@ class SearchConfig:
             lookahead_pieces=min(3, max(0, int(self.lookahead_pieces))),
             beam_width=min(128, max(1, int(self.beam_width))),
             discount=min(1.0, max(0.0, float(self.discount))),
+            srs_reachable=bool(self.srs_reachable),
+            allow_180=bool(self.allow_180),
+            reachability_node_limit=min(50_000, max(100, int(self.reachability_node_limit))),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -69,7 +55,12 @@ class SearchConfig:
 
 
 DEFAULT_SEARCH_CONFIG = SearchConfig()
-DIRECT_SEARCH_CONFIG = SearchConfig(allow_hold=False, lookahead_pieces=0, beam_width=1)
+DIRECT_SEARCH_CONFIG = SearchConfig(
+    allow_hold=False,
+    lookahead_pieces=0,
+    beam_width=1,
+    srs_reachable=False,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +75,9 @@ class SearchAction:
             "x": self.placement.x,
             "y": self.placement.y,
             "rotation": self.placement.rotation,
+            "path": list(self.placement.path),
+            "lastMoveWasRotation": self.placement.last_move_was_rotation,
+            "rotationKickIndex": self.placement.rotation_kick_index,
         }
 
 
@@ -103,17 +97,28 @@ class _BeamNode:
     first_evaluation: PlacementEvaluation
 
 
-def _candidate_key(item: tuple[SearchAction, PlacementEvaluation]) -> tuple[float, int, int, int, int, int, int]:
+def _candidate_key(item: tuple[SearchAction, PlacementEvaluation]) -> tuple[float, int, int, int, int, int, int, int]:
     action, evaluation = item
     features = evaluation.features
     return (
         evaluation.score,
         features.attack,
+        features.spin_lines,
         features.lines,
         -features.board.holes,
         -features.board.max_height,
         -int(action.use_hold),
         -action.placement.rotation * 100 - action.placement.x,
+    )
+
+
+def _placements_for_game(game: Game, config: SearchConfig) -> tuple[Placement, ...]:
+    if not config.srs_reachable:
+        return game.legal_placements()
+    return reachable_placements(
+        game,
+        allow_180=config.allow_180,
+        max_nodes=config.reachability_node_limit,
     )
 
 
@@ -124,21 +129,31 @@ def rank_search_actions(
     *,
     limit: int | None = None,
 ) -> tuple[tuple[SearchAction, PlacementEvaluation], ...]:
-    """Rank direct and optional Hold placements, optionally returning only top K."""
-
     cfg = config.normalized()
     branch_limit = None if limit is None else max(1, int(limit))
+    direct_placements = _placements_for_game(game, cfg)
     candidates: list[tuple[SearchAction, PlacementEvaluation]] = [
         (SearchAction(False, evaluation.placement), evaluation)
-        for evaluation in rank_placements(game, weights, limit=branch_limit)
+        for evaluation in rank_placements(
+            game,
+            weights,
+            placements=direct_placements,
+            limit=branch_limit,
+        )
     ]
 
     if cfg.allow_hold and not game.hold_used and not game.game_over:
         held = clone_game(game)
         if held.hold():
+            held_placements = _placements_for_game(held, cfg)
             candidates.extend(
                 (SearchAction(True, evaluation.placement), evaluation)
-                for evaluation in rank_placements(held, weights, limit=branch_limit)
+                for evaluation in rank_placements(
+                    held,
+                    weights,
+                    placements=held_placements,
+                    limit=branch_limit,
+                )
             )
 
     if limit is not None:
@@ -152,8 +167,6 @@ def rank_search_actions(
 
 
 def apply_search_action(game: Game, action: SearchAction) -> LockResult:
-    """Apply a selected Hold/placement action to a real or simulated game."""
-
     if action.use_hold and not game.hold():
         raise ValueError("Search action requested an unavailable Hold")
     if game.current != action.placement.piece:
@@ -180,13 +193,6 @@ def choose_search_action(
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
     config: SearchConfig = DEFAULT_SEARCH_CONFIG,
 ) -> SearchChoice | None:
-    """Choose an action with Hold-aware discounted beam search.
-
-    Greedy search avoids child-game copies. Deeper search requests only the top
-    ``beam_width`` candidates at each node instead of sorting and retaining every
-    legal placement.
-    """
-
     cfg = config.normalized()
     root_limit = 1 if cfg.lookahead_pieces == 0 else cfg.beam_width
     ranked_root = rank_search_actions(game, weights, cfg, limit=root_limit)
