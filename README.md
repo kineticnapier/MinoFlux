@@ -2,12 +2,12 @@
 
 A pure-Python tetromino game and AI learning laboratory.
 
-MinoFlux uses one shared rule engine: the Pygame client, headless simulations, search agents, replay viewer, and CEM trainer all call `minoflux_engine.Game` directly. The rules are Tetris-like rather than a strict Guideline clone.
+MinoFlux uses one shared rule engine: the Pygame clients, headless simulations, search agents, replay viewer, versus mode, and CEM trainer all call `minoflux_engine.Game` directly. The rules are Tetris-like rather than a strict Guideline clone.
 
 ## Included
 
 - dependency-free 10×20 game engine with four hidden rows
-- deterministic 7-bag, Hold, CW/CCW/180 rotation, lock delay, combo, B2B, and attack
+- deterministic 7-bag, Hold, CW/CCW/180 rotation, lock delay, combo, attack, and TETR.IO-style B2B Charging
 - exact 90-degree SRS kick tables and project-specific 180-degree kicks
 - configurable DAS, ARR, soft-drop speed, and key bindings
 - SRS-reachable action generation with recorded movement and rotation paths
@@ -16,7 +16,8 @@ MinoFlux uses one shared rule engine: the Pygame client, headless simulations, s
 - parallel fixed-seed benchmarks and deterministic JSON replays
 - CEM weight training with worker processes and candidate screening
 - Attack/T-spin-oriented fitness and champion-versus-candidate model promotion
-- Pygame game/replay clients and a Gradio experiment lab
+- local player-versus-AI mode with garbage cancellation and asynchronous AI search
+- Pygame game/replay/versus clients and a Gradio experiment lab
 
 ## Windows
 
@@ -24,6 +25,7 @@ Install `uv`, clone the repository, then run:
 
 ```text
 start-game.bat
+start-versus.bat
 start-lab.bat
 ```
 
@@ -34,11 +36,79 @@ Manual setup:
 ```powershell
 uv sync --extra ui --extra dev
 uv run --no-sync minoflux-lab
+uv run --no-sync minoflux-versus --ai-pps 1.0
 ```
+
+## B2B Charging
+
+The multiplayer attack engine follows the standard TETR.IO B2B Charging shape:
+
+- the first difficult clear activates B2B at displayed `x0`
+- each later difficult clear gives the attack `+1` and increments the displayed chain
+- at `B2B x4`, Surge starts at 4 lines
+- each further B2B level increases Surge by one
+- a no-clear placement preserves B2B and the stored Surge
+- a non-difficult line clear breaks B2B and releases Surge
+- Surge is split into three ordered packets; early packets receive any remainder
+- an All Clear preserves/starts B2B and adds exactly two displayed levels
+
+Examples:
+
+```text
+Surge 4 -> 2, 1, 1
+Surge 5 -> 2, 2, 1
+Surge 8 -> 3, 3, 2
+```
+
+`LockResult.attack_packets` keeps the normal attack and the three Surge segments separate. Versus cancellation and garbage-hole selection therefore happen per attack packet rather than after combining everything into one number.
+
+## Versus AI
+
+Launch with:
+
+```text
+start-versus.bat
+```
+
+or:
+
+```powershell
+uv run minoflux-versus `
+  --ai-pps 1.0 `
+  --ai-lookahead 0 `
+  --ai-beam 2 `
+  --garbage-cap 8
+```
+
+Both player panels use the same layout:
+
+```text
+[HOLD] [BOARD] [NEXT]
+```
+
+The AI uses the champion model when available, then the recovered attack model, then built-in weights. Its search runs on a worker thread so player input and rendering continue while SRS paths are evaluated.
+
+Controls:
+
+```text
+Your configured game bindings   move / rotate / Hold / hard drop
+[ and ]                         lower / raise AI PPS by 0.1
+Pause binding                   pause
+Restart binding                 new round
+Esc                             quit
+```
+
+Garbage behavior:
+
+- outgoing attack cancels the sender's queued garbage first
+- uncanceled packet remnants are queued on the opponent
+- separate packets use separate garbage holes
+- a line clear blocks queued garbage for that placement
+- a no-clear placement accepts up to the configured garbage cap
 
 ## SRS reachability
 
-Search now starts from the real spawn position and explores:
+Search starts from the real spawn position and explores:
 
 ```text
 left / right
@@ -104,7 +174,7 @@ SRS route enumeration is substantially more expensive than the old direct-drop g
 
 ## Exact T-spin classification
 
-A T-spin now requires:
+A T-spin requires:
 
 - the final successful manipulation to be a rotation
 - at least three occupied pivot corners
@@ -127,7 +197,7 @@ The previous broad All-spin approximation was removed from AI statistics. Result
 
 The default `attack_spin` profile rewards:
 
-- Attack
+- Attack, including released Surge
 - exact T-spin Singles
 - exact T-spin Doubles
 - exact T-spin Triples
@@ -143,10 +213,10 @@ CEM does not overwrite the main model unconditionally.
 
 ```text
 training result
-→ data/models/candidate-cem.json
-→ promotion benchmark on separate unseen seeds
-→ winner replaces data/models/champion-cem.json
-→ rejected candidates remain in data/models/history/
+-> data/models/candidate-cem.json
+-> promotion benchmark on separate unseen seeds
+-> winner replaces data/models/champion-cem.json
+-> rejected candidates remain in data/models/history/
 ```
 
 The promotion check compares candidate and champion on identical seeds and rejects candidates that lose more completed games than the configured safety limit.
@@ -179,7 +249,7 @@ uv run minoflux train-cem `
   --promotion-max-pieces 1000
 ```
 
-Training defaults to no future lookahead because SRS enumeration is already more expensive than direct-drop evaluation. Start with shorter runs after upgrading because all old weights were learned under a different action space and spin definition.
+Training defaults to no future lookahead because SRS enumeration is already more expensive than direct-drop evaluation. Models from before version 0.9.0 were trained without Surge valuation, so a new candidate should be trained before judging B2B release strategy.
 
 Use `--no-promote` for an experimental run that should only save a candidate.
 
@@ -195,26 +265,16 @@ New replays use `minoflux_replay_v3`. Each placement records:
 - exact T-spin event
 - line clear, Attack, score, and perfect clear
 
-The loader remains compatible with v1 and v2 files, but exact strict validation is used only for v3.
+The loader remains compatible with v1 and v2 files, but exact strict validation is used only for v3. Old replays may produce different Attack totals after B2B Charging was added.
 
 ```powershell
 uv run minoflux replay data/replays/best.json
 ```
 
-Controls:
-
-```text
-Space          pause / resume
-Left / Right   previous / next placement
-Up / Down      playback speed
-Home / End     first / final state
-Esc            quit
-```
-
 ## Recommended next steps
 
-1. Add transposition caching for deeper SRS beam search.
-2. Add lock-delay-aware route feasibility for timing-sensitive placements.
-3. Train new greedy, Hold, and lookahead champions under exact T-spin rules.
-4. Add garbage and versus-state evaluation.
+1. Add versus-aware AI features for pending garbage, cancellation, and opponent pressure.
+2. Add transposition caching for deeper SRS beam search.
+3. Add lock-delay-aware route feasibility for timing-sensitive placements.
+4. Train separate greedy, Hold, lookahead, and versus champions.
 5. Then add imitation learning or reinforcement learning.
