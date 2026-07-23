@@ -28,6 +28,11 @@ class FitnessProfile:
     attack: float
     spins: float
     spin_lines: float
+    t_spin_minis: float
+    t_spin_mini_singles: float
+    t_spin_singles: float
+    t_spin_doubles: float
+    t_spin_triples: float
     perfect_clears: float
     completion_bonus: float
     topout_penalty: float
@@ -43,6 +48,11 @@ BALANCED_FITNESS = FitnessProfile(
     attack=4.0,
     spins=0.0,
     spin_lines=0.0,
+    t_spin_minis=0.0,
+    t_spin_mini_singles=0.0,
+    t_spin_singles=0.0,
+    t_spin_doubles=0.0,
+    t_spin_triples=0.0,
     perfect_clears=0.0,
     completion_bonus=0.25,
     topout_penalty=0.10,
@@ -53,8 +63,13 @@ ATTACK_SPIN_FITNESS = FitnessProfile(
     pieces=0.35,
     lines=0.50,
     attack=8.0,
-    spins=2.0,
-    spin_lines=12.0,
+    spins=0.0,
+    spin_lines=1.0,
+    t_spin_minis=0.25,
+    t_spin_mini_singles=1.0,
+    t_spin_singles=4.0,
+    t_spin_doubles=12.0,
+    t_spin_triples=20.0,
     perfect_clears=24.0,
     completion_bonus=0.15,
     topout_penalty=0.25,
@@ -98,6 +113,9 @@ class CEMConfig:
     lookahead_pieces: int = 0
     beam_width: int = 4
     lookahead_discount: float = 0.90
+    srs_reachable: bool = True
+    allow_180: bool = False
+    reachability_node_limit: int = 8_000
     fitness_profile: str = FITNESS_PROFILE_ATTACK_SPIN
 
     def normalized(self) -> "CEMConfig":
@@ -124,6 +142,9 @@ class CEMConfig:
             lookahead_pieces=search.lookahead_pieces,
             beam_width=search.beam_width,
             lookahead_discount=search.discount,
+            srs_reachable=search.srs_reachable,
+            allow_180=search.allow_180,
+            reachability_node_limit=search.reachability_node_limit,
             fitness_profile=profile.name,
         )
 
@@ -133,6 +154,9 @@ class CEMConfig:
             lookahead_pieces=self.lookahead_pieces,
             beam_width=self.beam_width,
             discount=self.lookahead_discount,
+            srs_reachable=self.srs_reachable,
+            allow_180=self.allow_180,
+            reachability_node_limit=self.reachability_node_limit,
         ).normalized()
 
     def resolved_workers(self) -> int:
@@ -205,6 +229,11 @@ def benchmark_fitness(
         + result.mean_attack * cfg.attack
         + result.mean_spins * cfg.spins
         + result.mean_spin_lines * cfg.spin_lines
+        + result.mean_t_spin_minis * cfg.t_spin_minis
+        + result.mean_t_spin_mini_singles * cfg.t_spin_mini_singles
+        + result.mean_t_spin_singles * cfg.t_spin_singles
+        + result.mean_t_spin_doubles * cfg.t_spin_doubles
+        + result.mean_t_spin_triples * cfg.t_spin_triples
         + result.mean_perfect_clears * cfg.perfect_clears
         + completion_bonus
         - topout_penalty
@@ -223,7 +252,15 @@ def _weights_key(weights: HeuristicWeights) -> tuple[float, ...]:
 
 def _search_key(config: SearchConfig) -> tuple[object, ...]:
     cfg = config.normalized()
-    return cfg.allow_hold, cfg.lookahead_pieces, cfg.beam_width, cfg.discount
+    return (
+        cfg.allow_hold,
+        cfg.lookahead_pieces,
+        cfg.beam_width,
+        cfg.discount,
+        cfg.srs_reachable,
+        cfg.allow_180,
+        cfg.reachability_node_limit,
+    )
 
 
 def _evaluate_candidate_task(
@@ -270,10 +307,9 @@ def _score_candidates(
         for candidate in unique_missing
     ]
     if tasks:
-        if executor is None:
-            scores = map(_evaluate_candidate_task, tasks)
-        else:
-            scores = executor.map(_evaluate_candidate_task, tasks, chunksize=1)
+        scores = map(_evaluate_candidate_task, tasks) if executor is None else executor.map(
+            _evaluate_candidate_task, tasks, chunksize=1
+        )
         for key, score in zip(missing_keys, scores):
             cache[key] = score
 
@@ -321,10 +357,7 @@ def train_cem(
             generation_started = perf_counter()
             population: list[HeuristicWeights] = [_candidate_from_values(initial_weights, mean)]
             while len(population) < cfg.population:
-                sampled = {
-                    name: rng.gauss(mean[name], sigma[name])
-                    for name in TRAINABLE_WEIGHT_NAMES
-                }
+                sampled = {name: rng.gauss(mean[name], sigma[name]) for name in TRAINABLE_WEIGHT_NAMES}
                 population.append(_candidate_from_values(initial_weights, sampled))
 
             elite_count = max(1, min(cfg.population, ceil(cfg.population * cfg.elite_fraction)))
