@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import asdict, dataclass, field
+from multiprocessing import current_process
+import os
 
 from minoflux_engine import Game
 
@@ -32,6 +35,7 @@ class BenchmarkResult:
     seed_base: int
     seed_step: int
     search_config: SearchConfig
+    workers: int = field(compare=False)
     pieces: int
     mean_pieces: float
     lines: int
@@ -51,6 +55,7 @@ class BenchmarkResult:
             "seedBase": self.seed_base,
             "seedStep": self.seed_step,
             "searchConfig": self.search_config.to_dict(),
+            "workers": self.workers,
             "pieces": self.pieces,
             "meanPieces": self.mean_pieces,
             "lines": self.lines,
@@ -173,6 +178,26 @@ def _best_game_key(game: BenchmarkGame) -> tuple[int, int, int, int, int]:
     return game.pieces, game.lines, game.attack, game.score, -game.seed
 
 
+def _resolve_benchmark_workers(requested: int, games: int) -> int:
+    count = max(1, int(games))
+    value = int(requested)
+    if value > 0:
+        return min(count, value)
+    # Candidate benchmarks already run inside CEM worker processes. Never create
+    # a nested pool there, even when an API caller explicitly requests auto mode.
+    if current_process().name != "MainProcess":
+        return 1
+    available = max(1, (os.cpu_count() or 1) - 1)
+    return min(count, available)
+
+
+def _run_game_task(
+    task: tuple[int, int, HeuristicWeights, SearchConfig],
+) -> BenchmarkGame:
+    seed, max_pieces, weights, search_config = task
+    return run_heuristic_game(seed, max_pieces, weights, search_config)
+
+
 def run_heuristic_benchmark(
     games: int = 8,
     max_pieces: int = 500,
@@ -181,21 +206,27 @@ def run_heuristic_benchmark(
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
     search_config: SearchConfig = DEFAULT_SEARCH_CONFIG,
     *,
+    workers: int | None = None,
     record_best_replay: bool = False,
 ) -> BenchmarkResult:
     count = max(1, int(games))
     limit = max(1, int(max_pieces))
     step = int(seed_step)
     cfg = search_config.normalized()
-    results = tuple(
-        run_heuristic_game(
-            int(seed_base) + index * step,
-            limit,
-            weights,
-            cfg,
-        )
+    # Interactive benchmark/replay calls default to auto parallelism. Internal
+    # fitness calls omit replay recording and stay serial unless workers is set.
+    requested_workers = (0 if record_best_replay else 1) if workers is None else int(workers)
+    resolved_workers = _resolve_benchmark_workers(requested_workers, count)
+    tasks = [
+        (int(seed_base) + index * step, limit, weights, cfg)
         for index in range(count)
-    )
+    ]
+    if resolved_workers > 1:
+        with ProcessPoolExecutor(max_workers=resolved_workers) as executor:
+            results = tuple(executor.map(_run_game_task, tasks, chunksize=1))
+    else:
+        results = tuple(map(_run_game_task, tasks))
+
     pieces = sum(item.pieces for item in results)
     lines = sum(item.lines for item in results)
     attack = sum(item.attack for item in results)
@@ -216,6 +247,7 @@ def run_heuristic_benchmark(
         seed_base=int(seed_base),
         seed_step=step,
         search_config=cfg,
+        workers=resolved_workers,
         pieces=pieces,
         mean_pieces=pieces / count,
         lines=lines,
