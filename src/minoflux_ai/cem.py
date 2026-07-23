@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, fields
 from math import ceil
+import os
 import random
 from statistics import fmean, pstdev
+from time import perf_counter
 from typing import Callable
 
 from .benchmark import BenchmarkResult, run_heuristic_benchmark
@@ -26,6 +29,10 @@ class CEMConfig:
     learning_rate: float = 0.7
     minimum_sigma: float = 0.01
     random_seed: int = 12345
+    workers: int = 0
+    screen_games: int = 1
+    screen_max_pieces: int = 60
+    screen_fraction: float = 0.5
 
     def normalized(self) -> "CEMConfig":
         return CEMConfig(
@@ -41,6 +48,23 @@ class CEMConfig:
             learning_rate=min(1.0, max(0.01, float(self.learning_rate))),
             minimum_sigma=max(1e-6, float(self.minimum_sigma)),
             random_seed=int(self.random_seed),
+            workers=max(0, int(self.workers)),
+            screen_games=max(0, int(self.screen_games)),
+            screen_max_pieces=max(0, int(self.screen_max_pieces)),
+            screen_fraction=min(1.0, max(0.05, float(self.screen_fraction))),
+        )
+
+    def resolved_workers(self) -> int:
+        if self.workers > 0:
+            return min(self.population, self.workers)
+        available = max(1, (os.cpu_count() or 1) - 1)
+        return min(self.population, available)
+
+    def screening_enabled(self) -> bool:
+        return (
+            self.screen_games > 0
+            and self.screen_max_pieces > 0
+            and self.screen_fraction < 1.0
         )
 
 
@@ -52,6 +76,9 @@ class CEMGeneration:
     elite_mean_fitness: float
     best_weights: dict[str, float]
     sigma: dict[str, float]
+    evaluated_candidates: int
+    screened_out_candidates: int
+    elapsed_seconds: float
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -65,10 +92,14 @@ class CEMResult:
     validation_fitness: float
     validation: BenchmarkResult
     history: tuple[CEMGeneration, ...]
+    workers: int
+    elapsed_seconds: float
 
     def to_dict(self) -> dict[str, object]:
         return {
             "config": asdict(self.config),
+            "workers": self.workers,
+            "elapsedSeconds": self.elapsed_seconds,
             "bestWeights": self.best_weights.to_dict(),
             "bestTrainingFitness": self.best_training_fitness,
             "validationFitness": self.validation_fitness,
@@ -95,12 +126,73 @@ def _candidate_from_values(base: HeuristicWeights, values: dict[str, float]) -> 
     return HeuristicWeights.from_mapping(merged)
 
 
+def _weights_key(weights: HeuristicWeights) -> tuple[float, ...]:
+    return tuple(getattr(weights, name) for name in TRAINABLE_WEIGHT_NAMES)
+
+
+def _evaluate_candidate_task(
+    task: tuple[HeuristicWeights, int, int, int, int],
+) -> float:
+    weights, games, max_pieces, seed_base, seed_step = task
+    benchmark = run_heuristic_benchmark(
+        games,
+        max_pieces,
+        seed_base,
+        seed_step,
+        weights,
+    )
+    return benchmark_fitness(benchmark)
+
+
+def _score_candidates(
+    candidates: list[HeuristicWeights],
+    *,
+    games: int,
+    max_pieces: int,
+    seed_base: int,
+    seed_step: int,
+    executor: ProcessPoolExecutor | None,
+    cache: dict[tuple[object, ...], float],
+) -> list[tuple[float, HeuristicWeights]]:
+    unique_missing: list[HeuristicWeights] = []
+    missing_keys: list[tuple[object, ...]] = []
+    seen_missing: set[tuple[object, ...]] = set()
+    for candidate in candidates:
+        key = (games, max_pieces, seed_base, seed_step, *_weights_key(candidate))
+        if key not in cache and key not in seen_missing:
+            unique_missing.append(candidate)
+            missing_keys.append(key)
+            seen_missing.add(key)
+
+    tasks = [
+        (candidate, games, max_pieces, seed_base, seed_step)
+        for candidate in unique_missing
+    ]
+    if tasks:
+        if executor is None:
+            scores = map(_evaluate_candidate_task, tasks)
+        else:
+            scores = executor.map(_evaluate_candidate_task, tasks, chunksize=1)
+        for key, score in zip(missing_keys, scores):
+            cache[key] = score
+
+    return [
+        (
+            cache[(games, max_pieces, seed_base, seed_step, *_weights_key(candidate))],
+            candidate,
+        )
+        for candidate in candidates
+    ]
+
+
 def train_cem(
     config: CEMConfig = CEMConfig(),
     initial_weights: HeuristicWeights = DEFAULT_WEIGHTS,
     on_generation: Callable[[CEMGeneration], None] | None = None,
 ) -> CEMResult:
+    started = perf_counter()
     cfg = config.normalized()
+    workers = cfg.resolved_workers()
     rng = random.Random(cfg.random_seed)
     mean = {name: getattr(initial_weights, name) for name in TRAINABLE_WEIGHT_NAMES}
     sigma = {
@@ -117,56 +209,84 @@ def train_cem(
     )
     best_fitness = benchmark_fitness(baseline)
     history: list[CEMGeneration] = []
+    cache: dict[tuple[object, ...], float] = {}
+    executor = ProcessPoolExecutor(max_workers=workers) if workers > 1 else None
 
-    for generation_index in range(cfg.generations):
-        population: list[HeuristicWeights] = [_candidate_from_values(initial_weights, mean)]
-        while len(population) < cfg.population:
-            sampled = {
-                name: rng.gauss(mean[name], sigma[name])
-                for name in TRAINABLE_WEIGHT_NAMES
-            }
-            population.append(_candidate_from_values(initial_weights, sampled))
+    try:
+        for generation_index in range(cfg.generations):
+            generation_started = perf_counter()
+            population: list[HeuristicWeights] = [_candidate_from_values(initial_weights, mean)]
+            while len(population) < cfg.population:
+                sampled = {
+                    name: rng.gauss(mean[name], sigma[name])
+                    for name in TRAINABLE_WEIGHT_NAMES
+                }
+                population.append(_candidate_from_values(initial_weights, sampled))
 
-        scored: list[tuple[float, HeuristicWeights]] = []
-        for candidate in population:
-            benchmark = run_heuristic_benchmark(
-                cfg.games_per_candidate,
-                cfg.max_pieces,
-                cfg.seed_base,
-                cfg.seed_step,
-                candidate,
+            elite_count = max(1, min(cfg.population, ceil(cfg.population * cfg.elite_fraction)))
+            screened_out = 0
+            selected = population
+            if cfg.screening_enabled() and len(population) > elite_count:
+                screen_scores = _score_candidates(
+                    population,
+                    games=cfg.screen_games,
+                    max_pieces=min(cfg.max_pieces, cfg.screen_max_pieces),
+                    seed_base=cfg.seed_base,
+                    seed_step=cfg.seed_step,
+                    executor=executor,
+                    cache=cache,
+                )
+                screen_scores.sort(key=lambda item: item[0], reverse=True)
+                keep_count = max(elite_count, ceil(cfg.population * cfg.screen_fraction))
+                selected = [candidate for _, candidate in screen_scores[:keep_count]]
+                screened_out = len(population) - len(selected)
+
+            scored = _score_candidates(
+                selected,
+                games=cfg.games_per_candidate,
+                max_pieces=cfg.max_pieces,
+                seed_base=cfg.seed_base,
+                seed_step=cfg.seed_step,
+                executor=executor,
+                cache=cache,
             )
-            scored.append((benchmark_fitness(benchmark), candidate))
-        scored.sort(key=lambda item: item[0], reverse=True)
+            scored.sort(key=lambda item: item[0], reverse=True)
+            elites = scored[:elite_count]
+            if scored[0][0] > best_fitness:
+                best_fitness, best_weights = scored[0]
 
-        elite_count = max(1, min(cfg.population, ceil(cfg.population * cfg.elite_fraction)))
-        elites = scored[:elite_count]
-        if scored[0][0] > best_fitness:
-            best_fitness, best_weights = scored[0]
+            elite_means: dict[str, float] = {}
+            elite_sigmas: dict[str, float] = {}
+            for name in TRAINABLE_WEIGHT_NAMES:
+                values = [getattr(candidate, name) for _, candidate in elites]
+                elite_means[name] = fmean(values)
+                elite_sigmas[name] = max(
+                    cfg.minimum_sigma,
+                    pstdev(values) if len(values) > 1 else sigma[name] * 0.5,
+                )
 
-        elite_means: dict[str, float] = {}
-        elite_sigmas: dict[str, float] = {}
-        for name in TRAINABLE_WEIGHT_NAMES:
-            values = [getattr(candidate, name) for _, candidate in elites]
-            elite_means[name] = fmean(values)
-            elite_sigmas[name] = max(cfg.minimum_sigma, pstdev(values) if len(values) > 1 else sigma[name] * 0.5)
+            for name in TRAINABLE_WEIGHT_NAMES:
+                mean[name] += (elite_means[name] - mean[name]) * cfg.learning_rate
+                sigma[name] += (elite_sigmas[name] - sigma[name]) * cfg.learning_rate
+                sigma[name] = max(cfg.minimum_sigma, sigma[name])
 
-        for name in TRAINABLE_WEIGHT_NAMES:
-            mean[name] += (elite_means[name] - mean[name]) * cfg.learning_rate
-            sigma[name] += (elite_sigmas[name] - sigma[name]) * cfg.learning_rate
-            sigma[name] = max(cfg.minimum_sigma, sigma[name])
-
-        generation = CEMGeneration(
-            generation=generation_index + 1,
-            best_fitness=scored[0][0],
-            mean_fitness=fmean(score for score, _ in scored),
-            elite_mean_fitness=fmean(score for score, _ in elites),
-            best_weights=scored[0][1].to_dict(),
-            sigma=dict(sigma),
-        )
-        history.append(generation)
-        if on_generation is not None:
-            on_generation(generation)
+            generation = CEMGeneration(
+                generation=generation_index + 1,
+                best_fitness=scored[0][0],
+                mean_fitness=fmean(score for score, _ in scored),
+                elite_mean_fitness=fmean(score for score, _ in elites),
+                best_weights=scored[0][1].to_dict(),
+                sigma=dict(sigma),
+                evaluated_candidates=len(scored),
+                screened_out_candidates=screened_out,
+                elapsed_seconds=round(perf_counter() - generation_started, 3),
+            )
+            history.append(generation)
+            if on_generation is not None:
+                on_generation(generation)
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=False)
 
     validation_seed_base = cfg.seed_base + 1_000_003
     validation = run_heuristic_benchmark(
@@ -184,4 +304,6 @@ def train_cem(
         validation_fitness=benchmark_fitness(validation),
         validation=validation,
         history=tuple(history),
+        workers=workers,
+        elapsed_seconds=round(perf_counter() - started, 3),
     )
