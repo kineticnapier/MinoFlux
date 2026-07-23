@@ -1,0 +1,26 @@
+name: Python CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        python-version: ["3.13", "3.14"]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package and game dependencies
+        run: python -m pip install -e ".[game,dev]"
+      - name: Verify pygame-ce import
+        run: python -c "import pygame; print(pygame.version.ver)"
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Run headless smoke simulation
+        run: python -m minoflux smoke --games 2 --max-pieces 30
