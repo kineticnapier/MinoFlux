@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from copy import copy
 from dataclasses import asdict, dataclass
-import random
+from heapq import nlargest
 
 from minoflux_engine import Game, LockResult, Placement
 
@@ -15,17 +15,31 @@ from .heuristic import (
 )
 
 
+class _PreviewBag:
+    """Stateless filler used only by bounded search clones.
+
+    Game keeps seven queued pieces. Search looks ahead by at most three future
+    placements, so pieces appended while simulating cannot become current within
+    the search horizon. Avoiding Random.getstate/setstate makes every child clone
+    substantially cheaper while preserving the exact visible search sequence.
+    """
+
+    __slots__ = ()
+
+    def pop(self) -> str:
+        return "T"
+
+
+_PREVIEW_BAG = _PreviewBag()
+
+
 def clone_game(game: Game) -> Game:
-    """Clone engine state without recursively copying immutable shape tables."""
+    """Clone the state needed by bounded Hold/lookahead search."""
 
     cloned = copy(game)
     cloned.board = [row.copy() for row in game.board]
     cloned.queue = deque(game.queue)
-    cloned._bag = copy(game._bag)
-    cloned._bag._queue = deque(game._bag._queue)
-    cloned_rng = random.Random()
-    cloned_rng.setstate(game._bag._rng.getstate())
-    cloned._bag._rng = cloned_rng
+    cloned._bag = _PREVIEW_BAG
     return cloned
 
 
@@ -107,13 +121,16 @@ def rank_search_actions(
     game: Game,
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
     config: SearchConfig = DEFAULT_SEARCH_CONFIG,
+    *,
+    limit: int | None = None,
 ) -> tuple[tuple[SearchAction, PlacementEvaluation], ...]:
-    """Rank legal direct placements and optional Hold placements."""
+    """Rank direct and optional Hold placements, optionally returning only top K."""
 
     cfg = config.normalized()
+    branch_limit = None if limit is None else max(1, int(limit))
     candidates: list[tuple[SearchAction, PlacementEvaluation]] = [
         (SearchAction(False, evaluation.placement), evaluation)
-        for evaluation in rank_placements(game, weights)
+        for evaluation in rank_placements(game, weights, limit=branch_limit)
     ]
 
     if cfg.allow_hold and not game.hold_used and not game.game_over:
@@ -121,9 +138,15 @@ def rank_search_actions(
         if held.hold():
             candidates.extend(
                 (SearchAction(True, evaluation.placement), evaluation)
-                for evaluation in rank_placements(held, weights)
+                for evaluation in rank_placements(held, weights, limit=branch_limit)
             )
 
+    if limit is not None:
+        count = max(0, int(limit))
+        if count == 0:
+            return ()
+        if count < len(candidates):
+            return tuple(nlargest(count, candidates, key=_candidate_key))
     candidates.sort(key=_candidate_key, reverse=True)
     return tuple(candidates)
 
@@ -159,13 +182,14 @@ def choose_search_action(
 ) -> SearchChoice | None:
     """Choose an action with Hold-aware discounted beam search.
 
-    Greedy search (lookahead 0) avoids child-game copies. Deeper search keeps
-    only ``beam_width`` states after each ply, making one-piece lookahead much
-    cheaper than exhaustive two-ply search.
+    Greedy search avoids child-game copies. Deeper search requests only the top
+    ``beam_width`` candidates at each node instead of sorting and retaining every
+    legal placement.
     """
 
     cfg = config.normalized()
-    ranked_root = rank_search_actions(game, weights, cfg)
+    root_limit = 1 if cfg.lookahead_pieces == 0 else cfg.beam_width
+    ranked_root = rank_search_actions(game, weights, cfg, limit=root_limit)
     if not ranked_root:
         return None
 
@@ -174,7 +198,7 @@ def choose_search_action(
         return SearchChoice(action, evaluation.score, evaluation, (action,))
 
     frontier: list[_BeamNode] = []
-    for action, evaluation in ranked_root[: cfg.beam_width]:
+    for action, evaluation in ranked_root:
         child = clone_game(game)
         apply_search_action(child, action)
         frontier.append(
@@ -188,27 +212,36 @@ def choose_search_action(
     frontier.sort(key=_node_key, reverse=True)
     frontier = frontier[: cfg.beam_width]
 
-    for _ in range(cfg.lookahead_pieces):
+    for depth in range(1, cfg.lookahead_pieces + 1):
         expanded: list[_BeamNode] = []
+        future_weight = cfg.discount ** depth
         for node in frontier:
             if node.game.game_over:
                 expanded.append(node)
                 continue
-            for action, evaluation in rank_search_actions(node.game, weights, cfg)[: cfg.beam_width]:
+            for action, evaluation in rank_search_actions(
+                node.game,
+                weights,
+                cfg,
+                limit=cfg.beam_width,
+            ):
                 child = clone_game(node.game)
                 apply_search_action(child, action)
                 expanded.append(
                     _BeamNode(
                         game=child,
-                        score=node.score * (1.0 - cfg.discount) + evaluation.score * cfg.discount,
+                        score=node.score + future_weight * evaluation.score,
                         path=(*node.path, action),
                         first_evaluation=node.first_evaluation,
                     )
                 )
         if not expanded:
             break
-        expanded.sort(key=_node_key, reverse=True)
-        frontier = expanded[: cfg.beam_width]
+        if len(expanded) > cfg.beam_width:
+            frontier = nlargest(cfg.beam_width, expanded, key=_node_key)
+        else:
+            expanded.sort(key=_node_key, reverse=True)
+            frontier = expanded
 
     best = max(frontier, key=_node_key)
     return SearchChoice(
