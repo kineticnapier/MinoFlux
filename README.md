@@ -2,7 +2,7 @@
 
 A pure-Python tetromino game and AI learning laboratory.
 
-MinoFlux starts with one deliberately shared rule engine: the Pygame client, headless simulations, search agents, and future reinforcement-learning environments all use `minoflux_engine.Game` directly. The rules are Tetris-like rather than a strict Guideline clone.
+MinoFlux uses one shared rule engine: the Pygame client, headless simulations, search agents, and future reinforcement-learning environments all call `minoflux_engine.Game` directly. The rules are Tetris-like rather than a strict Guideline clone.
 
 ## Included
 
@@ -10,6 +10,9 @@ MinoFlux starts with one deliberately shared rule engine: the Pygame client, hea
 - 10×20 visible board with four hidden rows
 - deterministic 7-bag randomizer
 - movement, soft/hard drop, hold, CW/CCW/180 rotation
+- configurable DAS, ARR, and soft-drop speed
+- frame-rate-independent held-key repeat
+- in-game key rebinding
 - simple wall and floor kicks
 - line clears, combo, B2B, attack, and approximate spin detection
 - direct legal-placement actions for search and reinforcement learning
@@ -19,38 +22,67 @@ MinoFlux starts with one deliberately shared rule engine: the Pygame client, hea
 
 ## Windows
 
+Install `uv`, clone the repository, then run:
+
 ```text
 start-game.bat
 start-lab.bat
 ```
 
+The launchers use `uv sync` and `uv run`; they do not invoke `pip` directly.
+
 ## Manual setup
 
 ```powershell
-py -3 -m venv .venv
-.venv\Scripts\python -m pip install -e ".[ui]"
-.venv\Scripts\python -m minoflux.game
+uv sync --extra game
+uv run --no-sync minoflux-game
+```
+
+Lab:
+
+```powershell
+uv sync --extra ui
+uv run --no-sync minoflux-lab
 ```
 
 Headless commands:
 
 ```powershell
-.venv\Scripts\python -m minoflux info
-.venv\Scripts\python -m minoflux smoke --games 4 --max-pieces 200 --save
+uv run minoflux info
+uv run minoflux smoke --games 4 --max-pieces 200 --save
 ```
 
-## Controls
+## Input settings
+
+Press `F1` while playing.
+
+- Up / Down: select a setting
+- Left / Right: adjust DAS, ARR, or SDS
+- Enter: rebind the selected action, then press the new key
+- Backspace: restore all defaults
+- F1 / Esc: save and close
+
+Handling values:
+
+- **DAS**: delay before horizontal auto-repeat starts
+- **ARR**: delay between repeated horizontal moves; `0` moves instantly to the wall after DAS
+- **SDS**: delay per soft-drop cell; `0` moves instantly to the floor without locking
+
+Settings are stored at `~/.minoflux/settings.json`. Set `MINOFLUX_SETTINGS` to use another path.
+
+Default bindings:
 
 ```text
 Left / Right     move
 Down             soft drop
 Z                rotate counter-clockwise
-X / Up           rotate clockwise
+X                rotate clockwise
 A                rotate 180 degrees
-C / Shift        hold
+C                hold
 Space            hard drop
 P                pause
 R                restart
+F1               settings
 Esc              quit
 ```
 
@@ -68,10 +100,10 @@ placements = game.legal_placements()
 result = game.place(placements[0])
 ```
 
-## Planned learning layers
+## Recommended next steps
 
-1. Board features and a hand-written placement heuristic.
-2. CEM implemented entirely in Python.
-3. Vectorized placement environments and action masks.
-4. Imitation datasets from heuristic or search agents.
-5. Neural value models and reinforcement learning.
+1. Add lock delay and move-reset limits.
+2. Replace the approximate rotation system with exact SRS kick tables.
+3. Add configurable gravity, 20G behavior, and level progression.
+4. Add replay recording and deterministic playback.
+5. Then add board features and a baseline placement heuristic before CEM or reinforcement learning.
