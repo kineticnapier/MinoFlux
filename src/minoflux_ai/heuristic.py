@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
+from heapq import nlargest
 import json
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -209,9 +210,23 @@ def evaluate_placement(
     )
 
 
+def _placement_key(item: PlacementEvaluation) -> tuple[float, int, int, int, int, int, int]:
+    return (
+        item.score,
+        item.features.attack,
+        item.features.lines,
+        -item.features.board.holes,
+        -item.features.board.max_height,
+        -item.placement.rotation,
+        -item.placement.x,
+    )
+
+
 def rank_placements(
     game: Game,
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
+    *,
+    limit: int | None = None,
 ) -> tuple[PlacementEvaluation, ...]:
     before = extract_board_features(game.board)
     evaluated = [
@@ -223,18 +238,13 @@ def rank_placements(
         for placement in game.legal_placements()
         for features in (_placement_features_fast(game, placement, before),)
     ]
-    evaluated.sort(
-        key=lambda item: (
-            item.score,
-            item.features.attack,
-            item.features.lines,
-            -item.features.board.holes,
-            -item.features.board.max_height,
-            -item.placement.rotation,
-            -item.placement.x,
-        ),
-        reverse=True,
-    )
+    if limit is not None:
+        count = max(0, int(limit))
+        if count == 0:
+            return ()
+        if count < len(evaluated):
+            return tuple(nlargest(count, evaluated, key=_placement_key))
+    evaluated.sort(key=_placement_key, reverse=True)
     return tuple(evaluated)
 
 
@@ -242,7 +252,7 @@ def choose_placement(
     game: Game,
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
 ) -> PlacementEvaluation | None:
-    ranked = rank_placements(game, weights)
+    ranked = rank_placements(game, weights, limit=1)
     return ranked[0] if ranked else None
 
 
