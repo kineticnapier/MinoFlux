@@ -49,10 +49,52 @@ SHAPES: dict[str, tuple[tuple[tuple[int, int], ...], ...]] = {
     ),
 }
 
-KICK_TESTS: tuple[tuple[int, int], ...] = (
-    (0, 0), (-1, 0), (1, 0), (-2, 0), (2, 0),
-    (0, -1), (-1, -1), (1, -1), (0, -2),
+# Super Rotation System kick data. The original SRS tables use positive Y
+# upward; this engine uses positive Y downward, so every Y offset is inverted.
+JLSTZ_KICK_TABLE: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {
+    (0, 1): ((0, 0), (-1, 0), (-1, -1), (0, 2), (-1, 2)),
+    (1, 0): ((0, 0), (1, 0), (1, 1), (0, -2), (1, -2)),
+    (1, 2): ((0, 0), (1, 0), (1, 1), (0, -2), (1, -2)),
+    (2, 1): ((0, 0), (-1, 0), (-1, -1), (0, 2), (-1, 2)),
+    (2, 3): ((0, 0), (1, 0), (1, -1), (0, 2), (1, 2)),
+    (3, 2): ((0, 0), (-1, 0), (-1, 1), (0, -2), (-1, -2)),
+    (3, 0): ((0, 0), (-1, 0), (-1, 1), (0, -2), (-1, -2)),
+    (0, 3): ((0, 0), (1, 0), (1, -1), (0, 2), (1, 2)),
+}
+
+I_KICK_TABLE: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {
+    (0, 1): ((0, 0), (-2, 0), (1, 0), (-2, 1), (1, -2)),
+    (1, 0): ((0, 0), (2, 0), (-1, 0), (2, -1), (-1, 2)),
+    (1, 2): ((0, 0), (-1, 0), (2, 0), (-1, -2), (2, 1)),
+    (2, 1): ((0, 0), (1, 0), (-2, 0), (1, 2), (-2, -1)),
+    (2, 3): ((0, 0), (2, 0), (-1, 0), (2, -1), (-1, 2)),
+    (3, 2): ((0, 0), (-2, 0), (1, 0), (-2, 1), (1, -2)),
+    (3, 0): ((0, 0), (1, 0), (-2, 0), (1, 2), (-2, -1)),
+    (0, 3): ((0, 0), (-1, 0), (2, 0), (-1, -2), (2, 1)),
+}
+
+# SRS does not define 180-degree kicks. MinoFlux keeps a small, explicit
+# project-specific table for its 180-degree action.
+ROTATION_180_KICKS: tuple[tuple[int, int], ...] = (
+    (0, 0),
+    (0, -1),
+    (1, 0),
+    (-1, 0),
+    (0, 1),
 )
+
+
+def kick_tests(piece: str, from_rotation: int, to_rotation: int) -> tuple[tuple[int, int], ...]:
+    source = from_rotation % 4
+    target = to_rotation % 4
+    if piece == "O":
+        return ((0, 0),)
+    if (target - source) % 4 == 2:
+        return ROTATION_180_KICKS
+    table = I_KICK_TABLE if piece == "I" else JLSTZ_KICK_TABLE
+    return table[(source, target)]
+
+
 LINE_SCORES = {0: 0, 1: 100, 2: 300, 3: 500, 4: 800}
 LINE_ATTACK = {0: 0, 1: 0, 2: 1, 3: 2, 4: 4}
 
