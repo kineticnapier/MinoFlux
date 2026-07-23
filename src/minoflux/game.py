@@ -163,15 +163,21 @@ def main() -> None:
     rebinding: str | None = None
     gravity_interval = 0.75
     last_gravity = time.monotonic()
+    last_frame = last_gravity
 
     while running:
         now = time.monotonic()
+        delta_ms = max(0.0, (now - last_frame) * 1000.0)
+        last_frame = now
+        skip_lock_advance = False
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
                 continue
             if event.type == pygame.WINDOWFOCUSLOST:
                 handling.clear()
+                skip_lock_advance = True
                 continue
 
             if event.type == pygame.KEYDOWN:
@@ -219,6 +225,7 @@ def main() -> None:
                 if event.key == pygame.K_F1:
                     settings_open = True
                     handling.clear()
+                    skip_lock_advance = True
                     continue
                 if event.key == pygame.K_ESCAPE:
                     running = False
@@ -231,10 +238,12 @@ def main() -> None:
                     game.paused = False
                     handling.clear()
                     last_gravity = now
+                    skip_lock_advance = True
                 elif action == "pause":
                     paused = not paused
                     game.paused = paused
                     handling.clear()
+                    skip_lock_advance = True
                 elif not paused and not game.game_over:
                     if action == "left":
                         game.move_left()
@@ -252,9 +261,12 @@ def main() -> None:
                     elif action == "rotate_180":
                         game.rotate_180()
                     elif action == "hold":
-                        game.hold()
+                        if game.hold():
+                            skip_lock_advance = True
+                            last_gravity = now
                     elif action == "hard_drop":
                         game.hard_drop()
+                        skip_lock_advance = True
                         last_gravity = now
 
             elif event.type == pygame.KEYUP:
@@ -276,8 +288,11 @@ def main() -> None:
             if now - last_gravity >= gravity_interval:
                 game.gravity_step()
                 last_gravity = now
+            if not skip_lock_advance:
+                game.advance_time(delta_ms)
         else:
             last_gravity = now
+            last_frame = now
 
         screen.fill(palette.background)
         pygame.draw.rect(
@@ -329,14 +344,16 @@ def main() -> None:
             f"Pieces {game.pieces_placed}",
             f"Combo {max(0, game.combo)}",
             f"B2B {'ON' if game.back_to_back else 'OFF'}",
+            f"Lock {int(game.lock_elapsed_ms)}/{int(game.lock_delay_ms)}",
+            f"Resets {game.lock_resets}/{game.lock_reset_limit}",
             f"DAS {settings.das_ms}",
             f"ARR {settings.arr_ms}",
             f"SDS {settings.soft_drop_ms}",
         ]
         for index, line in enumerate(stats):
-            screen.blit(small.render(line, True, palette.text), (30, 230 + index * 27))
+            screen.blit(small.render(line, True, palette.text), (30, 210 + index * 25))
 
-        controls = "F1 settings    held movement enabled"
+        controls = "F1 settings    SRS + lock delay enabled"
         screen.blit(small.render(controls, True, palette.text), (24, 650))
         if paused or game.game_over:
             label = "PAUSED" if paused else "GAME OVER — restart key"
