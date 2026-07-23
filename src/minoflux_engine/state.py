@@ -26,6 +26,10 @@ class LockResult:
     combo: int
     back_to_back: bool
     game_over: bool
+    b2b_chain: int = 0
+    surge_charge: int = 0
+    surge_released: int = 0
+    attack_packets: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +48,8 @@ class GameSnapshot:
     attack: int
     combo: int
     back_to_back: bool
+    b2b_chain: int
+    surge_charge: int
     pieces_placed: int
     game_over: bool
     paused: bool
