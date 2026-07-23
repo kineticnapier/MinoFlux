@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minoflux"
-version = "0.3.0"
+version = "0.4.0"
 description = "Pure-Python tetromino game and AI learning laboratory"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,7 @@ dev = ["pytest>=8,<10"]
 minoflux = "minoflux.cli:main"
 minoflux-game = "minoflux.game:main"
 minoflux-lab = "minoflux.lab:main"
+minoflux-replay = "minoflux.replay:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
