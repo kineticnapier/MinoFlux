@@ -10,6 +10,11 @@ class Placement:
     y: int
     rotation: int
     cells: tuple[tuple[int, int], ...]
+    path: tuple[str, ...] = ()
+    last_move_was_rotation: bool = False
+    rotation_kick_index: int | None = None
+    rotation_from: int | None = None
+    rotation_to: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
