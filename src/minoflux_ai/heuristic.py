@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 from minoflux_engine import Game, Placement
+from minoflux_engine.b2b import resolve_b2b_charging
 from minoflux_engine.spin import base_attack, classify_t_spin, is_difficult_clear, t_spin_event
 
 from .features import BoardFeatures, extract_board_features
@@ -125,9 +126,14 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
     spin = t_spin_event(spin_kind, lines)
     perfect_clear = all(cell is None for row in board for cell in row)
     difficult = is_difficult_clear(lines, spin)
-    attack = base_attack(lines, spin)
-    if difficult and game.back_to_back:
-        attack += 1
+    b2b = resolve_b2b_charging(
+        active=game.back_to_back,
+        chain=game.b2b_chain,
+        difficult=difficult,
+        lines=lines,
+        perfect_clear=perfect_clear and lines > 0,
+    )
+    attack = base_attack(lines, spin) + b2b.attack_bonus + b2b.released
     combo = game.combo + 1 if lines else -1
     if lines and combo > 0:
         attack += min(4, combo // 2 + 1)
