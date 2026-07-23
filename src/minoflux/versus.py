@@ -12,9 +12,9 @@ from minoflux_ai import (
     SearchConfig,
     apply_search_action,
     choose_search_action,
-    clone_game,
     load_weights,
 )
+from minoflux_ai.search import clone_game
 from minoflux_engine import Game, HIDDEN_ROWS, LockResult, VersusMatch, VersusSide
 from minoflux_engine.pieces import SHAPES
 
