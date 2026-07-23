@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from math import ceil
 import os
 import random
@@ -11,6 +11,7 @@ from typing import Callable
 
 from .benchmark import BenchmarkResult, run_heuristic_benchmark
 from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights
+from .search import SearchConfig
 
 TRAINABLE_WEIGHT_NAMES = tuple(item.name for item in fields(HeuristicWeights) if item.name != "game_over")
 
@@ -33,8 +34,13 @@ class CEMConfig:
     screen_games: int = 1
     screen_max_pieces: int = 60
     screen_fraction: float = 0.5
+    allow_hold: bool = True
+    lookahead_pieces: int = 0
+    beam_width: int = 4
+    lookahead_discount: float = 0.90
 
     def normalized(self) -> "CEMConfig":
+        search = self.search_config()
         return CEMConfig(
             generations=max(1, int(self.generations)),
             population=max(2, int(self.population)),
@@ -52,7 +58,19 @@ class CEMConfig:
             screen_games=max(0, int(self.screen_games)),
             screen_max_pieces=max(0, int(self.screen_max_pieces)),
             screen_fraction=min(1.0, max(0.05, float(self.screen_fraction))),
+            allow_hold=search.allow_hold,
+            lookahead_pieces=search.lookahead_pieces,
+            beam_width=search.beam_width,
+            lookahead_discount=search.discount,
         )
+
+    def search_config(self) -> SearchConfig:
+        return SearchConfig(
+            allow_hold=self.allow_hold,
+            lookahead_pieces=self.lookahead_pieces,
+            beam_width=self.beam_width,
+            discount=self.lookahead_discount,
+        ).normalized()
 
     def resolved_workers(self) -> int:
         if self.workers > 0:
@@ -78,7 +96,7 @@ class CEMGeneration:
     sigma: dict[str, float]
     evaluated_candidates: int
     screened_out_candidates: int
-    elapsed_seconds: float
+    elapsed_seconds: float = field(compare=False)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -93,11 +111,12 @@ class CEMResult:
     validation: BenchmarkResult
     history: tuple[CEMGeneration, ...]
     workers: int
-    elapsed_seconds: float
+    elapsed_seconds: float = field(compare=False)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "config": asdict(self.config),
+            "searchConfig": self.config.search_config().to_dict(),
             "workers": self.workers,
             "elapsedSeconds": self.elapsed_seconds,
             "bestWeights": self.best_weights.to_dict(),
@@ -130,16 +149,22 @@ def _weights_key(weights: HeuristicWeights) -> tuple[float, ...]:
     return tuple(getattr(weights, name) for name in TRAINABLE_WEIGHT_NAMES)
 
 
+def _search_key(config: SearchConfig) -> tuple[object, ...]:
+    cfg = config.normalized()
+    return cfg.allow_hold, cfg.lookahead_pieces, cfg.beam_width, cfg.discount
+
+
 def _evaluate_candidate_task(
-    task: tuple[HeuristicWeights, int, int, int, int],
+    task: tuple[HeuristicWeights, int, int, int, int, SearchConfig],
 ) -> float:
-    weights, games, max_pieces, seed_base, seed_step = task
+    weights, games, max_pieces, seed_base, seed_step, search_config = task
     benchmark = run_heuristic_benchmark(
         games,
         max_pieces,
         seed_base,
         seed_step,
         weights,
+        search_config,
     )
     return benchmark_fitness(benchmark)
 
@@ -151,21 +176,23 @@ def _score_candidates(
     max_pieces: int,
     seed_base: int,
     seed_step: int,
+    search_config: SearchConfig,
     executor: ProcessPoolExecutor | None,
     cache: dict[tuple[object, ...], float],
 ) -> list[tuple[float, HeuristicWeights]]:
     unique_missing: list[HeuristicWeights] = []
     missing_keys: list[tuple[object, ...]] = []
     seen_missing: set[tuple[object, ...]] = set()
+    search_key = _search_key(search_config)
     for candidate in candidates:
-        key = (games, max_pieces, seed_base, seed_step, *_weights_key(candidate))
+        key = (games, max_pieces, seed_base, seed_step, *search_key, *_weights_key(candidate))
         if key not in cache and key not in seen_missing:
             unique_missing.append(candidate)
             missing_keys.append(key)
             seen_missing.add(key)
 
     tasks = [
-        (candidate, games, max_pieces, seed_base, seed_step)
+        (candidate, games, max_pieces, seed_base, seed_step, search_config)
         for candidate in unique_missing
     ]
     if tasks:
@@ -178,7 +205,7 @@ def _score_candidates(
 
     return [
         (
-            cache[(games, max_pieces, seed_base, seed_step, *_weights_key(candidate))],
+            cache[(games, max_pieces, seed_base, seed_step, *search_key, *_weights_key(candidate))],
             candidate,
         )
         for candidate in candidates
@@ -192,6 +219,7 @@ def train_cem(
 ) -> CEMResult:
     started = perf_counter()
     cfg = config.normalized()
+    search_config = cfg.search_config()
     workers = cfg.resolved_workers()
     rng = random.Random(cfg.random_seed)
     mean = {name: getattr(initial_weights, name) for name in TRAINABLE_WEIGHT_NAMES}
@@ -206,6 +234,7 @@ def train_cem(
         cfg.seed_base,
         cfg.seed_step,
         initial_weights,
+        search_config,
     )
     best_fitness = benchmark_fitness(baseline)
     history: list[CEMGeneration] = []
@@ -233,6 +262,7 @@ def train_cem(
                     max_pieces=min(cfg.max_pieces, cfg.screen_max_pieces),
                     seed_base=cfg.seed_base,
                     seed_step=cfg.seed_step,
+                    search_config=search_config,
                     executor=executor,
                     cache=cache,
                 )
@@ -247,6 +277,7 @@ def train_cem(
                 max_pieces=cfg.max_pieces,
                 seed_base=cfg.seed_base,
                 seed_step=cfg.seed_step,
+                search_config=search_config,
                 executor=executor,
                 cache=cache,
             )
@@ -295,6 +326,7 @@ def train_cem(
         validation_seed_base,
         cfg.seed_step,
         best_weights,
+        search_config,
         record_best_replay=True,
     )
     return CEMResult(
