@@ -72,19 +72,25 @@ def _draw_board(pygame, screen, game: Game, replay: Replay, step_index: int, int
     for index, piece in enumerate(list(game.queue)[:5]):
         _draw_piece_preview(pygame, screen, piece, (520, 75 + index * 88), 20)
 
-    holds = sum(step.hold for step in replay.steps[:step_index])
+    shown_steps = replay.steps[:step_index]
+    holds = sum(step.hold for step in shown_steps)
+    spins = sum(step.spin is not None for step in shown_steps)
+    spin_lines = sum(step.lines for step in shown_steps if step.spin is not None)
+    perfect_clears = sum(step.perfect_clear for step in shown_steps)
     stats = [
         f"Replay {step_index}/{len(replay.steps)}",
         f"Seed {replay.seed}",
         f"Score {game.score}",
         f"Lines {game.lines}",
         f"Attack {game.attack}",
+        f"Spins {spins} ({spin_lines} lines)",
+        f"Perfect clears {perfect_clears}",
         f"Holds {holds}",
         f"Speed {interval_ms} ms",
         "DONE" if step_index >= len(replay.steps) else ("PAUSED" if paused else "PLAYING"),
     ]
     for index, line in enumerate(stats):
-        screen.blit(small.render(line, True, palette.text), (30, 225 + index * 28))
+        screen.blit(small.render(line, True, palette.text), (20, 205 + index * 27))
 
     controls = "Space pause  Left/Right step  Up/Down speed  Home/End  Esc quit"
     screen.blit(small.render(controls, True, palette.text), (20, 650))
