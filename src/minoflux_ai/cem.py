@@ -15,6 +15,66 @@ from .search import SearchConfig
 
 TRAINABLE_WEIGHT_NAMES = tuple(item.name for item in fields(HeuristicWeights) if item.name != "game_over")
 
+FITNESS_PROFILE_BALANCED = "balanced"
+FITNESS_PROFILE_ATTACK_SPIN = "attack_spin"
+FITNESS_PROFILE_NAMES = (FITNESS_PROFILE_ATTACK_SPIN, FITNESS_PROFILE_BALANCED)
+
+
+@dataclass(frozen=True, slots=True)
+class FitnessProfile:
+    name: str
+    pieces: float
+    lines: float
+    attack: float
+    spins: float
+    spin_lines: float
+    perfect_clears: float
+    completion_bonus: float
+    topout_penalty: float
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+BALANCED_FITNESS = FitnessProfile(
+    name=FITNESS_PROFILE_BALANCED,
+    pieces=1.0,
+    lines=2.0,
+    attack=4.0,
+    spins=0.0,
+    spin_lines=0.0,
+    perfect_clears=0.0,
+    completion_bonus=0.25,
+    topout_penalty=0.10,
+)
+
+ATTACK_SPIN_FITNESS = FitnessProfile(
+    name=FITNESS_PROFILE_ATTACK_SPIN,
+    pieces=0.35,
+    lines=0.50,
+    attack=8.0,
+    spins=2.0,
+    spin_lines=12.0,
+    perfect_clears=24.0,
+    completion_bonus=0.15,
+    topout_penalty=0.25,
+)
+
+_FITNESS_PROFILES = {
+    BALANCED_FITNESS.name: BALANCED_FITNESS,
+    ATTACK_SPIN_FITNESS.name: ATTACK_SPIN_FITNESS,
+}
+
+
+def resolve_fitness_profile(value: str | FitnessProfile = FITNESS_PROFILE_ATTACK_SPIN) -> FitnessProfile:
+    if isinstance(value, FitnessProfile):
+        return value
+    name = str(value).strip().lower().replace("-", "_")
+    try:
+        return _FITNESS_PROFILES[name]
+    except KeyError as error:
+        raise ValueError(f"Unknown fitness profile: {value!r}") from error
+
 
 @dataclass(frozen=True, slots=True)
 class CEMConfig:
@@ -38,9 +98,11 @@ class CEMConfig:
     lookahead_pieces: int = 0
     beam_width: int = 4
     lookahead_discount: float = 0.90
+    fitness_profile: str = FITNESS_PROFILE_ATTACK_SPIN
 
     def normalized(self) -> "CEMConfig":
         search = self.search_config()
+        profile = resolve_fitness_profile(self.fitness_profile)
         return CEMConfig(
             generations=max(1, int(self.generations)),
             population=max(2, int(self.population)),
@@ -62,6 +124,7 @@ class CEMConfig:
             lookahead_pieces=search.lookahead_pieces,
             beam_width=search.beam_width,
             lookahead_discount=search.discount,
+            fitness_profile=profile.name,
         )
 
     def search_config(self) -> SearchConfig:
@@ -114,9 +177,11 @@ class CEMResult:
     elapsed_seconds: float = field(compare=False)
 
     def to_dict(self) -> dict[str, object]:
+        profile = resolve_fitness_profile(self.config.fitness_profile)
         return {
             "config": asdict(self.config),
             "searchConfig": self.config.search_config().to_dict(),
+            "fitnessProfile": profile.to_dict(),
             "workers": self.workers,
             "elapsedSeconds": self.elapsed_seconds,
             "bestWeights": self.best_weights.to_dict(),
@@ -127,13 +192,20 @@ class CEMResult:
         }
 
 
-def benchmark_fitness(result: BenchmarkResult) -> float:
-    completion_bonus = (result.completed / result.games) * result.max_pieces * 0.25
-    topout_penalty = (result.topouts / result.games) * result.max_pieces * 0.10
+def benchmark_fitness(
+    result: BenchmarkResult,
+    profile: str | FitnessProfile = FITNESS_PROFILE_ATTACK_SPIN,
+) -> float:
+    cfg = resolve_fitness_profile(profile)
+    completion_bonus = (result.completed / result.games) * result.max_pieces * cfg.completion_bonus
+    topout_penalty = (result.topouts / result.games) * result.max_pieces * cfg.topout_penalty
     return (
-        result.mean_pieces
-        + result.mean_lines * 2.0
-        + result.mean_attack * 4.0
+        result.mean_pieces * cfg.pieces
+        + result.mean_lines * cfg.lines
+        + result.mean_attack * cfg.attack
+        + result.mean_spins * cfg.spins
+        + result.mean_spin_lines * cfg.spin_lines
+        + result.mean_perfect_clears * cfg.perfect_clears
         + completion_bonus
         - topout_penalty
     )
@@ -155,9 +227,9 @@ def _search_key(config: SearchConfig) -> tuple[object, ...]:
 
 
 def _evaluate_candidate_task(
-    task: tuple[HeuristicWeights, int, int, int, int, SearchConfig],
+    task: tuple[HeuristicWeights, int, int, int, int, SearchConfig, str],
 ) -> float:
-    weights, games, max_pieces, seed_base, seed_step, search_config = task
+    weights, games, max_pieces, seed_base, seed_step, search_config, profile_name = task
     benchmark = run_heuristic_benchmark(
         games,
         max_pieces,
@@ -166,7 +238,7 @@ def _evaluate_candidate_task(
         weights,
         search_config,
     )
-    return benchmark_fitness(benchmark)
+    return benchmark_fitness(benchmark, profile_name)
 
 
 def _score_candidates(
@@ -177,6 +249,7 @@ def _score_candidates(
     seed_base: int,
     seed_step: int,
     search_config: SearchConfig,
+    fitness_profile: str,
     executor: ProcessPoolExecutor | None,
     cache: dict[tuple[object, ...], float],
 ) -> list[tuple[float, HeuristicWeights]]:
@@ -184,15 +257,16 @@ def _score_candidates(
     missing_keys: list[tuple[object, ...]] = []
     seen_missing: set[tuple[object, ...]] = set()
     search_key = _search_key(search_config)
+    profile_name = resolve_fitness_profile(fitness_profile).name
     for candidate in candidates:
-        key = (games, max_pieces, seed_base, seed_step, *search_key, *_weights_key(candidate))
+        key = (games, max_pieces, seed_base, seed_step, profile_name, *search_key, *_weights_key(candidate))
         if key not in cache and key not in seen_missing:
             unique_missing.append(candidate)
             missing_keys.append(key)
             seen_missing.add(key)
 
     tasks = [
-        (candidate, games, max_pieces, seed_base, seed_step, search_config)
+        (candidate, games, max_pieces, seed_base, seed_step, search_config, profile_name)
         for candidate in unique_missing
     ]
     if tasks:
@@ -205,7 +279,7 @@ def _score_candidates(
 
     return [
         (
-            cache[(games, max_pieces, seed_base, seed_step, *search_key, *_weights_key(candidate))],
+            cache[(games, max_pieces, seed_base, seed_step, profile_name, *search_key, *_weights_key(candidate))],
             candidate,
         )
         for candidate in candidates
@@ -220,6 +294,7 @@ def train_cem(
     started = perf_counter()
     cfg = config.normalized()
     search_config = cfg.search_config()
+    profile = resolve_fitness_profile(cfg.fitness_profile)
     workers = cfg.resolved_workers()
     rng = random.Random(cfg.random_seed)
     mean = {name: getattr(initial_weights, name) for name in TRAINABLE_WEIGHT_NAMES}
@@ -236,7 +311,7 @@ def train_cem(
         initial_weights,
         search_config,
     )
-    best_fitness = benchmark_fitness(baseline)
+    best_fitness = benchmark_fitness(baseline, profile)
     history: list[CEMGeneration] = []
     cache: dict[tuple[object, ...], float] = {}
     executor = ProcessPoolExecutor(max_workers=workers) if workers > 1 else None
@@ -263,6 +338,7 @@ def train_cem(
                     seed_base=cfg.seed_base,
                     seed_step=cfg.seed_step,
                     search_config=search_config,
+                    fitness_profile=profile.name,
                     executor=executor,
                     cache=cache,
                 )
@@ -278,6 +354,7 @@ def train_cem(
                 seed_base=cfg.seed_base,
                 seed_step=cfg.seed_step,
                 search_config=search_config,
+                fitness_profile=profile.name,
                 executor=executor,
                 cache=cache,
             )
@@ -333,7 +410,7 @@ def train_cem(
         config=cfg,
         best_weights=best_weights,
         best_training_fitness=best_fitness,
-        validation_fitness=benchmark_fitness(validation),
+        validation_fitness=benchmark_fitness(validation, profile),
         validation=validation,
         history=tuple(history),
         workers=workers,
