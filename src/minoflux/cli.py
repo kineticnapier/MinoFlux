@@ -47,7 +47,7 @@ def build_parser() -> ArgumentParser:
     cem.add_argument("--generations", type=int, default=8)
     cem.add_argument("--population", type=int, default=16)
     cem.add_argument("--elite-fraction", type=float, default=0.25)
-    cem.add_argument("--games", type=int, default=3, help="Training games per candidate")
+    cem.add_argument("--games", type=int, default=3, help="Full training games per retained candidate")
     cem.add_argument("--max-pieces", type=int, default=200)
     cem.add_argument("--seed-base", type=int, default=1)
     cem.add_argument("--seed-step", type=int, default=31)
@@ -55,6 +55,10 @@ def build_parser() -> ArgumentParser:
     cem.add_argument("--initial-sigma", type=float, default=0.35)
     cem.add_argument("--learning-rate", type=float, default=0.7)
     cem.add_argument("--random-seed", type=int, default=12345)
+    cem.add_argument("--workers", type=int, default=0, help="Worker processes; 0 uses available CPUs")
+    cem.add_argument("--screen-games", type=int, default=1, help="Short games used to reject weak candidates; 0 disables screening")
+    cem.add_argument("--screen-max-pieces", type=int, default=60)
+    cem.add_argument("--screen-fraction", type=float, default=0.5, help="Fraction retained for full evaluation")
     cem.add_argument("--initial-model", help="Optional starting minoflux_heuristic_v1 model")
     cem.add_argument("--model-out", help="Write the trained heuristic model")
     cem.add_argument("--replay-out", help="Write the best validation game replay")
@@ -79,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
                 "features": "minoflux_ai",
                 "baseline": "heuristic",
                 "trainer": "cem",
+                "acceleration": ["board-only placement simulation", "process workers", "candidate screening"],
                 "modelFormat": "minoflux_heuristic_v1",
                 "replayFormat": "minoflux_replay_v1",
             },
@@ -143,6 +148,10 @@ def main(argv: list[str] | None = None) -> int:
             initial_sigma=args.initial_sigma,
             learning_rate=args.learning_rate,
             random_seed=args.random_seed,
+            workers=args.workers,
+            screen_games=args.screen_games,
+            screen_max_pieces=args.screen_max_pieces,
+            screen_fraction=args.screen_fraction,
         )
         run = RunStore().create("cem-training", {**vars(args), "initialWeights": initial.to_dict()}) if args.save else None
 
@@ -171,12 +180,13 @@ def main(argv: list[str] | None = None) -> int:
                 "type": "complete",
                 "bestTrainingFitness": trained.best_training_fitness,
                 "validationFitness": trained.validation_fitness,
+                "workers": trained.workers,
+                "elapsedSeconds": trained.elapsed_seconds,
             })
             result["runPath"] = str(run.path)
         _print(result)
         return 0
     if args.command == "replay":
         from .replay import play_replay
-
         return play_replay(args.path, args.interval_ms)
     return 1
