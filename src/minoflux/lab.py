@@ -5,12 +5,13 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from time import perf_counter
 from typing import Any
 
 from minoflux_ai import (
     CEMConfig,
     DEFAULT_WEIGHTS,
+    HeuristicWeights,
+    load_weights,
     run_heuristic_benchmark,
     save_replay,
     save_weights,
@@ -23,6 +24,39 @@ from .simulation import run_smoke
 LATEST_BENCHMARK_REPLAY = Path("data/replays/latest-benchmark.json")
 LATEST_CEM_REPLAY = Path("data/replays/latest-cem.json")
 LATEST_CEM_MODEL = Path("data/models/latest-cem.json")
+
+MODEL_SOURCE_BUILTIN = "Built-in weights"
+MODEL_SOURCE_LATEST = "Previous latest-cem.json"
+MODEL_SOURCE_CUSTOM = "Custom model path"
+MODEL_SOURCE_CHOICES = (
+    MODEL_SOURCE_BUILTIN,
+    MODEL_SOURCE_LATEST,
+    MODEL_SOURCE_CUSTOM,
+)
+
+
+def _default_model_source() -> str:
+    return MODEL_SOURCE_LATEST if LATEST_CEM_MODEL.is_file() else MODEL_SOURCE_BUILTIN
+
+
+def _load_selected_weights(model_source: str, custom_model_path: str = "") -> tuple[HeuristicWeights, str]:
+    source = str(model_source or MODEL_SOURCE_BUILTIN)
+    if source == MODEL_SOURCE_BUILTIN:
+        return DEFAULT_WEIGHTS, MODEL_SOURCE_BUILTIN
+
+    if source == MODEL_SOURCE_LATEST:
+        model_path = LATEST_CEM_MODEL
+    elif source == MODEL_SOURCE_CUSTOM:
+        value = str(custom_model_path or "").strip()
+        if not value:
+            raise ValueError("Custom model path is empty.")
+        model_path = Path(value).expanduser()
+    else:
+        raise ValueError(f"Unknown model source: {source!r}")
+
+    if not model_path.is_file():
+        raise ValueError(f"Model file does not exist: {model_path}")
+    return load_weights(model_path), str(model_path.resolve())
 
 
 def run_experiment(games: int, max_pieces: int, seed_base: int, save: bool) -> tuple[str, dict[str, Any]]:
@@ -40,31 +74,38 @@ def run_heuristic_experiment(
     max_pieces: int,
     seed_base: int,
     seed_step: int,
+    model_source: str,
+    custom_model_path: str,
     save: bool,
 ) -> tuple[str, dict[str, Any], str]:
-    started = perf_counter()
+    weights, weight_source = _load_selected_weights(model_source, custom_model_path)
     benchmark = run_heuristic_benchmark(
         max(1, int(games)),
         max(1, int(max_pieces)),
         int(seed_base),
         int(seed_step),
-        DEFAULT_WEIGHTS,
+        weights,
         record_best_replay=True,
     )
     result = benchmark.to_dict()
-    result["weights"] = DEFAULT_WEIGHTS.to_dict()
-    result["elapsedSeconds"] = round(perf_counter() - started, 3)
+    result["weights"] = weights.to_dict()
+    result["weightSource"] = weight_source
     replay_path = ""
     if benchmark.best_replay is not None:
         replay_path = str(save_replay(LATEST_BENCHMARK_REPLAY, benchmark.best_replay).resolve())
-    status = f"Completed. Best replay: `{replay_path}`" if replay_path else "Completed without a replay."
+    status = (
+        f"Completed with `{weight_source}`. Best replay: `{replay_path}`"
+        if replay_path
+        else f"Completed with `{weight_source}` without a replay."
+    )
     if save:
         config = {
             "games": games,
             "maxPieces": max_pieces,
             "seedBase": seed_base,
             "seedStep": seed_step,
-            "weights": DEFAULT_WEIGHTS.to_dict(),
+            "weights": weights.to_dict(),
+            "weightSource": weight_source,
         }
         run = RunStore().create("heuristic-benchmark", config)
         if benchmark.best_replay is not None:
@@ -76,8 +117,9 @@ def run_heuristic_experiment(
             "meanPieces": result["meanPieces"],
             "meanLines": result["meanLines"],
             "topouts": result["topouts"],
+            "weightSource": weight_source,
         })
-        status = f"Saved to `{run.path}`"
+        status = f"Saved to `{run.path}` using `{weight_source}`"
     result["bestReplayPath"] = replay_path
     return status, result, replay_path
 
@@ -97,8 +139,11 @@ def run_cem_experiment(
     screen_games: int,
     screen_max_pieces: int,
     screen_fraction: float,
+    model_source: str,
+    custom_model_path: str,
     save: bool,
 ) -> tuple[str, dict[str, Any], str, str]:
+    initial_weights, weight_source = _load_selected_weights(model_source, custom_model_path)
     config = CEMConfig(
         generations=int(generations),
         population=int(population),
@@ -115,22 +160,37 @@ def run_cem_experiment(
         screen_max_pieces=int(screen_max_pieces),
         screen_fraction=float(screen_fraction),
     ).normalized()
-    run = RunStore().create("cem-training", {"config": asdict(config)}) if save else None
+    run = (
+        RunStore().create(
+            "cem-training",
+            {
+                "config": asdict(config),
+                "initialWeights": initial_weights.to_dict(),
+                "initialWeightSource": weight_source,
+            },
+        )
+        if save
+        else None
+    )
 
     def on_generation(generation) -> None:
         if run is not None:
             run.append_metric({"type": "generation", **generation.to_dict()})
 
-    trained = train_cem(config, DEFAULT_WEIGHTS, on_generation)
+    trained = train_cem(config, initial_weights, on_generation)
     elapsed = trained.elapsed_seconds
     model_path = save_weights(LATEST_CEM_MODEL, trained.best_weights).resolve()
     replay_path = ""
     if trained.validation.best_replay is not None:
         replay_path = str(save_replay(LATEST_CEM_REPLAY, trained.validation.best_replay).resolve())
     result = trained.to_dict()
+    result["initialWeightSource"] = weight_source
     result["modelPath"] = str(model_path)
     result["bestReplayPath"] = replay_path
-    status = f"Completed in {elapsed}s using {trained.workers} worker(s). Model: `{model_path}`"
+    status = (
+        f"Completed in {elapsed}s using {trained.workers} worker(s), "
+        f"starting from `{weight_source}`. Model: `{model_path}`"
+    )
     if run is not None:
         model_path = save_weights(run.path / "model.json", trained.best_weights).resolve()
         if trained.validation.best_replay is not None:
@@ -144,8 +204,12 @@ def run_cem_experiment(
             "validationFitness": trained.validation_fitness,
             "workers": trained.workers,
             "elapsedSeconds": trained.elapsed_seconds,
+            "initialWeightSource": weight_source,
         })
-        status = f"Saved to `{run.path}` in {elapsed}s using {trained.workers} worker(s)"
+        status = (
+            f"Saved to `{run.path}` in {elapsed}s using {trained.workers} worker(s), "
+            f"starting from `{weight_source}`"
+        )
     return status, result, str(model_path), replay_path
 
 
@@ -168,17 +232,35 @@ def build_app():
     except ImportError as error:
         raise RuntimeError("Gradio is not installed. Run: uv sync --extra ui") from error
 
+    default_model_source = _default_model_source()
+    latest_model_note = (
+        f"Previous model found at `{LATEST_CEM_MODEL}`; it is selected by default."
+        if default_model_source == MODEL_SOURCE_LATEST
+        else f"No previous model exists at `{LATEST_CEM_MODEL}`; built-in weights are selected."
+    )
+
     with gr.Blocks(title="MinoFlux Lab") as app:
         gr.Markdown("# MinoFlux Lab\nPure-Python game, benchmark, replay, and CEM learning experiments.")
         launch = gr.Button("Launch Pygame")
         launch_status = gr.Markdown()
         with gr.Tab("Heuristic benchmark"):
             gr.Markdown("Scores every direct-drop legal placement and records the best game as a replay.")
+            gr.Markdown(latest_model_note)
             with gr.Row():
                 ai_games = gr.Number(label="Games", value=4, precision=0, minimum=1)
                 ai_max_pieces = gr.Number(label="Max pieces", value=300, precision=0, minimum=1)
                 ai_seed_base = gr.Number(label="Seed base", value=1, precision=0, minimum=0)
                 ai_seed_step = gr.Number(label="Seed step", value=31, precision=0, minimum=1)
+            with gr.Row():
+                ai_model_source = gr.Radio(
+                    choices=list(MODEL_SOURCE_CHOICES),
+                    value=default_model_source,
+                    label="Weight model",
+                )
+                ai_custom_model = gr.Textbox(
+                    label="Custom model path",
+                    placeholder="data/models/example.json",
+                )
             ai_save = gr.Checkbox(label="Save run files", value=True)
             ai_run = gr.Button("Run heuristic benchmark", variant="primary")
             ai_replay = gr.Button("Replay best game")
@@ -191,6 +273,7 @@ def build_app():
             gr.Markdown(
                 "Uses board-only placement simulation, worker processes, and an optional short screening round before full evaluation."
             )
+            gr.Markdown(latest_model_note)
             with gr.Row():
                 cem_generations = gr.Number(label="Generations", value=5, precision=0, minimum=1)
                 cem_population = gr.Number(label="Population", value=12, precision=0, minimum=2)
@@ -209,6 +292,16 @@ def build_app():
                 cem_learning_rate = gr.Number(label="Learning rate", value=0.7, minimum=0.01, maximum=1.0)
                 cem_seed_base = gr.Number(label="Training seed base", value=1, precision=0)
                 cem_random_seed = gr.Number(label="Sampler seed", value=12345, precision=0)
+            with gr.Row():
+                cem_model_source = gr.Radio(
+                    choices=list(MODEL_SOURCE_CHOICES),
+                    value=default_model_source,
+                    label="Starting weight model",
+                )
+                cem_custom_model = gr.Textbox(
+                    label="Custom starting model path",
+                    placeholder="data/models/example.json",
+                )
             cem_save = gr.Checkbox(label="Save run files", value=True)
             cem_run = gr.Button("Train weights", variant="primary")
             cem_replay = gr.Button("Replay best validation game")
@@ -229,7 +322,15 @@ def build_app():
         launch.click(launch_game, outputs=launch_status)
         ai_run.click(
             run_heuristic_experiment,
-            inputs=[ai_games, ai_max_pieces, ai_seed_base, ai_seed_step, ai_save],
+            inputs=[
+                ai_games,
+                ai_max_pieces,
+                ai_seed_base,
+                ai_seed_step,
+                ai_model_source,
+                ai_custom_model,
+                ai_save,
+            ],
             outputs=[ai_status, ai_result, ai_replay_path],
         )
         ai_replay.click(launch_replay, inputs=ai_replay_path, outputs=ai_replay_status)
@@ -250,6 +351,8 @@ def build_app():
                 cem_screen_games,
                 cem_screen_pieces,
                 cem_screen_fraction,
+                cem_model_source,
+                cem_custom_model,
                 cem_save,
             ],
             outputs=[cem_status, cem_result, cem_model_path, cem_replay_path],
