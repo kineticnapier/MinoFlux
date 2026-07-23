@@ -23,6 +23,9 @@ class BenchmarkGame:
     pieces: int
     lines: int
     attack: int
+    spins: int
+    spin_lines: int
+    perfect_clears: int
     score: int
     topout: bool
     completed: bool
@@ -42,6 +45,12 @@ class BenchmarkResult:
     mean_lines: float
     attack: int
     mean_attack: float
+    spins: int
+    mean_spins: float
+    spin_lines: int
+    mean_spin_lines: float
+    perfect_clears: int
+    mean_perfect_clears: float
     topouts: int
     completed: int
     per_game: tuple[BenchmarkGame, ...]
@@ -62,6 +71,12 @@ class BenchmarkResult:
             "meanLines": self.mean_lines,
             "attack": self.attack,
             "meanAttack": self.mean_attack,
+            "spins": self.spins,
+            "meanSpins": self.mean_spins,
+            "spinLines": self.spin_lines,
+            "meanSpinLines": self.mean_spin_lines,
+            "perfectClears": self.perfect_clears,
+            "meanPerfectClears": self.mean_perfect_clears,
             "topouts": self.topouts,
             "completed": self.completed,
             "bestGame": asdict(self.best_game),
@@ -92,6 +107,9 @@ def _play_heuristic_game(
     cfg = search_config.normalized()
     game = Game(int(seed))
     steps: list[ReplayStep] = []
+    spins = 0
+    spin_lines = 0
+    perfect_clears = 0
     while not game.game_over and game.pieces_placed < limit:
         choice = choose_search_action(game, weights, cfg)
         if choice is None:
@@ -99,6 +117,11 @@ def _play_heuristic_game(
         action = choice.action
         result = apply_search_action(game, action)
         placement = action.placement
+        if result.spin is not None:
+            spins += 1
+            spin_lines += result.lines
+        if result.perfect_clear:
+            perfect_clears += 1
         if record_replay:
             steps.append(
                 ReplayStep(
@@ -112,6 +135,8 @@ def _play_heuristic_game(
                     total_lines=game.lines,
                     total_attack=game.attack,
                     hold=action.use_hold,
+                    spin=result.spin,
+                    perfect_clear=result.perfect_clear,
                 )
             )
     summary = BenchmarkGame(
@@ -119,6 +144,9 @@ def _play_heuristic_game(
         pieces=game.pieces_placed,
         lines=game.lines,
         attack=game.attack,
+        spins=spins,
+        spin_lines=spin_lines,
+        perfect_clears=perfect_clears,
         score=game.score,
         topout=game.game_over,
         completed=not game.game_over and game.pieces_placed >= limit,
@@ -174,8 +202,16 @@ def record_heuristic_game(
     return summary, replay
 
 
-def _best_game_key(game: BenchmarkGame) -> tuple[int, int, int, int, int]:
-    return game.pieces, game.lines, game.attack, game.score, -game.seed
+def _best_game_key(game: BenchmarkGame) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        game.pieces,
+        game.attack,
+        game.spin_lines,
+        game.spins,
+        game.lines,
+        game.score,
+        -game.seed,
+    )
 
 
 def _resolve_benchmark_workers(requested: int, games: int) -> int:
@@ -230,6 +266,9 @@ def run_heuristic_benchmark(
     pieces = sum(item.pieces for item in results)
     lines = sum(item.lines for item in results)
     attack = sum(item.attack for item in results)
+    spins = sum(item.spins for item in results)
+    spin_lines = sum(item.spin_lines for item in results)
+    perfect_clears = sum(item.perfect_clears for item in results)
     best_game = max(results, key=_best_game_key)
     best_replay = None
     if record_best_replay:
@@ -254,6 +293,12 @@ def run_heuristic_benchmark(
         mean_lines=lines / count,
         attack=attack,
         mean_attack=attack / count,
+        spins=spins,
+        mean_spins=spins / count,
+        spin_lines=spin_lines,
+        mean_spin_lines=spin_lines / count,
+        perfect_clears=perfect_clears,
+        mean_perfect_clears=perfect_clears / count,
         topouts=sum(item.topout for item in results),
         completed=sum(item.completed for item in results),
         per_game=results,
