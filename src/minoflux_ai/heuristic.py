@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
 import json
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from minoflux_engine import Game, Placement
+from minoflux_engine.pieces import LINE_ATTACK, SHAPES
 
 from .features import BoardFeatures, extract_board_features
 
@@ -93,24 +93,115 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
     )
 
 
+def _collides(
+    board: Sequence[Sequence[object | None]],
+    piece: str,
+    x: int,
+    y: int,
+    rotation: int,
+) -> bool:
+    height = len(board)
+    width = len(board[0]) if board else 0
+    for dx, dy in SHAPES[piece][rotation % 4]:
+        cell_x, cell_y = x + dx, y + dy
+        if cell_x < 0 or cell_x >= width or cell_y >= height:
+            return True
+        if cell_y >= 0 and board[cell_y][cell_x] is not None:
+            return True
+    return False
+
+
+def _detect_direct_placement_spin(game: Game, placement: Placement) -> str | None:
+    if placement.rotation == game.rotation or placement.piece == "O":
+        return None
+    board = game.board
+    if placement.piece == "T":
+        pivot_x, pivot_y = placement.x + 1, placement.y + 1
+        occupied = 0
+        for cell_x, cell_y in (
+            (pivot_x - 1, pivot_y - 1),
+            (pivot_x + 1, pivot_y - 1),
+            (pivot_x - 1, pivot_y + 1),
+            (pivot_x + 1, pivot_y + 1),
+        ):
+            if (
+                cell_x < 0
+                or cell_x >= game.width
+                or cell_y < 0
+                or cell_y >= game.height
+                or board[cell_y][cell_x] is not None
+            ):
+                occupied += 1
+        if occupied >= 3:
+            return "T"
+    blocked = (
+        _collides(board, placement.piece, placement.x - 1, placement.y, placement.rotation)
+        and _collides(board, placement.piece, placement.x + 1, placement.y, placement.rotation)
+        and _collides(board, placement.piece, placement.x, placement.y + 1, placement.rotation)
+    )
+    return placement.piece if blocked else None
+
+
+def _placement_features_fast(
+    game: Game,
+    placement: Placement,
+    before: BoardFeatures,
+) -> PlacementFeatures:
+    # Only the 24x10 board is copied. Bag, queue, RNG and the rest of Game are not.
+    board = [row.copy() for row in game.board]
+    spin = _detect_direct_placement_spin(game, placement)
+    topped_out = False
+    for cell_x, cell_y in placement.cells:
+        if cell_y < 0:
+            topped_out = True
+        else:
+            board[cell_y][cell_x] = placement.piece
+
+    full_rows = [index for index, row in enumerate(board) if all(cell is not None for cell in row)]
+    lines = len(full_rows)
+    if full_rows:
+        full_set = set(full_rows)
+        board = [[None] * game.width for _ in full_rows] + [
+            row for index, row in enumerate(board) if index not in full_set
+        ]
+
+    perfect_clear = all(cell is None for row in board for cell in row)
+    difficult = lines == 4 or (spin is not None and lines > 0)
+    attack = LINE_ATTACK.get(lines, 0)
+    if spin is not None and lines:
+        attack += max(1, lines)
+    if difficult and game.back_to_back:
+        attack += 1
+    combo = game.combo + 1 if lines else -1
+    if lines and combo > 0:
+        attack += min(4, combo // 2 + 1)
+    if perfect_clear and lines:
+        attack += 10
+
+    hidden_occupied = any(
+        cell is not None
+        for row in board[: game.hidden_rows]
+        for cell in row
+    )
+    after = extract_board_features(board)
+    return PlacementFeatures(
+        board=after,
+        new_holes=max(0, after.holes - before.holes),
+        lines=lines,
+        attack=attack,
+        spin_lines=lines if spin is not None else 0,
+        perfect_clear=perfect_clear,
+        game_over=topped_out or hidden_occupied,
+    )
+
+
 def evaluate_placement(
     game: Game,
     placement: Placement,
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
 ) -> PlacementEvaluation:
     before = extract_board_features(game.board)
-    simulation = deepcopy(game)
-    result = simulation.place(placement)
-    after = extract_board_features(simulation.board)
-    placement_features = PlacementFeatures(
-        board=after,
-        new_holes=max(0, after.holes - before.holes),
-        lines=result.lines,
-        attack=result.attack,
-        spin_lines=result.lines if result.spin is not None else 0,
-        perfect_clear=result.perfect_clear,
-        game_over=result.game_over,
-    )
+    placement_features = _placement_features_fast(game, placement, before)
     return PlacementEvaluation(
         placement=placement,
         score=score_features(placement_features, weights),
@@ -122,7 +213,16 @@ def rank_placements(
     game: Game,
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
 ) -> tuple[PlacementEvaluation, ...]:
-    evaluated = [evaluate_placement(game, placement, weights) for placement in game.legal_placements()]
+    before = extract_board_features(game.board)
+    evaluated = [
+        PlacementEvaluation(
+            placement=placement,
+            score=score_features(features, weights),
+            features=features,
+        )
+        for placement in game.legal_placements()
+        for features in (_placement_features_fast(game, placement, before),)
+    ]
     evaluated.sort(
         key=lambda item: (
             item.score,
