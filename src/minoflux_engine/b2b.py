@@ -42,7 +42,7 @@ def resolve_b2b_charging(
 
     A no-clear placement preserves the chain. A non-difficult line clear breaks
     it and releases the stored Surge. Perfect Clears preserve/start B2B and add
-    two displayed levels, matching the current multiplayer rule.
+    exactly two displayed levels, regardless of the underlying clear type.
     """
 
     was_active = bool(active)
@@ -53,14 +53,15 @@ def resolve_b2b_charging(
         charge = current_chain if was_active and current_chain >= SURGE_START_CHAIN else 0
         return B2BOutcome(was_active, current_chain, charge, 0, 0)
 
-    if difficult or perfect_clear:
+    if perfect_clear:
         attack_bonus = 1 if was_active else 0
-        if was_active:
-            next_chain = current_chain + (1 if difficult else 0)
-        else:
-            next_chain = 0
-        if perfect_clear:
-            next_chain += 2
+        next_chain = current_chain + 2 if was_active else 2
+        charge = next_chain if next_chain >= SURGE_START_CHAIN else 0
+        return B2BOutcome(True, next_chain, charge, attack_bonus, 0)
+
+    if difficult:
+        attack_bonus = 1 if was_active else 0
+        next_chain = current_chain + 1 if was_active else 0
         charge = next_chain if next_chain >= SURGE_START_CHAIN else 0
         return B2BOutcome(True, next_chain, charge, attack_bonus, 0)
 
