@@ -67,6 +67,7 @@ def build_parser() -> ArgumentParser:
     benchmark.add_argument("--max-pieces", type=int, default=500)
     benchmark.add_argument("--seed-base", type=int, default=1)
     benchmark.add_argument("--seed-step", type=int, default=31)
+    benchmark.add_argument("--workers", type=int, default=0, help="Parallel game workers; 0 uses available CPUs")
     benchmark.add_argument("--model", help="Path to a minoflux_heuristic_v1 JSON model")
     benchmark.add_argument("--replay-out", help=f"Write the best game as {REPLAY_FORMAT} JSON")
     _add_search_arguments(benchmark, lookahead_default=1)
@@ -114,7 +115,13 @@ def main(argv: list[str] | None = None) -> int:
                 "baseline": "heuristic",
                 "search": ["hold candidates", "lookahead", "beam search"],
                 "trainer": "cem",
-                "acceleration": ["board-only placement simulation", "process workers", "candidate screening"],
+                "acceleration": [
+                    "board-only placement simulation",
+                    "bounded top-k beam ranking",
+                    "parallel benchmark games",
+                    "process workers",
+                    "candidate screening",
+                ],
                 "modelFormat": "minoflux_heuristic_v1",
                 "replayFormat": REPLAY_FORMAT,
             },
@@ -139,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
             args.seed_step,
             weights,
             search_config,
+            workers=args.workers,
             record_best_replay=True,
         )
         result = benchmark.to_dict()
@@ -161,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
                 "meanPieces": result["meanPieces"],
                 "meanLines": result["meanLines"],
                 "topouts": result["topouts"],
+                "workers": benchmark.workers,
                 "searchConfig": search_config.to_dict(),
             })
             result["runPath"] = str(run.path)
