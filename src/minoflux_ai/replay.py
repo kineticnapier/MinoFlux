@@ -7,9 +7,10 @@ from typing import Mapping, Sequence
 
 from minoflux_engine import Game, LockResult, Placement
 
-REPLAY_FORMAT = "minoflux_replay_v2"
+REPLAY_FORMAT = "minoflux_replay_v3"
 LEGACY_REPLAY_FORMAT = "minoflux_replay_v1"
-SUPPORTED_REPLAY_FORMATS = (REPLAY_FORMAT, LEGACY_REPLAY_FORMAT)
+LEGACY_REPLAY_FORMAT_V2 = "minoflux_replay_v2"
+SUPPORTED_REPLAY_FORMATS = (REPLAY_FORMAT, LEGACY_REPLAY_FORMAT_V2, LEGACY_REPLAY_FORMAT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,13 +27,23 @@ class ReplayStep:
     hold: bool = False
     spin: str | None = None
     perfect_clear: bool = False
+    path: tuple[str, ...] = ()
+    last_move_was_rotation: bool = False
+    rotation_kick_index: int | None = None
+    rotation_from: int | None = None
+    rotation_to: int | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        value = asdict(self)
+        value["path"] = list(self.path)
+        return value
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> "ReplayStep":
         raw_spin = value.get("spin")
+        raw_path = value.get("path", ())
+        if not isinstance(raw_path, Sequence) or isinstance(raw_path, (str, bytes)):
+            raw_path = ()
         return cls(
             piece=str(value["piece"]),
             x=int(value["x"]),
@@ -46,6 +57,25 @@ class ReplayStep:
             hold=bool(value.get("hold", False)),
             spin=None if raw_spin is None else str(raw_spin),
             perfect_clear=bool(value.get("perfect_clear", value.get("perfectClear", False))),
+            path=tuple(str(item) for item in raw_path),
+            last_move_was_rotation=bool(
+                value.get("last_move_was_rotation", value.get("lastMoveWasRotation", False))
+            ),
+            rotation_kick_index=(
+                None
+                if value.get("rotation_kick_index", value.get("rotationKickIndex")) is None
+                else int(value.get("rotation_kick_index", value.get("rotationKickIndex")))
+            ),
+            rotation_from=(
+                None
+                if value.get("rotation_from", value.get("rotationFrom")) is None
+                else int(value.get("rotation_from", value.get("rotationFrom")))
+            ),
+            rotation_to=(
+                None
+                if value.get("rotation_to", value.get("rotationTo")) is None
+                else int(value.get("rotation_to", value.get("rotationTo")))
+            ),
         )
 
 
@@ -126,7 +156,7 @@ class Replay:
                 if isinstance(raw_search, Mapping)
                 else None
             ),
-            format=REPLAY_FORMAT,
+            format=replay_format,
         )
 
 
@@ -150,25 +180,37 @@ def apply_replay_step(game: Game, step: ReplayStep, *, strict: bool = True) -> L
     if game.current != step.piece:
         raise ValueError(f"Replay expected {step.piece}, but engine produced {game.current}")
     cells = game.cells(step.piece, step.x, step.y, step.rotation)
-    placement = Placement(step.piece, step.x, step.y, step.rotation, cells)
+    placement = Placement(
+        step.piece,
+        step.x,
+        step.y,
+        step.rotation,
+        cells,
+        path=step.path,
+        last_move_was_rotation=step.last_move_was_rotation,
+        rotation_kick_index=step.rotation_kick_index,
+        rotation_from=step.rotation_from,
+        rotation_to=step.rotation_to,
+    )
     result = game.place(placement)
     if strict:
         actual = (result.lines, result.attack, game.score, game.lines, game.attack)
         expected = (step.lines, step.attack, step.score, step.total_lines, step.total_attack)
         if actual != expected:
             raise ValueError(f"Replay state mismatch: expected {expected}, got {actual}")
-        # Spin metadata was added after replay v2 originally shipped. Validate it
-        # only when it is present so old v1/v2 files remain readable.
-        if step.spin is not None and result.spin != step.spin:
+        if result.spin != step.spin:
             raise ValueError(f"Replay spin mismatch: expected {step.spin!r}, got {result.spin!r}")
-        if step.perfect_clear and not result.perfect_clear:
-            raise ValueError("Replay expected a perfect clear")
+        if result.perfect_clear != step.perfect_clear:
+            raise ValueError(
+                f"Replay perfect-clear mismatch: expected {step.perfect_clear}, got {result.perfect_clear}"
+            )
     return result
 
 
 def replay_to_game(replay: Replay, steps: int | None = None, *, strict: bool = True) -> Game:
     game = Game(replay.seed)
     count = len(replay.steps) if steps is None else max(0, min(len(replay.steps), int(steps)))
+    exact = strict and replay.format == REPLAY_FORMAT
     for step in replay.steps[:count]:
-        apply_replay_step(game, step, strict=strict)
+        apply_replay_step(game, step, strict=exact)
     return game
