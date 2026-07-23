@@ -6,13 +6,12 @@ from .pieces import (
     BOARD_HEIGHT,
     BOARD_WIDTH,
     HIDDEN_ROWS,
-    LINE_ATTACK,
-    LINE_SCORES,
     SHAPES,
     VISIBLE_HEIGHT,
     SevenBag,
     kick_tests,
 )
+from .spin import base_attack, base_score, classify_t_spin, is_difficult_clear, t_spin_event
 from .state import GameSnapshot, LockResult, Placement
 
 DEFAULT_LOCK_DELAY_MS = 500.0
@@ -48,6 +47,9 @@ class Game:
         self.hold_used = False
         self.last_action: str | None = None
         self.last_move_was_rotation = False
+        self.last_rotation_kick_index: int | None = None
+        self.last_rotation_from: int | None = None
+        self.last_rotation_to: int | None = None
         self.score = 0
         self.lines = 0
         self.attack = 0
@@ -60,6 +62,12 @@ class Game:
         self.lock_resets = 0
         self.last_lock: LockResult | None = None
         self.reset(seed)
+
+    def _clear_rotation_metadata(self) -> None:
+        self.last_move_was_rotation = False
+        self.last_rotation_kick_index = None
+        self.last_rotation_from = None
+        self.last_rotation_to = None
 
     def reset(self, seed: int | None = None) -> GameSnapshot:
         if seed is not None or self.seed is None:
@@ -74,7 +82,7 @@ class Game:
         self.hold_piece = None
         self.hold_used = False
         self.last_action = None
-        self.last_move_was_rotation = False
+        self._clear_rotation_metadata()
         self.score = self.lines = self.attack = self.pieces_placed = 0
         self.combo = -1
         self.back_to_back = self.game_over = self.paused = False
@@ -124,7 +132,7 @@ class Game:
         self.x, self.y, self.rotation = 3, 1, 0
         self.hold_used = False
         self.last_action = None
-        self.last_move_was_rotation = False
+        self._clear_rotation_metadata()
         self._reset_lock_state()
         self.game_over = self._collides(self.current, self.x, self.y, self.rotation)
         return not self.game_over
@@ -151,7 +159,7 @@ class Game:
             return False
         self.x, self.y = target_x, target_y
         self.last_action = "move" if dx else "soft_drop"
-        self.last_move_was_rotation = False
+        self._clear_rotation_metadata()
         if dy > 0:
             self._reset_lock_after_descent()
         elif dx:
@@ -178,12 +186,17 @@ class Game:
         source_rotation = self.rotation
         target_rotation = (source_rotation + direction) % 4
         was_grounded = self.is_grounded()
-        for kick_x, kick_y in kick_tests(self.current, source_rotation, target_rotation):
+        for kick_index, (kick_x, kick_y) in enumerate(
+            kick_tests(self.current, source_rotation, target_rotation)
+        ):
             target_x, target_y = self.x + kick_x, self.y + kick_y
             if not self._collides(self.current, target_x, target_y, target_rotation):
                 self.x, self.y, self.rotation = target_x, target_y, target_rotation
                 self.last_action = "rotate"
                 self.last_move_was_rotation = True
+                self.last_rotation_kick_index = kick_index
+                self.last_rotation_from = source_rotation
+                self.last_rotation_to = target_rotation
                 self._reset_lock_after_manipulation(was_grounded)
                 return True
         return False
@@ -210,7 +223,7 @@ class Game:
         self.x, self.y, self.rotation = 3, 1, 0
         self.hold_used = True
         self.last_action = "hold"
-        self.last_move_was_rotation = False
+        self._clear_rotation_metadata()
         self._reset_lock_state()
         self.game_over = self._collides(self.current, self.x, self.y, self.rotation)
         return not self.game_over
@@ -238,7 +251,6 @@ class Game:
         return None
 
     def advance_time(self, delta_ms: float) -> LockResult | None:
-        """Advance lock delay without depending on a wall-clock implementation."""
         if self.game_over or self.paused:
             return None
         delta = max(0.0, float(delta_ms))
@@ -249,33 +261,19 @@ class Game:
             return self._lock_piece()
         return None
 
-    def _detect_spin(self) -> str | None:
-        if not self.last_move_was_rotation or self.current == "O":
-            return None
-        if self.current == "T":
-            pivot_x, pivot_y = self.x + 1, self.y + 1
-            occupied = 0
-            for cx, cy in (
-                (pivot_x - 1, pivot_y - 1),
-                (pivot_x + 1, pivot_y - 1),
-                (pivot_x - 1, pivot_y + 1),
-                (pivot_x + 1, pivot_y + 1),
-            ):
-                if cx < 0 or cx >= self.width or cy < 0 or cy >= self.height:
-                    occupied += 1
-                elif self.board[cy][cx] is not None:
-                    occupied += 1
-            if occupied >= 3:
-                return "T"
-        blocked = (
-            self._collides(self.current, self.x - 1, self.y, self.rotation)
-            and self._collides(self.current, self.x + 1, self.y, self.rotation)
-            and self._collides(self.current, self.x, self.y + 1, self.rotation)
+    def _detect_spin_kind(self) -> str | None:
+        return classify_t_spin(
+            self.board,
+            piece=self.current,
+            x=self.x,
+            y=self.y,
+            rotation=self.rotation,
+            last_move_was_rotation=self.last_move_was_rotation,
+            rotation_kick_index=self.last_rotation_kick_index,
         )
-        return self.current if blocked else None
 
     def _lock_piece(self) -> LockResult:
-        spin = self._detect_spin()
+        spin_kind = self._detect_spin_kind()
         topped_out = False
         for cell_x, cell_y in self.cells():
             if cell_y < 0:
@@ -290,11 +288,10 @@ class Game:
         for _ in full_rows:
             self.board.insert(0, [None] * self.width)
 
+        spin = t_spin_event(spin_kind, lines)
         perfect_clear = all(cell is None for row in self.board for cell in row)
-        difficult = lines == 4 or (spin is not None and lines > 0)
-        sent = LINE_ATTACK.get(lines, 0)
-        if spin is not None and lines:
-            sent += max(1, lines)
+        difficult = is_difficult_clear(lines, spin)
+        sent = base_attack(lines, spin)
         if difficult and self.back_to_back:
             sent += 1
         if lines:
@@ -307,9 +304,7 @@ class Game:
             sent += 10
 
         level = self.lines // 10 + 1
-        gained = LINE_SCORES.get(lines, 1200)
-        if spin is not None and lines:
-            gained += 400 * lines
+        gained = base_score(lines, spin)
         if difficult and self.back_to_back:
             gained = int(gained * 1.5)
         self.score += gained * level
@@ -372,9 +367,11 @@ class Game:
             raise ValueError("Placement collides with the board")
         if not self._collides(self.current, placement.x, placement.y + 1, placement.rotation):
             raise ValueError("Placement is not resting on the stack")
-        old_rotation = self.rotation
         self.x, self.y, self.rotation = placement.x, placement.y, placement.rotation
-        self.last_move_was_rotation = placement.rotation != old_rotation
+        self.last_move_was_rotation = bool(placement.last_move_was_rotation)
+        self.last_rotation_kick_index = placement.rotation_kick_index
+        self.last_rotation_from = placement.rotation_from
+        self.last_rotation_to = placement.rotation_to
         self.last_action = "placement"
         return self._lock_piece()
 
