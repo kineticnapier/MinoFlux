@@ -3,8 +3,16 @@ from __future__ import annotations
 from argparse import ArgumentParser
 from pathlib import Path
 
-from minoflux_ai import Replay, apply_replay_step, load_replay
-from minoflux_engine import Game, HIDDEN_ROWS
+from minoflux_ai import REPLAY_FORMAT, Replay, apply_replay_step, load_replay, replay_to_game
+from minoflux_engine import (
+    Game,
+    HIDDEN_ROWS,
+    T_SPIN_DOUBLE,
+    T_SPIN_MINI,
+    T_SPIN_MINI_SINGLE,
+    T_SPIN_SINGLE,
+    T_SPIN_TRIPLE,
+)
 
 from .game import COLORS, Palette, _draw_piece_preview
 
@@ -17,18 +25,15 @@ def build_parser() -> ArgumentParser:
 
 
 def _rebuild(replay: Replay, step_count: int) -> Game:
-    game = Game(replay.seed)
-    for step in replay.steps[: max(0, min(len(replay.steps), step_count))]:
-        apply_replay_step(game, step)
-    return game
+    return replay_to_game(replay, step_count, strict=True)
 
 
 def _draw_board(pygame, screen, game: Game, replay: Replay, step_index: int, interval_ms: int, paused: bool, error: str | None) -> None:
     palette = Palette()
     cell = 30
-    board_x, board_y = 180, 30
+    board_x, board_y = 210, 30
     font = pygame.font.Font(None, 30)
-    small = pygame.font.Font(None, 23)
+    small = pygame.font.Font(None, 22)
     screen.fill(palette.background)
     pygame.draw.rect(
         screen,
@@ -68,24 +73,30 @@ def _draw_board(pygame, screen, game: Game, replay: Replay, step_index: int, int
 
     screen.blit(font.render("HOLD", True, palette.text), (30, 35))
     _draw_piece_preview(pygame, screen, game.hold_piece, (45, 75), 24)
-    screen.blit(font.render("NEXT", True, palette.text), (510, 35))
+    screen.blit(font.render("NEXT", True, palette.text), (545, 35))
     for index, piece in enumerate(list(game.queue)[:5]):
-        _draw_piece_preview(pygame, screen, piece, (520, 75 + index * 88), 20)
+        _draw_piece_preview(pygame, screen, piece, (555, 75 + index * 88), 20)
 
-    shown_steps = replay.steps[:step_index]
-    holds = sum(step.hold for step in shown_steps)
-    spins = sum(step.spin is not None for step in shown_steps)
-    spin_lines = sum(step.lines for step in shown_steps if step.spin is not None)
-    perfect_clears = sum(step.perfect_clear for step in shown_steps)
+    shown = replay.steps[:step_index]
+    holds = sum(step.hold for step in shown)
+    spins = sum(step.spin is not None for step in shown)
+    mini = sum(step.spin in (T_SPIN_MINI, T_SPIN_MINI_SINGLE) for step in shown)
+    tss = sum(step.spin == T_SPIN_SINGLE for step in shown)
+    tsd = sum(step.spin == T_SPIN_DOUBLE for step in shown)
+    tst = sum(step.spin == T_SPIN_TRIPLE for step in shown)
+    current_route = replay.steps[step_index - 1].path if step_index else ()
     stats = [
         f"Replay {step_index}/{len(replay.steps)}",
+        f"Format {replay.format}",
         f"Seed {replay.seed}",
         f"Score {game.score}",
         f"Lines {game.lines}",
         f"Attack {game.attack}",
-        f"Spins {spins} ({spin_lines} lines)",
-        f"Perfect clears {perfect_clears}",
         f"Holds {holds}",
+        f"T-spins {spins}",
+        f"Mini {mini}  TSS {tss}",
+        f"TSD {tsd}  TST {tst}",
+        f"Route inputs {len(current_route)}",
         f"Speed {interval_ms} ms",
         "DONE" if step_index >= len(replay.steps) else ("PAUSED" if paused else "PLAYING"),
     ]
@@ -93,10 +104,10 @@ def _draw_board(pygame, screen, game: Game, replay: Replay, step_index: int, int
         screen.blit(small.render(line, True, palette.text), (20, 205 + index * 27))
 
     controls = "Space pause  Left/Right step  Up/Down speed  Home/End  Esc quit"
-    screen.blit(small.render(controls, True, palette.text), (20, 650))
+    screen.blit(small.render(controls, True, palette.text), (35, 650))
     if error:
         overlay = font.render(error, True, palette.text)
-        screen.blit(overlay, overlay.get_rect(center=(330, 610)))
+        screen.blit(overlay, overlay.get_rect(center=(365, 615)))
 
 
 def play_replay(path: str | Path, interval_ms: int = 250) -> int:
@@ -106,8 +117,9 @@ def play_replay(path: str | Path, interval_ms: int = 250) -> int:
         raise SystemExit("Pygame is not installed. Run: uv sync --extra game") from error
 
     replay = load_replay(path)
+    strict = replay.format == REPLAY_FORMAT
     pygame.init()
-    screen = pygame.display.set_mode((650, 690))
+    screen = pygame.display.set_mode((720, 690))
     pygame.display.set_caption(f"MinoFlux Replay — {Path(path).name}")
     clock = pygame.time.Clock()
     interval = max(30, int(interval_ms))
@@ -130,7 +142,7 @@ def play_replay(path: str | Path, interval_ms: int = 250) -> int:
                     paused = not paused
                 elif event.key == pygame.K_RIGHT and step_index < len(replay.steps):
                     try:
-                        apply_replay_step(game, replay.steps[step_index])
+                        apply_replay_step(game, replay.steps[step_index], strict=strict)
                         step_index += 1
                         error_message = None
                     except ValueError as error:
@@ -158,7 +170,7 @@ def play_replay(path: str | Path, interval_ms: int = 250) -> int:
             while accumulator >= interval and step_index < len(replay.steps):
                 accumulator -= interval
                 try:
-                    apply_replay_step(game, replay.steps[step_index])
+                    apply_replay_step(game, replay.steps[step_index], strict=strict)
                     step_index += 1
                 except ValueError as error:
                     error_message = str(error)
