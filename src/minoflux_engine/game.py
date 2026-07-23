@@ -6,14 +6,17 @@ from .pieces import (
     BOARD_HEIGHT,
     BOARD_WIDTH,
     HIDDEN_ROWS,
-    KICK_TESTS,
     LINE_ATTACK,
     LINE_SCORES,
     SHAPES,
     VISIBLE_HEIGHT,
     SevenBag,
+    kick_tests,
 )
 from .state import GameSnapshot, LockResult, Placement
+
+DEFAULT_LOCK_DELAY_MS = 500.0
+DEFAULT_LOCK_RESET_LIMIT = 15
 
 
 class Game:
@@ -24,8 +27,16 @@ class Game:
     hidden_rows = HIDDEN_ROWS
     height = BOARD_HEIGHT
 
-    def __init__(self, seed: int | None = None) -> None:
+    def __init__(
+        self,
+        seed: int | None = None,
+        *,
+        lock_delay_ms: float = DEFAULT_LOCK_DELAY_MS,
+        lock_reset_limit: int = DEFAULT_LOCK_RESET_LIMIT,
+    ) -> None:
         self.seed = seed
+        self.lock_delay_ms = max(0.0, float(lock_delay_ms))
+        self.lock_reset_limit = max(0, int(lock_reset_limit))
         self._bag = SevenBag(seed)
         self.board: list[list[str | None]] = []
         self.queue: deque[str] = deque()
@@ -45,6 +56,8 @@ class Game:
         self.pieces_placed = 0
         self.game_over = False
         self.paused = False
+        self.lock_elapsed_ms = 0.0
+        self.lock_resets = 0
         self.last_lock: LockResult | None = None
         self.reset(seed)
 
@@ -66,8 +79,13 @@ class Game:
         self.combo = -1
         self.back_to_back = self.game_over = self.paused = False
         self.last_lock = None
+        self._reset_lock_state()
         self.game_over = self._collides(self.current, self.x, self.y, self.rotation)
         return self.snapshot()
+
+    def _reset_lock_state(self) -> None:
+        self.lock_elapsed_ms = 0.0
+        self.lock_resets = 0
 
     def _fill_queue(self, minimum: int) -> None:
         while len(self.queue) < minimum:
@@ -94,6 +112,9 @@ class Game:
                 return True
         return False
 
+    def is_grounded(self) -> bool:
+        return self._collides(self.current, self.x, self.y + 1, self.rotation)
+
     def _spawn(self, piece: str | None = None) -> bool:
         if piece is None:
             self._fill_queue(7)
@@ -104,18 +125,37 @@ class Game:
         self.hold_used = False
         self.last_action = None
         self.last_move_was_rotation = False
+        self._reset_lock_state()
         self.game_over = self._collides(self.current, self.x, self.y, self.rotation)
         return not self.game_over
+
+    def _reset_lock_after_manipulation(self, was_grounded: bool) -> None:
+        if not (was_grounded or self.is_grounded()):
+            return
+        if self.lock_resets >= self.lock_reset_limit:
+            return
+        self.lock_elapsed_ms = 0.0
+        self.lock_resets += 1
+
+    def _reset_lock_after_descent(self) -> None:
+        if self.lock_resets < self.lock_reset_limit:
+            self.lock_elapsed_ms = 0.0
 
     def move(self, dx: int, dy: int = 0) -> bool:
         if self.game_over or self.paused:
             return False
-        target_x, target_y = self.x + int(dx), self.y + int(dy)
+        dx, dy = int(dx), int(dy)
+        was_grounded = self.is_grounded()
+        target_x, target_y = self.x + dx, self.y + dy
         if self._collides(self.current, target_x, target_y, self.rotation):
             return False
         self.x, self.y = target_x, target_y
         self.last_action = "move" if dx else "soft_drop"
         self.last_move_was_rotation = False
+        if dy > 0:
+            self._reset_lock_after_descent()
+        elif dx:
+            self._reset_lock_after_manipulation(was_grounded)
         return True
 
     def move_left(self) -> bool:
@@ -131,15 +171,20 @@ class Game:
         return moved
 
     def rotate(self, direction: int = 1) -> bool:
+        if direction not in (-2, -1, 1, 2):
+            raise ValueError("Rotation direction must be -2, -1, 1, or 2")
         if self.game_over or self.paused or self.current == "O":
             return False
-        target_rotation = (self.rotation + direction) % 4
-        for kick_x, kick_y in KICK_TESTS:
+        source_rotation = self.rotation
+        target_rotation = (source_rotation + direction) % 4
+        was_grounded = self.is_grounded()
+        for kick_x, kick_y in kick_tests(self.current, source_rotation, target_rotation):
             target_x, target_y = self.x + kick_x, self.y + kick_y
             if not self._collides(self.current, target_x, target_y, target_rotation):
                 self.x, self.y, self.rotation = target_x, target_y, target_rotation
                 self.last_action = "rotate"
                 self.last_move_was_rotation = True
+                self._reset_lock_after_manipulation(was_grounded)
                 return True
         return False
 
@@ -166,6 +211,7 @@ class Game:
         self.hold_used = True
         self.last_action = "hold"
         self.last_move_was_rotation = False
+        self._reset_lock_state()
         self.game_over = self._collides(self.current, self.x, self.y, self.rotation)
         return not self.game_over
 
@@ -189,8 +235,19 @@ class Game:
             return None
         if self.move(0, 1):
             self.last_action = "gravity"
+        return None
+
+    def advance_time(self, delta_ms: float) -> LockResult | None:
+        """Advance lock delay without depending on a wall-clock implementation."""
+        if self.game_over or self.paused:
             return None
-        return self._lock_piece()
+        delta = max(0.0, float(delta_ms))
+        if not self.is_grounded():
+            return None
+        self.lock_elapsed_ms += delta
+        if self.lock_elapsed_ms + 1e-9 >= self.lock_delay_ms:
+            return self._lock_piece()
+        return None
 
     def _detect_spin(self) -> str | None:
         if not self.last_move_was_rotation or self.current == "O":
@@ -268,6 +325,8 @@ class Game:
         self.game_over = topped_out or hidden_occupied
         if not self.game_over:
             self._spawn()
+        else:
+            self.lock_elapsed_ms = 0.0
 
         self.last_lock = LockResult(
             lines=lines,
@@ -338,5 +397,10 @@ class Game:
             pieces_placed=self.pieces_placed,
             game_over=self.game_over,
             paused=self.paused,
+            grounded=self.is_grounded() if not self.game_over else False,
+            lock_elapsed_ms=self.lock_elapsed_ms,
+            lock_delay_ms=self.lock_delay_ms,
+            lock_resets=self.lock_resets,
+            lock_reset_limit=self.lock_reset_limit,
             last_lock=self.last_lock,
         )
