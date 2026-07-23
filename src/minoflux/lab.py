@@ -93,6 +93,10 @@ def run_cem_experiment(
     learning_rate: float,
     seed_base: int,
     random_seed: int,
+    workers: int,
+    screen_games: int,
+    screen_max_pieces: int,
+    screen_fraction: float,
     save: bool,
 ) -> tuple[str, dict[str, Any], str, str]:
     config = CEMConfig(
@@ -106,6 +110,10 @@ def run_cem_experiment(
         learning_rate=float(learning_rate),
         seed_base=int(seed_base),
         random_seed=int(random_seed),
+        workers=int(workers),
+        screen_games=int(screen_games),
+        screen_max_pieces=int(screen_max_pieces),
+        screen_fraction=float(screen_fraction),
     ).normalized()
     run = RunStore().create("cem-training", {"config": asdict(config)}) if save else None
 
@@ -113,18 +121,16 @@ def run_cem_experiment(
         if run is not None:
             run.append_metric({"type": "generation", **generation.to_dict()})
 
-    started = perf_counter()
     trained = train_cem(config, DEFAULT_WEIGHTS, on_generation)
-    elapsed = round(perf_counter() - started, 3)
+    elapsed = trained.elapsed_seconds
     model_path = save_weights(LATEST_CEM_MODEL, trained.best_weights).resolve()
     replay_path = ""
     if trained.validation.best_replay is not None:
         replay_path = str(save_replay(LATEST_CEM_REPLAY, trained.validation.best_replay).resolve())
     result = trained.to_dict()
-    result["elapsedSeconds"] = elapsed
     result["modelPath"] = str(model_path)
     result["bestReplayPath"] = replay_path
-    status = f"Completed in {elapsed}s. Model: `{model_path}`"
+    status = f"Completed in {elapsed}s using {trained.workers} worker(s). Model: `{model_path}`"
     if run is not None:
         model_path = save_weights(run.path / "model.json", trained.best_weights).resolve()
         if trained.validation.best_replay is not None:
@@ -136,8 +142,10 @@ def run_cem_experiment(
             "type": "complete",
             "bestTrainingFitness": trained.best_training_fitness,
             "validationFitness": trained.validation_fitness,
+            "workers": trained.workers,
+            "elapsedSeconds": trained.elapsed_seconds,
         })
-        status = f"Saved to `{run.path}` in {elapsed}s"
+        status = f"Saved to `{run.path}` in {elapsed}s using {trained.workers} worker(s)"
     return status, result, str(model_path), replay_path
 
 
@@ -180,15 +188,22 @@ def build_app():
             ai_replay_path = gr.Textbox(label="Best replay path", interactive=False)
             gr.JSON(label="Built-in weights", value=DEFAULT_WEIGHTS.to_dict())
         with gr.Tab("CEM weight training"):
-            gr.Markdown("Samples heuristic weights, keeps the elite candidates, and updates their distribution each generation.")
+            gr.Markdown(
+                "Uses board-only placement simulation, worker processes, and an optional short screening round before full evaluation."
+            )
             with gr.Row():
                 cem_generations = gr.Number(label="Generations", value=5, precision=0, minimum=1)
                 cem_population = gr.Number(label="Population", value=12, precision=0, minimum=2)
                 cem_elite = gr.Number(label="Elite fraction", value=0.25, minimum=0.05, maximum=1.0)
             with gr.Row():
-                cem_games = gr.Number(label="Games / candidate", value=2, precision=0, minimum=1)
-                cem_max_pieces = gr.Number(label="Max pieces", value=150, precision=0, minimum=1)
+                cem_games = gr.Number(label="Full games / retained candidate", value=2, precision=0, minimum=1)
+                cem_max_pieces = gr.Number(label="Full max pieces", value=150, precision=0, minimum=1)
                 cem_validation = gr.Number(label="Validation games", value=4, precision=0, minimum=1)
+            with gr.Row():
+                cem_workers = gr.Number(label="Worker processes (0 = auto)", value=0, precision=0, minimum=0)
+                cem_screen_games = gr.Number(label="Screen games (0 = off)", value=1, precision=0, minimum=0)
+                cem_screen_pieces = gr.Number(label="Screen max pieces", value=60, precision=0, minimum=0)
+                cem_screen_fraction = gr.Number(label="Fraction kept", value=0.5, minimum=0.05, maximum=1.0)
             with gr.Row():
                 cem_sigma = gr.Number(label="Initial sigma", value=0.35, minimum=0)
                 cem_learning_rate = gr.Number(label="Learning rate", value=0.7, minimum=0.01, maximum=1.0)
@@ -231,6 +246,10 @@ def build_app():
                 cem_learning_rate,
                 cem_seed_base,
                 cem_random_seed,
+                cem_workers,
+                cem_screen_games,
+                cem_screen_pieces,
+                cem_screen_fraction,
                 cem_save,
             ],
             outputs=[cem_status, cem_result, cem_model_path, cem_replay_path],
