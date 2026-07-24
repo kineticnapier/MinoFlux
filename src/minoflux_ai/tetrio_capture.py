@@ -58,6 +58,23 @@ def _optional_float(value: object) -> float | None:
         return None
 
 
+def _optional_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _piece_sequence(value: object) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return ()
+    pieces: list[str] = []
+    for item in value:
+        piece = str(item).strip().upper()
+        if piece in {"I", "O", "T", "S", "Z", "J", "L"}:
+            pieces.append(piece)
+    return tuple(pieces)
+
+
 def _operations(value: Mapping[str, object]) -> tuple[str, ...]:
     for key in ("operations", "inputs", "path", "moves"):
         raw = value.get(key)
@@ -80,7 +97,7 @@ def _count_cells(board: Board) -> int:
 
 
 def _count_garbage(board: Board) -> int:
-    return sum(cell == "g" for row in board for cell in row)
+    return sum(cell in {"g", "gb"} for row in board for cell in row)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +116,9 @@ class CapturePlacement:
     captured_at: int | None
     board40: Board
     operations: tuple[str, ...] = ()
+    seed: int | None = None
+    hold_locked: bool | None = None
+    next_queue: tuple[str, ...] = ()
 
     @property
     def group_id(self) -> str:
@@ -131,6 +151,9 @@ class CapturePlacement:
             captured_at=_optional_int(value.get("capturedAt", value.get("captured_at"))),
             board40=normalize_board(value.get("board")),
             operations=_operations(value),
+            seed=_optional_int(value.get("seed")),
+            hold_locked=_optional_bool(value.get("holdLocked", value.get("hold_locked"))),
+            next_queue=_piece_sequence(value.get("next", value.get("queue"))),
         )
 
 
@@ -158,11 +181,15 @@ class CaptureSample:
     board_after: Board
     estimated_lines: int | None
     transition_confidence: str
+    seed: int | None = None
+    hold_locked: bool | None = None
+    next_queue: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         value = asdict(self)
         value["format"] = CAPTURE_DATASET_FORMAT
         value["operations"] = list(self.operations)
+        value["next_queue"] = list(self.next_queue)
         value["board_before"] = None if self.board_before is None else [list(row) for row in self.board_before]
         value["board_after"] = [list(row) for row in self.board_after]
         return value
@@ -250,6 +277,9 @@ def build_capture_samples(
                     board_after=board_after,
                     estimated_lines=estimated_lines,
                     transition_confidence=confidence,
+                    seed=item.seed,
+                    hold_locked=item.hold_locked,
+                    next_queue=item.next_queue,
                 )
             )
     samples.sort(key=lambda item: (item.group_id, item.sequence, item.frame))
@@ -262,11 +292,15 @@ def capture_summary(samples: Sequence[CaptureSample]) -> dict[str, object]:
     users: set[str] = set()
     groups: set[str] = set()
     operation_samples = 0
+    next_queue_samples = 0
+    seed_samples = 0
     for item in samples:
         users.add(item.username)
         groups.add(item.group_id)
         confidence[item.transition_confidence] = confidence.get(item.transition_confidence, 0) + 1
         operation_samples += int(bool(item.operations))
+        next_queue_samples += int(bool(item.next_queue))
+        seed_samples += int(item.seed is not None)
     return {
         "format": CAPTURE_DATASET_FORMAT,
         "samples": len(samples),
@@ -275,6 +309,8 @@ def capture_summary(samples: Sequence[CaptureSample]) -> dict[str, object]:
         "splits": splits,
         "transitionConfidence": dict(sorted(confidence.items())),
         "samplesWithOperations": operation_samples,
+        "samplesWithNextQueue": next_queue_samples,
+        "samplesWithSeed": seed_samples,
     }
 
 
