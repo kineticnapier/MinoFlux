@@ -7,11 +7,16 @@ import unittest
 
 from minoflux_ai import (
     CAPTURE_DATASET_FORMAT,
+    CaptureSample,
+    align_capture_sample,
     build_capture_samples,
     capture_summary,
     load_tetrio_capture,
+    reachable_placements,
     save_capture_dataset,
 )
+from minoflux_ai.search import clone_game
+from minoflux_engine import Game
 
 
 def board_with(cells: list[tuple[int, int, str]]) -> list[list[str | None]]:
@@ -104,6 +109,48 @@ class TetrioCaptureTests(unittest.TestCase):
         self.assertEqual(record["format"], CAPTURE_DATASET_FORMAT)
         self.assertEqual(summary, capture_summary(samples))
         self.assertEqual(summary["samples"], 1)
+
+    def test_board_transition_aligns_to_an_exact_srs_route(self) -> None:
+        game = Game(321)
+        placements = reachable_placements(game, allow_180=True)
+        self.assertTrue(placements)
+        target = placements[len(placements) // 2]
+        before = tuple(tuple(row) for row in game.board)
+        simulated = clone_game(game)
+        simulated.place(target)
+        after = tuple(
+            tuple(None if cell is None else str(cell).lower() for cell in row)
+            for row in simulated.board
+        )
+        sample = CaptureSample(
+            group_id="player|r1|g1",
+            split="train",
+            username="player",
+            game_id=1,
+            round=1,
+            sequence=2,
+            frame=30,
+            frame_delta=30,
+            piece_index=2,
+            piece=game.current,
+            x=float(target.x),
+            y=float(target.y),
+            rotation=target.rotation,
+            hold_before=None,
+            hold_after=None,
+            used_hold=False,
+            next_placed_piece=None,
+            operations=(),
+            board_before=before,
+            board_after=after,
+            estimated_lines=0,
+            transition_confidence="clean-count-inference",
+        )
+        alignment = align_capture_sample(sample, allow_180=True)
+        self.assertIn(alignment.status, ("exact", "ambiguous"))
+        self.assertGreaterEqual(alignment.candidate_count, 1)
+        self.assertTrue(alignment.path)
+        self.assertEqual(alignment.path[-1], "hard_drop")
 
 
 if __name__ == "__main__":
