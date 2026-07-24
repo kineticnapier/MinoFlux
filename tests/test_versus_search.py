@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+import unittest
+
+from minoflux_ai import (
+    SearchConfig,
+    VersusSearchConfig,
+    choose_versus_action,
+    clone_versus_match,
+    run_versus_benchmark,
+)
+from minoflux_engine import VersusMatch
+
+
+class VersusSearchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = VersusSearchConfig(
+            placement_search=SearchConfig(
+                allow_hold=False,
+                lookahead_pieces=0,
+                beam_width=1,
+                srs_reachable=False,
+            ),
+            candidate_width=3,
+            opponent_reply_width=1,
+        )
+
+    def test_clone_preserves_full_match_without_aliasing(self) -> None:
+        match = VersusMatch(123)
+        match.player.pending.enqueue(4, 2)
+        cloned = clone_versus_match(match)
+        cloned.player.pending.cancel(2)
+        cloned.ai.game.board[-1][0] = "G"
+        self.assertEqual(match.player.pending.pending_lines, 4)
+        self.assertIsNone(match.ai.game.board[-1][0])
+        self.assertEqual(cloned.player.pending.pending_lines, 2)
+
+    def test_choice_reads_pending_and_does_not_mutate_match(self) -> None:
+        match = VersusMatch(7)
+        match.ai.pending.enqueue(5, 4)
+        before_board = tuple(tuple(row) for row in match.ai.game.board)
+        before_pending = match.ai.pending.pending_lines
+        choice = choose_versus_action(match, "ai", config=self.config)
+        self.assertIsNotNone(choice)
+        self.assertEqual(tuple(tuple(row) for row in match.ai.game.board), before_board)
+        self.assertEqual(match.ai.pending.pending_lines, before_pending)
+        assert choice is not None
+        self.assertEqual(choice.action.placement.piece, match.ai.game.current)
+
+    def test_small_headless_benchmark_is_deterministic(self) -> None:
+        first = run_versus_benchmark(
+            1,
+            max_turns=8,
+            seed_base=99,
+            player_config=self.config,
+            ai_config=self.config,
+        )
+        second = run_versus_benchmark(
+            1,
+            max_turns=8,
+            seed_base=99,
+            player_config=self.config,
+            ai_config=self.config,
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first.games, 1)
+        self.assertLessEqual(first.per_game[0].turns, 8)
+
+
+if __name__ == "__main__":
+    unittest.main()
