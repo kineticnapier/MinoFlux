@@ -10,9 +10,10 @@ MinoFlux 0.10.0 contains the first opponent-aware and replay-data stages needed 
 - player-versus-AI client
 - opponent-aware action scoring
 - one opponent-reply search layer
-- deterministic headless versus benchmarks
+- mirrored deterministic headless versus benchmarks
 - TETR.IO placement-capture import
 - exact captured-board to SRS-route alignment
+- replay-supervised placement-ranking training
 
 ## Opponent-aware search
 
@@ -52,7 +53,7 @@ uv run minoflux versus-benchmark `
   --save
 ```
 
-The benchmark alternates the starting side and reports wins, attack, uncanceled sent garbage, cancellation, received garbage, maximum B2B, and maximum Surge.
+Consecutive benchmark legs reuse the same bag-seed pair and swap the models between physical boards. This removes most board/seed/first-move bias. Output reports wins, attack, uncanceled sent garbage, cancellation, received garbage, maximum B2B, and maximum Surge.
 
 ## TETR.IO capture input
 
@@ -119,6 +120,33 @@ no-before-board  first observation in a group
 
 Incoming garbage, capture gaps, rule differences, or missing Hold/queue information can produce an unmatched transition. Raw coordinates and boards remain in the dataset even when alignment fails.
 
+## Replay-supervised placement training
+
+The imitation trainer consumes the grouped dataset and its alignment file. For each aligned state it:
+
+1. reconstructs the pre-placement board,
+2. enumerates all SRS-reachable candidates,
+3. identifies the captured expert candidate,
+4. finds the currently highest-scoring rival,
+5. updates the linear heuristic so the expert outranks that rival.
+
+Train a candidate:
+
+```powershell
+uv run minoflux train-imitation `
+  data/datasets/mochbot.jsonl `
+  data/datasets/mochbot-alignment.jsonl `
+  --initial-model data/models/champion-cem.json `
+  --model-out data/models/mochbot-imitation.json `
+  --epochs 4 `
+  --max-samples 5000 `
+  --save
+```
+
+The result includes train/validation/test top-1 accuracy, top-3 accuracy, mean expert rank, skipped-sample reasons, and learned weights. The output remains a `minoflux_heuristic_v1` model, so it can immediately be used by benchmarks, CEM, and the versus client.
+
+This first trainer learns final placement ranking. Samples inferred to contain a Hold transition are skipped because the capture does not always preserve the pre-Hold current piece reliably. Hold-policy imitation will require explicit pre-action current/hold/queue fields.
+
 ## Capture limitations
 
 The existing placement JSON primarily records post-lock board states. It is already suitable for placement imitation and board-transition reconstruction, but exact physical key timing requires the extension to export the replay operation stream as `operations` or `inputs`.
@@ -130,6 +158,9 @@ For best training data, the extension should emit per placement:
   "operations": ["moveLeft", "rotateCW", "hardDrop"],
   "operationFrames": [120, 122, 126],
   "holdUsed": false,
+  "currentBefore": "T",
+  "holdBefore": "I",
+  "nextBefore": ["L", "S", "Z", "O", "J"],
   "pendingGarbage": 4,
   "attackSent": 2,
   "b2b": 17,
@@ -141,12 +172,12 @@ The importer is forward-compatible with an operation array, but the additional t
 
 ## Next implementation stages
 
-1. Train a supervised placement-ranking model from aligned captures.
-2. Use that model to prune SRS candidates before versus search.
-3. Add a learned state-value head for B2B maintenance and Surge release timing.
-4. Add bitboard state, transposition caching, and batched inference.
-5. Train with a league of historical agents rather than one fixed opponent.
-6. Add PPS/input-budget constraints and lock-delay-aware route feasibility.
+1. Use the imitation model to prune SRS candidates before deeper versus search.
+2. Add a learned state-value head for B2B maintenance and Surge release timing.
+3. Add bitboard state, transposition caching, and batched inference.
+4. Train with a league of historical agents rather than one fixed opponent.
+5. Add PPS/input-budget constraints and lock-delay-aware route feasibility.
+6. Train Hold selection once explicit pre-action queue data is available.
 7. Promote models by unseen-seed versus win rate, not solo Attack alone.
 
-The supervised stage should predict a distribution over legal placements rather than raw coordinates. This guarantees that the learned policy is used only to rank actions already verified by the MinoFlux SRS generator.
+The supervised policy ranks legal placements rather than predicting unrestricted raw coordinates. The learned model is therefore used only on actions already verified by the MinoFlux SRS generator.
