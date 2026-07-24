@@ -9,6 +9,7 @@ from minoflux_ai import (
     DEFAULT_WEIGHTS,
     FITNESS_PROFILE_ATTACK_SPIN,
     FITNESS_PROFILE_NAMES,
+    ImitationConfig,
     PromotionConfig,
     REPLAY_FORMAT,
     SearchConfig,
@@ -30,6 +31,7 @@ from minoflux_ai import (
     save_replay,
     save_weights,
     train_cem,
+    train_imitation,
 )
 from minoflux_engine import BOARD_HEIGHT, BOARD_WIDTH, HIDDEN_ROWS, PIECE_NAMES, VISIBLE_HEIGHT
 
@@ -38,6 +40,7 @@ from .simulation import run_smoke
 
 CHAMPION_MODEL = Path("data/models/champion-cem.json")
 CANDIDATE_MODEL = Path("data/models/candidate-cem.json")
+IMITATION_MODEL = Path("data/models/imitation-candidate.json")
 LEGACY_LATEST_MODEL = Path("data/models/latest-cem.json")
 MODEL_HISTORY_DIR = Path("data/models/history")
 RECOVERED_ATTACK_MODEL = Path("presets/recovered-attack-20260723.json")
@@ -118,6 +121,21 @@ def build_parser() -> ArgumentParser:
     capture.add_argument("--align-180", action=BooleanOptionalAction, default=True)
     capture.add_argument("--align-max-nodes", type=int, default=8000)
 
+    imitation = sub.add_parser("train-imitation", help="Learn placement-ranking weights from aligned captures")
+    imitation.add_argument("dataset", help="JSONL produced by import-tetrio-capture")
+    imitation.add_argument("alignment", help="Alignment JSONL produced with --align-out")
+    imitation.add_argument("--initial-model", help="Starting minoflux_heuristic_v1 model")
+    imitation.add_argument("--model-out", default=str(IMITATION_MODEL))
+    imitation.add_argument("--epochs", type=int, default=4)
+    imitation.add_argument("--learning-rate", type=float, default=0.08)
+    imitation.add_argument("--l2", type=float, default=0.0001)
+    imitation.add_argument("--random-seed", type=int, default=12345)
+    imitation.add_argument("--max-samples", type=int, default=5000)
+    imitation.add_argument("--allow-180", action=BooleanOptionalAction, default=True)
+    imitation.add_argument("--max-nodes", type=int, default=8000)
+    imitation.add_argument("--include-ambiguous", action=BooleanOptionalAction, default=True)
+    imitation.add_argument("--save", action="store_true")
+
     cem = sub.add_parser("train-cem", help="Tune heuristic weights with the Cross-Entropy Method")
     cem.add_argument("--generations", type=int, default=10)
     cem.add_argument("--population", type=int, default=24)
@@ -166,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
                 "features": "minoflux_ai",
                 "baseline": "heuristic",
                 "search": ["hold candidates", "SRS reachability", "lookahead", "beam search", "opponent reply"],
-                "trainer": "cem",
+                "trainers": ["cem", "replay-supervised placement ranking"],
                 "fitnessProfiles": list(FITNESS_PROFILE_NAMES),
                 "modelPromotion": "candidate versus champion on unseen seeds",
                 "versus": ["pending garbage", "cancellation", "opponent board", "B2B Charge", "Surge"],
@@ -293,6 +311,38 @@ def main(argv: list[str] | None = None) -> int:
             result["alignment"] = alignment_summary(alignments)
             result["alignmentPath"] = str(alignment_path)
             result["alignmentSummaryPath"] = str(alignment_summary_path)
+        _print(result)
+        return 0
+    if args.command == "train-imitation":
+        bootstrap_champion(CHAMPION_MODEL, recovery_path=RECOVERED_ATTACK_MODEL, legacy_path=LEGACY_LATEST_MODEL)
+        initial = load_weights(args.initial_model) if args.initial_model else (
+            load_weights(CHAMPION_MODEL) if CHAMPION_MODEL.is_file() else DEFAULT_WEIGHTS
+        )
+        config = ImitationConfig(
+            epochs=args.epochs,
+            learning_rate=args.learning_rate,
+            l2=args.l2,
+            random_seed=args.random_seed,
+            max_samples=args.max_samples,
+            allow_180=args.allow_180,
+            reachability_node_limit=args.max_nodes,
+            include_ambiguous=args.include_ambiguous,
+        )
+        trained = train_imitation(args.dataset, args.alignment, initial, config)
+        model_path = save_weights(args.model_out, trained.learned_weights)
+        result = trained.to_dict()
+        result["modelPath"] = str(model_path)
+        if args.save:
+            run = RunStore().create("imitation-training", vars(args))
+            run.save_result(result)
+            run.append_metric({
+                "type": "complete",
+                "preparedExamples": trained.prepared_examples,
+                "trainTop1": trained.train.top1_accuracy,
+                "validationTop1": trained.validation.top1_accuracy,
+                "testTop1": trained.test.top1_accuracy,
+            })
+            result["runPath"] = str(run.path)
         _print(result)
         return 0
     if args.command == "train-cem":
