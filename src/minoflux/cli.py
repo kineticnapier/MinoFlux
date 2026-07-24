@@ -12,12 +12,18 @@ from minoflux_ai import (
     PromotionConfig,
     REPLAY_FORMAT,
     SearchConfig,
+    VersusSearchConfig,
     benchmark_fitness,
     bootstrap_champion,
+    build_capture_samples,
+    capture_summary,
     evaluate_and_promote_model,
+    load_tetrio_capture,
     load_weights,
     resolve_fitness_profile,
     run_heuristic_benchmark,
+    run_versus_benchmark,
+    save_capture_dataset,
     save_replay,
     save_weights,
     train_cem,
@@ -87,6 +93,25 @@ def build_parser() -> ArgumentParser:
     _add_search_arguments(benchmark, lookahead_default=1)
     benchmark.add_argument("--save", action="store_true")
 
+    versus = sub.add_parser("versus-benchmark", help="Run deterministic AI-versus-AI garbage matches")
+    versus.add_argument("--games", type=int, default=4)
+    versus.add_argument("--max-turns", type=int, default=400)
+    versus.add_argument("--seed-base", type=int, default=1)
+    versus.add_argument("--seed-step", type=int, default=31)
+    versus.add_argument("--player-model", help="Model for the left/player side")
+    versus.add_argument("--ai-model", help="Model for the right/AI side")
+    versus.add_argument("--candidate-width", type=int, default=8)
+    versus.add_argument("--reply-width", type=int, default=2)
+    versus.add_argument("--garbage-cap", type=int, default=8)
+    _add_search_arguments(versus, lookahead_default=0)
+    versus.add_argument("--save", action="store_true")
+
+    capture = sub.add_parser("import-tetrio-capture", help="Convert tetrio-placements JSON to grouped JSONL")
+    capture.add_argument("input", help="tetrio-placements-*.json from the replay-capture extension")
+    capture.add_argument("--output", default="data/datasets/tetrio-capture.jsonl")
+    capture.add_argument("--summary-out")
+    capture.add_argument("--username", help="Keep only one player, case-insensitive")
+
     cem = sub.add_parser("train-cem", help="Tune heuristic weights with the Cross-Entropy Method")
     cem.add_argument("--generations", type=int, default=10)
     cem.add_argument("--population", type=int, default=24)
@@ -134,17 +159,12 @@ def main(argv: list[str] | None = None) -> int:
             "ai": {
                 "features": "minoflux_ai",
                 "baseline": "heuristic",
-                "search": ["hold candidates", "lookahead", "beam search"],
+                "search": ["hold candidates", "SRS reachability", "lookahead", "beam search", "opponent reply"],
                 "trainer": "cem",
                 "fitnessProfiles": list(FITNESS_PROFILE_NAMES),
                 "modelPromotion": "candidate versus champion on unseen seeds",
-                "acceleration": [
-                    "board-only placement simulation",
-                    "bounded top-k beam ranking",
-                    "parallel benchmark games",
-                    "process workers",
-                    "candidate screening",
-                ],
+                "versus": ["pending garbage", "cancellation", "opponent board", "B2B Charge", "Surge"],
+                "captureImporter": "tetrio-placements JSON to grouped leakage-safe JSONL",
                 "modelFormat": "minoflux_heuristic_v1",
                 "replayFormat": REPLAY_FORMAT,
             },
@@ -209,6 +229,56 @@ def main(argv: list[str] | None = None) -> int:
             result["bestReplayPath"] = str(replay_path)
         _print(result)
         return 0
+    if args.command == "versus-benchmark":
+        bootstrap_champion(CHAMPION_MODEL, recovery_path=RECOVERED_ATTACK_MODEL, legacy_path=LEGACY_LATEST_MODEL)
+        player_weights = load_weights(args.player_model) if args.player_model else (
+            load_weights(CHAMPION_MODEL) if CHAMPION_MODEL.is_file() else DEFAULT_WEIGHTS
+        )
+        ai_weights = load_weights(args.ai_model) if args.ai_model else player_weights
+        placement_config = _search_config_from_args(args)
+        versus_config = VersusSearchConfig(
+            placement_search=placement_config,
+            candidate_width=args.candidate_width,
+            opponent_reply_width=args.reply_width,
+        ).normalized()
+        benchmark = run_versus_benchmark(
+            max(1, args.games),
+            max_turns=max(1, args.max_turns),
+            seed_base=args.seed_base,
+            seed_step=args.seed_step,
+            player_weights=player_weights,
+            ai_weights=ai_weights,
+            player_config=versus_config,
+            ai_config=versus_config,
+            garbage_cap=args.garbage_cap,
+        )
+        result = benchmark.to_dict()
+        result["playerWeights"] = player_weights.to_dict()
+        result["aiWeights"] = ai_weights.to_dict()
+        result["versusSearchConfig"] = versus_config.to_dict()
+        if args.save:
+            run = RunStore().create("versus-benchmark", {**vars(args), "versusSearchConfig": versus_config.to_dict()})
+            run.save_result(result)
+            run.append_metric({
+                "type": "complete",
+                "playerWins": result["playerWins"],
+                "aiWins": result["aiWins"],
+                "draws": result["draws"],
+                "meanTurns": result["meanTurns"],
+            })
+            result["runPath"] = str(run.path)
+        _print(result)
+        return 0
+    if args.command == "import-tetrio-capture":
+        placements = load_tetrio_capture(args.input)
+        samples = build_capture_samples(placements, username=args.username)
+        output, summary_path = save_capture_dataset(args.output, samples, summary_path=args.summary_out)
+        result = capture_summary(samples)
+        result["sourcePath"] = str(Path(args.input))
+        result["datasetPath"] = str(output)
+        result["summaryPath"] = str(summary_path)
+        _print(result)
+        return 0
     if args.command == "train-cem":
         champion_path = Path(args.champion_model)
         bootstrap_champion(champion_path, recovery_path=RECOVERED_ATTACK_MODEL, legacy_path=LEGACY_LATEST_MODEL)
@@ -237,6 +307,9 @@ def main(argv: list[str] | None = None) -> int:
             lookahead_pieces=search_config.lookahead_pieces,
             beam_width=search_config.beam_width,
             lookahead_discount=search_config.discount,
+            srs_reachable=search_config.srs_reachable,
+            allow_180=search_config.allow_180,
+            reachability_node_limit=search_config.reachability_node_limit,
             fitness_profile=profile.name,
         )
         run = RunStore().create(
