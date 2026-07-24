@@ -13,6 +13,8 @@ from minoflux_ai import (
     REPLAY_FORMAT,
     SearchConfig,
     VersusSearchConfig,
+    align_capture_samples,
+    alignment_summary,
     benchmark_fitness,
     bootstrap_champion,
     build_capture_samples,
@@ -23,6 +25,7 @@ from minoflux_ai import (
     resolve_fitness_profile,
     run_heuristic_benchmark,
     run_versus_benchmark,
+    save_alignments,
     save_capture_dataset,
     save_replay,
     save_weights,
@@ -111,6 +114,9 @@ def build_parser() -> ArgumentParser:
     capture.add_argument("--output", default="data/datasets/tetrio-capture.jsonl")
     capture.add_argument("--summary-out")
     capture.add_argument("--username", help="Keep only one player, case-insensitive")
+    capture.add_argument("--align-out", help="Also write exact SRS board-transition alignments")
+    capture.add_argument("--align-180", action=BooleanOptionalAction, default=True)
+    capture.add_argument("--align-max-nodes", type=int, default=8000)
 
     cem = sub.add_parser("train-cem", help="Tune heuristic weights with the Cross-Entropy Method")
     cem.add_argument("--generations", type=int, default=10)
@@ -164,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
                 "fitnessProfiles": list(FITNESS_PROFILE_NAMES),
                 "modelPromotion": "candidate versus champion on unseen seeds",
                 "versus": ["pending garbage", "cancellation", "opponent board", "B2B Charge", "Surge"],
-                "captureImporter": "tetrio-placements JSON to grouped leakage-safe JSONL",
+                "captureImporter": "tetrio-placements JSON to grouped leakage-safe JSONL and SRS alignments",
                 "modelFormat": "minoflux_heuristic_v1",
                 "replayFormat": REPLAY_FORMAT,
             },
@@ -277,6 +283,16 @@ def main(argv: list[str] | None = None) -> int:
         result["sourcePath"] = str(Path(args.input))
         result["datasetPath"] = str(output)
         result["summaryPath"] = str(summary_path)
+        if args.align_out:
+            alignments = align_capture_samples(
+                samples,
+                allow_180=args.align_180,
+                max_nodes=args.align_max_nodes,
+            )
+            alignment_path, alignment_summary_path = save_alignments(args.align_out, alignments)
+            result["alignment"] = alignment_summary(alignments)
+            result["alignmentPath"] = str(alignment_path)
+            result["alignmentSummaryPath"] = str(alignment_summary_path)
         _print(result)
         return 0
     if args.command == "train-cem":
