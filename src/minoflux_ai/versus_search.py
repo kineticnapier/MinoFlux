@@ -121,6 +121,7 @@ def score_versus_state(
     resolution: VersusResolution | None = None,
     solo_score: float = 0.0,
     path_length: int = 0,
+    action_side: SideName | None = None,
 ) -> float:
     own = _side(match, root_side)
     opponent = _side(match, _opponent_name(root_side))
@@ -133,6 +134,7 @@ def score_versus_state(
 
     own_board = extract_board_features(own.game.board)
     opponent_board = extract_board_features(opponent.game.board)
+    input_direction = 1.0 if action_side in (None, root_side) else -1.0
     score = (
         solo_score * weights.solo_evaluation
         + own.pending.pending_lines * weights.own_pending
@@ -145,7 +147,7 @@ def score_versus_state(
         + opponent.game.b2b_chain * weights.opponent_b2b
         + own.game.surge_charge * weights.own_surge
         + opponent.game.surge_charge * weights.opponent_surge
-        + max(0, int(path_length)) * weights.input_cost
+        + input_direction * max(0, int(path_length)) * weights.input_cost
     )
     if resolution is not None:
         direction = 1.0 if resolution.side == root_side else -1.0
@@ -195,6 +197,7 @@ def choose_versus_action(
             resolution=resolution,
             solo_score=evaluation.score,
             path_length=len(action.placement.path),
+            action_side=side_name,
         )
         reply_action: SearchAction | None = None
         score = base_score
@@ -222,6 +225,7 @@ def choose_versus_action(
                         resolution=reply_resolution,
                         solo_score=-reply_evaluation.score,
                         path_length=len(reply.placement.path),
+                        action_side=opponent_name,
                     )
                     if worst_score is None or reply_score < worst_score:
                         worst_score = reply_score
