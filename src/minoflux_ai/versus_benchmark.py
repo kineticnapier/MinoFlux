@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 from minoflux_engine import VersusMatch
 
@@ -32,6 +32,7 @@ class VersusGameResult:
     ai_max_b2b: int
     player_max_surge: int
     ai_max_surge: int
+    models_swapped: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,7 @@ class VersusBenchmarkResult:
             "maxTurns": self.max_turns,
             "seedBase": self.seed_base,
             "seedStep": self.seed_step,
+            "mirroredSides": True,
             "playerWins": self.player_wins,
             "aiWins": self.ai_wins,
             "draws": self.draws,
@@ -128,6 +130,29 @@ def run_versus_game(
     )
 
 
+def _remap_swapped_result(result: VersusGameResult) -> VersusGameResult:
+    winner = {"player": "ai", "ai": "player", "draw": "draw"}[result.winner]
+    return replace(
+        result,
+        winner=winner,
+        player_pieces=result.ai_pieces,
+        ai_pieces=result.player_pieces,
+        player_attack=result.ai_attack,
+        ai_attack=result.player_attack,
+        player_sent=result.ai_sent,
+        ai_sent=result.player_sent,
+        player_canceled=result.ai_canceled,
+        ai_canceled=result.player_canceled,
+        player_received=result.ai_received,
+        ai_received=result.player_received,
+        player_max_b2b=result.ai_max_b2b,
+        ai_max_b2b=result.player_max_b2b,
+        player_max_surge=result.ai_max_surge,
+        ai_max_surge=result.player_max_surge,
+        models_swapped=True,
+    )
+
+
 def run_versus_benchmark(
     games: int = 10,
     *,
@@ -141,31 +166,37 @@ def run_versus_benchmark(
     garbage_cap: int = 8,
 ) -> VersusBenchmarkResult:
     count = max(1, int(games))
-    results = tuple(
-        run_versus_game(
-            int(seed_base) + index * int(seed_step),
+    results: list[VersusGameResult] = []
+    for index in range(count):
+        swapped = index % 2 == 1
+        # Consecutive legs share the same pair of bag seeds. The second leg swaps
+        # models between the physical boards, removing side/bag/start bias.
+        seed = int(seed_base) + (index // 2) * int(seed_step)
+        physical = run_versus_game(
+            seed,
             max_turns=max_turns,
-            player_weights=player_weights,
-            ai_weights=ai_weights,
-            player_config=player_config,
-            ai_config=ai_config,
+            player_weights=ai_weights if swapped else player_weights,
+            ai_weights=player_weights if swapped else ai_weights,
+            player_config=ai_config if swapped else player_config,
+            ai_config=player_config if swapped else ai_config,
             garbage_cap=garbage_cap,
-            player_starts=index % 2 == 0,
+            player_starts=True,
         )
-        for index in range(count)
-    )
+        results.append(_remap_swapped_result(physical) if swapped else physical)
+
+    result_tuple = tuple(results)
     return VersusBenchmarkResult(
         games=count,
         max_turns=max(1, int(max_turns)),
         seed_base=int(seed_base),
         seed_step=int(seed_step),
-        player_wins=sum(item.winner == "player" for item in results),
-        ai_wins=sum(item.winner == "ai" for item in results),
-        draws=sum(item.winner == "draw" for item in results),
-        mean_turns=sum(item.turns for item in results) / count,
-        player_mean_attack=sum(item.player_attack for item in results) / count,
-        ai_mean_attack=sum(item.ai_attack for item in results) / count,
-        player_mean_sent=sum(item.player_sent for item in results) / count,
-        ai_mean_sent=sum(item.ai_sent for item in results) / count,
-        per_game=results,
+        player_wins=sum(item.winner == "player" for item in result_tuple),
+        ai_wins=sum(item.winner == "ai" for item in result_tuple),
+        draws=sum(item.winner == "draw" for item in result_tuple),
+        mean_turns=sum(item.turns for item in result_tuple) / count,
+        player_mean_attack=sum(item.player_attack for item in result_tuple) / count,
+        ai_mean_attack=sum(item.ai_attack for item in result_tuple) / count,
+        player_mean_sent=sum(item.player_sent for item in result_tuple) / count,
+        ai_mean_sent=sum(item.ai_sent for item in result_tuple) / count,
+        per_game=result_tuple,
     )
