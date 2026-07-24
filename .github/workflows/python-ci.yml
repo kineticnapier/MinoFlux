@@ -29,7 +29,9 @@ jobs:
         run: uv run --no-sync python -m minoflux smoke --games 2 --max-pieces 30
       - name: Run parallel Attack/Spin benchmark and replay fixture
         run: uv run --no-sync python -m minoflux benchmark --games 2 --max-pieces 8 --workers 2 --fitness-profile attack_spin --hold --lookahead-pieces 1 --beam-width 2 --replay-out data/replays/ci-benchmark.json
+      - name: Run tiny opponent-aware versus benchmark
+        run: uv run --no-sync python -m minoflux versus-benchmark --games 1 --max-turns 4 --candidate-width 2 --reply-width 0 --no-hold --lookahead-pieces 0 --beam-width 1
       - name: Run parallel Hold-aware CEM fixture without promotion benchmark
         run: uv run --no-sync python -m minoflux train-cem --generations 1 --population 4 --games 1 --max-pieces 8 --validation-games 1 --workers 2 --screen-games 1 --screen-max-pieces 4 --screen-fraction 0.5 --fitness-profile attack_spin --hold --lookahead-pieces 0 --beam-width 2 --no-promote --model-out data/models/ci-cem.json --replay-out data/replays/ci-cem.json
-      - name: Import replay viewer
-        run: uv run --no-sync python -c "from minoflux.replay import build_parser; print(build_parser().prog)"
+      - name: Import Pygame clients and capture tools
+        run: uv run --no-sync python -c "from minoflux.replay import build_parser as replay_parser; from minoflux.versus_ai import build_parser as versus_parser; from minoflux_ai import load_tetrio_capture, align_capture_samples; print(replay_parser().prog, versus_parser().prog)"
