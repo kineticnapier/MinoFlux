@@ -79,7 +79,8 @@ class HoldReplayTests(unittest.TestCase):
         }
         replay = Replay.from_mapping(payload)
         self.assertFalse(replay.steps[0].hold)
-        self.assertEqual(replay.format, REPLAY_FORMAT)
+        self.assertEqual(replay.format, LEGACY_REPLAY_FORMAT)
+        self.assertEqual(replay.to_dict()["format"], REPLAY_FORMAT)
         rebuilt = replay_to_game(replay)
         self.assertEqual(rebuilt.snapshot(), game.snapshot())
 
