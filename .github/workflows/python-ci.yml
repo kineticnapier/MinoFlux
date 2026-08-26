@@ -2,7 +2,9 @@ name: Python CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - self-improve
   pull_request:
 
 jobs:
