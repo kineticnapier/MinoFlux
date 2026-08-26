@@ -43,50 +43,6 @@ jobs:
         if: matrix.python-version == '3.13'
         run: uv run --no-sync python -c "from minoflux.replay import build_parser as replay_parser; from minoflux.versus_ai import build_parser as versus_parser; from minoflux_ai import load_tetrio_capture, align_capture_samples; print(replay_parser().prog, versus_parser().prog)"
 
-  self-improve-eval:
-    name: self-improve reachability evaluation
-    if: github.event_name == 'push' && github.ref == 'refs/heads/self-improve'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          python-version: "3.13"
-          enable-cache: true
-      - name: Sync package and dev dependencies
-        run: uv sync --extra dev
-      - name: Compare reachability node limits
-        run: |
-          uv run --no-sync python - <<'PY'
-          import json
-          import time
-          from minoflux_ai import SearchConfig, load_weights, run_heuristic_benchmark
-
-          weights = load_weights('presets/recovered-attack-20260723.json')
-          cases = [('fixed', 1), ('unseen', 1009)]
-          for label, seed in cases:
-              for limit in (8000, 4000):
-                  cfg = SearchConfig(allow_hold=True, lookahead_pieces=1, beam_width=4, discount=0.90, reachability_node_limit=limit)
-                  start = time.perf_counter()
-                  result = run_heuristic_benchmark(games=2, max_pieces=40, seed_base=seed, seed_step=31, weights=weights, search_config=cfg, workers=2)
-                  elapsed = time.perf_counter() - start
-                  payload = {
-                      'case': label,
-                      'nodeLimit': limit,
-                      'elapsedSec': round(elapsed, 3),
-                      'attack': result.attack,
-                      'attackPerPiece': round(result.attack / max(1, result.pieces), 6),
-                      'pieces': result.pieces,
-                      'topouts': result.topouts,
-                      'spinLines': result.spin_lines,
-                      'tSpinDoubles': result.t_spin_doubles,
-                      'tSpinTriples': result.t_spin_triples,
-                      'completed': result.completed,
-                  }
-                  print('SELF_IMPROVE_EVAL ' + json.dumps(payload, sort_keys=True))
-          PY
-
   full-validation:
     name: full-validation (3.13)
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
