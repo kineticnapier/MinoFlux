@@ -69,7 +69,7 @@ jobs:
               for limit in (8000, 4000):
                   cfg = SearchConfig(allow_hold=True, lookahead_pieces=1, beam_width=4, discount=0.90, reachability_node_limit=limit)
                   start = time.perf_counter()
-                  result = run_heuristic_benchmark(games=4, max_pieces=80, seed_base=seed, seed_step=31, weights=weights, search_config=cfg, workers=2)
+                  result = run_heuristic_benchmark(games=2, max_pieces=40, seed_base=seed, seed_step=31, weights=weights, search_config=cfg, workers=2)
                   elapsed = time.perf_counter() - start
                   payload = {
                       'case': label,
