@@ -8,21 +8,19 @@ on:
       - .github/workflows/strength-tournament-queue.yml
 
 jobs:
-  fresh:
+  versus:
     strategy:
       fail-fast: false
       matrix:
         candidate:
-          - baseline
-          - t_ready_quality
           - hold_t_release
-          - t_slot_conversion
+          - t_ready_quality
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - run: python tools/strength_tournament_queue.py --phase fresh --candidate "${{ matrix.candidate }}"
+      - run: python tools/strength_tournament_queue.py --phase versus --candidate "${{ matrix.candidate }}"
