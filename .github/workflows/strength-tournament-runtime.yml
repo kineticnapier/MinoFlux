@@ -1,0 +1,26 @@
+name: Strength tournament runtime
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - 'tools/strength_tournament_runtime.py'
+      - '.github/workflows/strength-tournament-runtime.yml'
+      - 'src/minoflux_ai/heuristic.py'
+jobs:
+  short:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: [baseline, t_arrival_slot_preserve, t_arrival_slot_create, t_far_clean_preserve, t_hold_slot_reserve, t_current_conversion, b2b_break_cost, b2b_start_value, b2b_chain_value, surge_preservation, danger_spin_escape, danger_b2b_escape, garbage_downstack_attack, garbage_hole_pressure, combo_b2b_tradeoff]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -e .
+      - name: Run short strength screen
+        env:
+          CANDIDATE: ${{ matrix.candidate }}
+          PHASE: short
+        run: python tools/strength_tournament_runtime.py
