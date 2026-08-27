@@ -113,6 +113,48 @@ class HeuristicTests(unittest.TestCase):
             t_spin_slot_density=0,
             t_spin_slot_delta=0,
             t_spin_slot_height_quality=1,
+            t_spin_slot_low_clean=0,
+            new_holes=0,
+            lines=0,
+            attack=0,
+            spin_lines=0,
+            perfect_clear=0,
+            game_over=0,
+        )
+        self.assertAlmostEqual(score_features(features, weights), 1.0)
+
+    def test_slot_low_clean_formula_penalizes_holes_and_height_together(self) -> None:
+        board = BoardFeatures(
+            aggregate_height=0,
+            max_height=6,
+            holes=1,
+            hole_depth=0,
+            bumpiness=0,
+            wells=0,
+            t_spin_slots=3,
+            occupied_cells=0,
+        )
+        features = PlacementFeatures(
+            board=board,
+            new_holes=0,
+            lines=0,
+            attack=0,
+            spin_lines=0,
+            perfect_clear=False,
+            game_over=False,
+        )
+        weights = HeuristicWeights(
+            aggregate_height=0,
+            max_height=0,
+            holes=0,
+            hole_depth=0,
+            bumpiness=0,
+            wells=0,
+            t_spin_slots=0,
+            t_spin_slot_density=0,
+            t_spin_slot_delta=0,
+            t_spin_slot_height_quality=0,
+            t_spin_slot_low_clean=1,
             new_holes=0,
             lines=0,
             attack=0,
@@ -129,6 +171,7 @@ class HeuristicTests(unittest.TestCase):
             t_spin_slots=0.9,
             t_spin_slot_density=0.4,
             t_spin_slot_height_quality=0.65,
+            t_spin_slot_low_clean=0.75,
         )
         with TemporaryDirectory() as directory:
             path = save_weights(f"{directory}/weights.json", custom)
@@ -147,6 +190,15 @@ class HeuristicTests(unittest.TestCase):
         self.assertEqual(
             loaded.t_spin_slot_height_quality,
             DEFAULT_WEIGHTS.t_spin_slot_height_quality,
+        )
+
+    def test_old_weight_mapping_uses_slot_low_clean_default(self) -> None:
+        old_weights = DEFAULT_WEIGHTS.to_dict()
+        old_weights.pop("t_spin_slot_low_clean")
+        loaded = HeuristicWeights.from_mapping(old_weights)
+        self.assertEqual(
+            loaded.t_spin_slot_low_clean,
+            DEFAULT_WEIGHTS.t_spin_slot_low_clean,
         )
 
     def test_unknown_weight_is_rejected(self) -> None:
