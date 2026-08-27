@@ -7,20 +7,16 @@ on:
       - '.github/workflows/strength-tournament-runtime.yml'
       - 'src/minoflux_ai/heuristic.py'
 jobs:
-  fresh:
+  versus:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        candidate: [baseline, b2b_break_cost, b2b_start_value, danger_spin_escape]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - name: Run fresh strength screen
+      - name: Run mirrored versus final
         env:
-          CANDIDATE: ${{ matrix.candidate }}
-          PHASE: fresh
+          CANDIDATE: b2b_start_value
+          PHASE: versus
         run: python tools/strength_tournament_runtime.py
