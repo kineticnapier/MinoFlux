@@ -21,12 +21,16 @@ class HeuristicWeights:
     max_height: float = -0.080000
     holes: float = -0.800000
     hole_depth: float = -0.120000
+    downstack_cost: float = 0.0
     bumpiness: float = -0.184483
     wells: float = -0.060000
+    t_spin_slots: float = 0.0
     new_holes: float = -1.200000
     lines: float = 0.760666
     attack: float = 0.850000
     spin_lines: float = 1.250000
+    b2b_extend: float = 0.0
+    b2b_break: float = 0.0
     perfect_clear: float = 8.000000
     game_over: float = -1_000_000.0
 
@@ -54,6 +58,8 @@ class PlacementFeatures:
     lines: int
     attack: int
     spin_lines: int
+    b2b_extend: int
+    b2b_break: bool
     perfect_clear: bool
     game_over: bool
     spin: str | None = None
@@ -65,6 +71,8 @@ class PlacementFeatures:
             "lines": self.lines,
             "attack": self.attack,
             "spin_lines": self.spin_lines,
+            "b2b_extend": self.b2b_extend,
+            "b2b_break": self.b2b_break,
             "perfect_clear": self.perfect_clear,
             "game_over": self.game_over,
             "spin": self.spin,
@@ -86,12 +94,16 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
         + board.max_height * weights.max_height
         + board.holes * weights.holes
         + board.hole_depth * weights.hole_depth
+        + board.downstack_cost * weights.downstack_cost
         + board.bumpiness * weights.bumpiness
         + board.wells * weights.wells
+        + board.t_spin_slots * weights.t_spin_slots
         + features.new_holes * weights.new_holes
         + features.lines * weights.lines
         + features.attack * weights.attack
         + features.spin_lines * weights.spin_lines
+        + features.b2b_extend * weights.b2b_extend
+        + int(features.b2b_break) * weights.b2b_break
         + int(features.perfect_clear) * weights.perfect_clear
         + int(features.game_over) * weights.game_over
     )
@@ -144,6 +156,11 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
     if perfect_clear and lines:
         attack += 10
 
+    b2b_extend = max(0, b2b.chain - game.b2b_chain)
+    if lines and b2b.active and not game.back_to_back:
+        b2b_extend += 1
+    b2b_break = bool(game.back_to_back and lines and not b2b.active)
+
     hidden_occupied = any(cell is not None for row in board[: game.hidden_rows] for cell in row)
     after = extract_board_features(board)
     return PlacementFeatures(
@@ -152,6 +169,8 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
         lines=lines,
         attack=attack,
         spin_lines=lines if spin is not None else 0,
+        b2b_extend=b2b_extend,
+        b2b_break=b2b_break,
         perfect_clear=perfect_clear,
         game_over=topped_out or hidden_occupied,
         spin=spin,
