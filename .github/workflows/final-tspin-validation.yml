@@ -1,0 +1,117 @@
+name: Final T-spin setup validation
+
+on:
+  push:
+    branches: [self-improve]
+
+concurrency:
+  group: final-tspin-validation
+  cancel-in-progress: true
+
+jobs:
+  solo:
+    name: final-solo (${{ matrix.weight }})
+    strategy:
+      fail-fast: false
+      matrix:
+        weight: ["0.0", "1.25", "1.5"]
+    runs-on: ubuntu-latest
+    env:
+      TSPIN_WEIGHT: ${{ matrix.weight }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync package
+        run: uv sync --extra dev
+      - name: Run fresh long solo validation
+        run: |
+          uv run --no-sync python - <<'PY'
+          import os
+          from dataclasses import replace
+          from time import perf_counter
+
+          from minoflux_ai.benchmark import run_heuristic_benchmark
+          from minoflux_ai.heuristic import DEFAULT_WEIGHTS
+          from minoflux_ai.search import DEFAULT_SEARCH_CONFIG
+
+          value = float(os.environ["TSPIN_WEIGHT"])
+          weights = replace(DEFAULT_WEIGHTS, t_spin_slots=value)
+          started = perf_counter()
+          result = run_heuristic_benchmark(
+              games=6,
+              max_pieces=250,
+              seed_base=433494437,
+              seed_step=15485863,
+              weights=weights,
+              search_config=DEFAULT_SEARCH_CONFIG,
+              workers=6,
+          )
+          elapsed = perf_counter() - started
+          app = result.attack / result.pieces if result.pieces else 0.0
+          print(
+              f"FINAL_SOLO weight={value:.2f} pieces={result.pieces} attack={result.attack} "
+              f"app={app:.6f} topouts={result.topouts} completed={result.completed}/{result.games} "
+              f"lines={result.lines} spins={result.spins} spin_lines={result.spin_lines} "
+              f"tsd={result.t_spin_doubles} tst={result.t_spin_triples} pc={result.perfect_clears} "
+              f"elapsed={elapsed:.3f}"
+          )
+          for game in result.per_game:
+              print("GAME", game)
+          PY
+
+  versus:
+    name: final-versus (${{ matrix.weight }})
+    strategy:
+      fail-fast: false
+      matrix:
+        weight: ["1.25", "1.5"]
+    runs-on: ubuntu-latest
+    env:
+      TSPIN_WEIGHT: ${{ matrix.weight }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync package
+        run: uv sync --extra dev
+      - name: Run mirrored versus validation against zero-slot baseline
+        run: |
+          uv run --no-sync python - <<'PY'
+          import os
+          from dataclasses import replace
+
+          from minoflux_ai.heuristic import DEFAULT_WEIGHTS
+          from minoflux_ai.versus_benchmark import run_versus_benchmark
+          from minoflux_ai.versus_search import DEFAULT_VERSUS_SEARCH_CONFIG
+
+          value = float(os.environ["TSPIN_WEIGHT"])
+          candidate = replace(DEFAULT_WEIGHTS, t_spin_slots=value)
+          baseline = replace(DEFAULT_WEIGHTS, t_spin_slots=0.0)
+          cfg = replace(DEFAULT_VERSUS_SEARCH_CONFIG, candidate_width=4, opponent_reply_width=1)
+          result = run_versus_benchmark(
+              games=8,
+              max_turns=80,
+              seed_base=271828183,
+              seed_step=1000003,
+              player_weights=candidate,
+              ai_weights=baseline,
+              player_config=cfg,
+              ai_config=cfg,
+          )
+          print(
+              f"FINAL_VERSUS weight={value:.2f} candidate_wins={result.player_wins} "
+              f"baseline_wins={result.ai_wins} draws={result.draws} "
+              f"candidate_attack={result.player_mean_attack:.3f} baseline_attack={result.ai_mean_attack:.3f} "
+              f"candidate_sent={result.player_mean_sent:.3f} baseline_sent={result.ai_mean_sent:.3f} "
+              f"mean_turns={result.mean_turns:.3f}"
+          )
+          for game in result.per_game:
+              print("GAME", game)
+          PY
