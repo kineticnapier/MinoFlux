@@ -17,7 +17,7 @@ jobs:
       - run: pip install -e .
       - name: Compare baseline and stronger new-hole penalty
         run: |
-          python - <<'PY'
+          python - <<'PY' | tee eval.txt
           from dataclasses import replace
           from minoflux_ai.benchmark import run_heuristic_benchmark
           from minoflux_ai.heuristic import DEFAULT_WEIGHTS
@@ -36,3 +36,9 @@ jobs:
                   total_tsd += r.t_spin_doubles; total_tst += r.t_spin_triples; total_topouts += r.topouts; total_completed += r.completed
               print(f'TOTAL pieces={total_pieces} attack={total_attack} app={total_attack/total_pieces:.6f} topouts={total_topouts} completed={total_completed} spins={total_spins} spin_lines={total_spin_lines} tsd={total_tsd} tst={total_tst}')
           PY
+          {
+            echo '### Strength evaluation'
+            echo '```text'
+            cat eval.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
