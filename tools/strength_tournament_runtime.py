@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# Temporary runtime harness; removed after the tournament.
 from dataclasses import replace
 import json
 import os
@@ -102,7 +103,7 @@ def run_versus():
         "baseline_max_b2b": sum(r.ai_max_b2b for r in rows) / len(rows),
         "candidate_topouts": sum(r.winner == "ai" for r in rows),
         "baseline_topouts": sum(r.winner == "player" for r in rows),
-        "rows": [r.__dict__ if hasattr(r, "__dict__") else {
+        "rows": [{
             "seed": r.seed,
             "winner": r.winner,
             "turns": r.turns,
