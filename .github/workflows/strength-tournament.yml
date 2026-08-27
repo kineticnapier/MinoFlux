@@ -1,0 +1,92 @@
+name: Strength tournament screening
+
+on:
+  push:
+    branches:
+      - self-improve
+    paths:
+      - .github/workflows/strength-tournament.yml
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate:
+          - baseline
+          - slot-delta-025
+          - slot-delta-050
+          - slot-delta-075
+          - b2b-chain-010
+          - b2b-chain-020
+          - b2b-break-075
+          - combo-010
+          - combo-020
+          - danger-003
+          - danger-006
+          - slot-b2b
+          - slot-danger
+          - b2b-combo-danger
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync package
+        run: uv sync --extra dev
+      - name: Run short fixed-seed screening
+        env:
+          CANDIDATE: ${{ matrix.candidate }}
+        run: |
+          uv run --no-sync python - <<'PY'
+          import os
+          from dataclasses import replace
+          from minoflux_ai.benchmark import run_heuristic_benchmark
+          from minoflux_ai.heuristic import DEFAULT_WEIGHTS
+          from minoflux_ai.search import DEFAULT_SEARCH_CONFIG
+
+          name = os.environ["CANDIDATE"]
+          changes = {
+              "baseline": {},
+              "slot-delta-025": {"t_spin_slot_delta": 0.25},
+              "slot-delta-050": {"t_spin_slot_delta": 0.50},
+              "slot-delta-075": {"t_spin_slot_delta": 0.75},
+              "b2b-chain-010": {"b2b_chain": 0.10},
+              "b2b-chain-020": {"b2b_chain": 0.20},
+              "b2b-break-075": {"b2b_break": -0.75},
+              "combo-010": {"combo": 0.10},
+              "combo-020": {"combo": 0.20},
+              "danger-003": {"danger": -0.03},
+              "danger-006": {"danger": -0.06},
+              "slot-b2b": {"t_spin_slot_delta": 0.50, "b2b_chain": 0.10, "b2b_break": -0.50},
+              "slot-danger": {"t_spin_slot_delta": 0.50, "danger": -0.03},
+              "b2b-combo-danger": {"b2b_chain": 0.10, "b2b_break": -0.50, "combo": 0.10, "danger": -0.03},
+          }[name]
+          weights = replace(DEFAULT_WEIGHTS, **changes)
+          totals = {"pieces": 0, "attack": 0, "topouts": 0, "completed": 0, "games": 0,
+                    "spins": 0, "spin_lines": 0, "tsd": 0, "tst": 0}
+          for label, base, step in (
+              ("fixed-a", 104729, 7919),
+              ("fixed-b", 2750159, 104729),
+          ):
+              r = run_heuristic_benchmark(
+                  games=2, max_pieces=100, seed_base=base, seed_step=step,
+                  weights=weights, search_config=DEFAULT_SEARCH_CONFIG, workers=2,
+              )
+              app = r.attack / r.pieces if r.pieces else 0.0
+              print(f"SCREEN case={label} candidate={name} pieces={r.pieces} attack={r.attack} app={app:.6f} topouts={r.topouts} completed={r.completed}/{r.games} spins={r.spins} spin_lines={r.spin_lines} tsd={r.t_spin_doubles} tst={r.t_spin_triples}")
+              totals["pieces"] += r.pieces
+              totals["attack"] += r.attack
+              totals["topouts"] += r.topouts
+              totals["completed"] += r.completed
+              totals["games"] += r.games
+              totals["spins"] += r.spins
+              totals["spin_lines"] += r.spin_lines
+              totals["tsd"] += r.t_spin_doubles
+              totals["tst"] += r.t_spin_triples
+          app = totals["attack"] / totals["pieces"] if totals["pieces"] else 0.0
+          print(f"TOTAL candidate={name} pieces={totals['pieces']} attack={totals['attack']} app={app:.6f} topouts={totals['topouts']} completed={totals['completed']}/{totals['games']} spins={totals['spins']} spin_lines={totals['spin_lines']} tsd={totals['tsd']} tst={totals['tst']}")
+          PY
