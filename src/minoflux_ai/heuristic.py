@@ -26,6 +26,7 @@ class HeuristicWeights:
     t_spin_slots: float = 1.200000
     t_spin_slot_density: float = 0.280000
     t_spin_slot_delta: float = 0.250000
+    t_spin_slot_height_quality: float = 0.000000
     new_holes: float = -1.200000
     lines: float = 0.760666
     attack: float = 0.850000
@@ -86,6 +87,7 @@ class PlacementEvaluation:
 
 def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> float:
     board = features.board
+    t_spin_slot_height_quality = board.t_spin_slots / (1.0 + board.max_height / 6.0)
     return (
         board.aggregate_height * weights.aggregate_height
         + board.max_height * weights.max_height
@@ -96,6 +98,7 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
         + board.t_spin_slots * weights.t_spin_slots
         + board.t_spin_slot_density * weights.t_spin_slot_density
         + features.t_spin_slot_delta * weights.t_spin_slot_delta
+        + t_spin_slot_height_quality * weights.t_spin_slot_height_quality
         + features.new_holes * weights.new_holes
         + features.lines * weights.lines
         + features.attack * weights.attack
@@ -222,26 +225,18 @@ def rank_placements(
     return tuple(evaluated)
 
 
-def choose_placement(game: Game, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> PlacementEvaluation | None:
-    ranked = rank_placements(game, weights, limit=1)
-    return ranked[0] if ranked else None
-
-
-def save_weights(path: str | Path, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> Path:
+def save_weights(path: str | Path, weights: HeuristicWeights) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        json.dumps({"format": MODEL_FORMAT, "weights": weights.to_dict()}, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return target
+    payload = {"format": MODEL_FORMAT, "weights": weights.to_dict()}
+    target.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def load_weights(path: str | Path) -> HeuristicWeights:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if payload.get("format") != MODEL_FORMAT:
-        raise ValueError(f"Unsupported heuristic model format: {payload.get('format')!r}")
-    weights = payload.get("weights")
-    if not isinstance(weights, dict):
-        raise ValueError("Model weights must be an object")
-    return HeuristicWeights.from_mapping(weights)
+        raise ValueError(f"Unsupported model format: {payload.get('format')!r}")
+    values = payload.get("weights")
+    if not isinstance(values, dict):
+        raise ValueError("Model file does not contain a weights object")
+    return HeuristicWeights.from_mapping(values)
