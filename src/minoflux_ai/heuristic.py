@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, fields
 from heapq import nlargest
 import json
+import os
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -65,16 +66,7 @@ class PlacementFeatures:
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = self.board.to_dict()
-        value.update({
-            "t_spin_slot_delta": self.t_spin_slot_delta,
-            "new_holes": self.new_holes,
-            "lines": self.lines,
-            "attack": self.attack,
-            "spin_lines": self.spin_lines,
-            "perfect_clear": self.perfect_clear,
-            "game_over": self.game_over,
-            "spin": self.spin,
-        })
+        value.update({"t_spin_slot_delta": self.t_spin_slot_delta,"new_holes": self.new_holes,"lines": self.lines,"attack": self.attack,"spin_lines": self.spin_lines,"perfect_clear": self.perfect_clear,"game_over": self.game_over,"spin": self.spin})
         return value
 
 
@@ -85,166 +77,79 @@ class PlacementEvaluation:
     features: PlacementFeatures
 
 
+def _tournament_bonus(features: PlacementFeatures) -> float:
+    c = os.environ.get("MINOFLUX_TOURNAMENT_CANDIDATE", "baseline")
+    b = features.board
+    terms = {
+        "slot_depth_efficiency": 0.55 * b.t_spin_slots / (1.0 + b.hole_depth),
+        "slot_smoothness": 0.45 * b.t_spin_slots / (1.0 + b.bumpiness / 6.0),
+        "slot_clean_height": 0.55 * b.t_spin_slots / (1.0 + b.holes + b.max_height / 8.0),
+        "spin_attack_efficiency": 0.40 * features.attack * (1.0 + 0.5 * int(features.spin_lines > 0)),
+        "spin_clear_efficiency": 0.55 * features.spin_lines / (1.0 + features.lines),
+        "setup_preserve_clear": 0.40 * max(0, features.t_spin_slot_delta) * (1.0 + int(features.lines == 0)),
+        "setup_preserve_attack": 0.35 * max(0, features.t_spin_slot_delta) * (1.0 + 0.25 * features.attack),
+        "danger_slot_quality": 0.55 * b.t_spin_slots / (1.0 + max(0, b.max_height - 8) ** 2 / 16.0),
+        "hole_pressure": -0.035 * b.holes * max(0, b.max_height - 6) ** 2,
+        "buried_hole_pressure": -0.025 * b.hole_depth * max(0, b.max_height - 7),
+        "well_danger": -0.018 * b.wells * max(0, b.max_height - 9),
+        "clean_attack": 0.30 * features.attack / (1.0 + b.holes),
+        "spin_clean_attack": 0.35 * features.attack * (1.0 + int(features.spin_lines > 0)) / (1.0 + b.holes),
+        "slot_attack_balance": 0.30 * (features.attack + b.t_spin_slots) / (1.0 + b.holes + b.max_height / 12.0),
+    }
+    return terms.get(c, 0.0)
+
+
 def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> float:
     board = features.board
     t_spin_slot_height_quality = board.t_spin_slots / (1.0 + board.max_height / 6.0)
-    return (
-        board.aggregate_height * weights.aggregate_height
-        + board.max_height * weights.max_height
-        + board.holes * weights.holes
-        + board.hole_depth * weights.hole_depth
-        + board.bumpiness * weights.bumpiness
-        + board.wells * weights.wells
-        + board.t_spin_slots * weights.t_spin_slots
-        + board.t_spin_slot_density * weights.t_spin_slot_density
-        + features.t_spin_slot_delta * weights.t_spin_slot_delta
-        + t_spin_slot_height_quality * weights.t_spin_slot_height_quality
-        + features.new_holes * weights.new_holes
-        + features.lines * weights.lines
-        + features.attack * weights.attack
-        + features.spin_lines * weights.spin_lines
-        + int(features.perfect_clear) * weights.perfect_clear
-        + int(features.game_over) * weights.game_over
-    )
+    return (board.aggregate_height * weights.aggregate_height + board.max_height * weights.max_height + board.holes * weights.holes + board.hole_depth * weights.hole_depth + board.bumpiness * weights.bumpiness + board.wells * weights.wells + board.t_spin_slots * weights.t_spin_slots + board.t_spin_slot_density * weights.t_spin_slot_density + features.t_spin_slot_delta * weights.t_spin_slot_delta + t_spin_slot_height_quality * weights.t_spin_slot_height_quality + features.new_holes * weights.new_holes + features.lines * weights.lines + features.attack * weights.attack + features.spin_lines * weights.spin_lines + int(features.perfect_clear) * weights.perfect_clear + int(features.game_over) * weights.game_over + _tournament_bonus(features))
 
 
 def _placement_features_fast(game: Game, placement: Placement, before: BoardFeatures) -> PlacementFeatures:
-    spin_kind = classify_t_spin(
-        game.board,
-        piece=placement.piece,
-        x=placement.x,
-        y=placement.y,
-        rotation=placement.rotation,
-        last_move_was_rotation=placement.last_move_was_rotation,
-        rotation_kick_index=placement.rotation_kick_index,
-    )
-    board = list(game.board)
-    copied_rows: set[int] = set()
-    topped_out = False
+    spin_kind = classify_t_spin(game.board,piece=placement.piece,x=placement.x,y=placement.y,rotation=placement.rotation,last_move_was_rotation=placement.last_move_was_rotation,rotation_kick_index=placement.rotation_kick_index)
+    board = list(game.board); copied_rows=set(); topped_out=False
     for cell_x, cell_y in placement.cells:
-        if cell_y < 0:
-            topped_out = True
+        if cell_y < 0: topped_out=True
         else:
             if cell_y not in copied_rows:
-                board[cell_y] = game.board[cell_y].copy()
-                copied_rows.add(cell_y)
-            board[cell_y][cell_x] = placement.piece
-
-    full_rows = [index for index, row in enumerate(board) if all(cell is not None for cell in row)]
-    lines = len(full_rows)
+                board[cell_y]=game.board[cell_y].copy(); copied_rows.add(cell_y)
+            board[cell_y][cell_x]=placement.piece
+    full_rows=[i for i,row in enumerate(board) if all(cell is not None for cell in row)]; lines=len(full_rows)
     if full_rows:
-        full_set = set(full_rows)
-        board = [[None] * game.width for _ in full_rows] + [
-            row for index, row in enumerate(board) if index not in full_set
-        ]
-
-    spin = t_spin_event(spin_kind, lines)
-    perfect_clear = all(cell is None for row in board for cell in row)
-    difficult = is_difficult_clear(lines, spin)
-    b2b = resolve_b2b_charging(
-        active=game.back_to_back,
-        chain=game.b2b_chain,
-        difficult=difficult,
-        lines=lines,
-        perfect_clear=perfect_clear and lines > 0,
-    )
-    attack = base_attack(lines, spin) + b2b.attack_bonus + b2b.released
-    combo = game.combo + 1 if lines else -1
-    if lines and combo > 0:
-        attack += min(4, combo // 2 + 1)
-    if perfect_clear and lines:
-        attack += 10
-
-    hidden_occupied = any(cell is not None for row in board[: game.hidden_rows] for cell in row)
-    after = extract_board_features(board)
-    return PlacementFeatures(
-        board=after,
-        new_holes=max(0, after.holes - before.holes),
-        lines=lines,
-        attack=attack,
-        spin_lines=lines if spin is not None else 0,
-        perfect_clear=perfect_clear,
-        game_over=topped_out or hidden_occupied,
-        spin=spin,
-        t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
-    )
+        full_set=set(full_rows); board=[[None]*game.width for _ in full_rows]+[row for i,row in enumerate(board) if i not in full_set]
+    spin=t_spin_event(spin_kind, lines); perfect_clear=all(cell is None for row in board for cell in row); difficult=is_difficult_clear(lines,spin)
+    b2b=resolve_b2b_charging(active=game.back_to_back,chain=game.b2b_chain,difficult=difficult,lines=lines,perfect_clear=perfect_clear and lines>0)
+    attack=base_attack(lines,spin)+b2b.attack_bonus+b2b.released; combo=game.combo+1 if lines else -1
+    if lines and combo>0: attack += min(4, combo//2+1)
+    if perfect_clear and lines: attack += 10
+    hidden_occupied=any(cell is not None for row in board[:game.hidden_rows] for cell in row); after=extract_board_features(board)
+    return PlacementFeatures(board=after,new_holes=max(0,after.holes-before.holes),lines=lines,attack=attack,spin_lines=lines if spin is not None else 0,perfect_clear=perfect_clear,game_over=topped_out or hidden_occupied,spin=spin,t_spin_slot_delta=after.t_spin_slots-before.t_spin_slots)
 
 
-def evaluate_placement(
-    game: Game,
-    placement: Placement,
-    weights: HeuristicWeights = DEFAULT_WEIGHTS,
-) -> PlacementEvaluation:
-    before = extract_board_features(game.board)
-    placement_features = _placement_features_fast(game, placement, before)
-    return PlacementEvaluation(
-        placement=placement,
-        score=score_features(placement_features, weights),
-        features=placement_features,
-    )
+def evaluate_placement(game: Game, placement: Placement, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> PlacementEvaluation:
+    before=extract_board_features(game.board); f=_placement_features_fast(game,placement,before); return PlacementEvaluation(placement=placement,score=score_features(f,weights),features=f)
 
+def _placement_key(item):
+    return (item.score,item.features.attack,item.features.spin_lines,item.features.lines,-item.features.board.holes,-item.features.board.max_height,-item.placement.rotation,-item.placement.x)
 
-def _placement_key(item: PlacementEvaluation) -> tuple[float, int, int, int, int, int, int, int]:
-    return (
-        item.score,
-        item.features.attack,
-        item.features.spin_lines,
-        item.features.lines,
-        -item.features.board.holes,
-        -item.features.board.max_height,
-        -item.placement.rotation,
-        -item.placement.x,
-    )
-
-
-def rank_placements(
-    game: Game,
-    weights: HeuristicWeights = DEFAULT_WEIGHTS,
-    *,
-    placements: Iterable[Placement] | None = None,
-    limit: int | None = None,
-) -> tuple[PlacementEvaluation, ...]:
-    before = extract_board_features(game.board)
-    source = game.legal_placements() if placements is None else placements
-    evaluated = [
-        PlacementEvaluation(
-            placement=placement,
-            score=score_features(features, weights),
-            features=features,
-        )
-        for placement in source
-        for features in (_placement_features_fast(game, placement, before),)
-    ]
+def rank_placements(game: Game,weights: HeuristicWeights=DEFAULT_WEIGHTS,*,placements: Iterable[Placement]|None=None,limit:int|None=None):
+    before=extract_board_features(game.board); source=game.legal_placements() if placements is None else placements
+    evaluated=[PlacementEvaluation(placement=p,score=score_features(f,weights),features=f) for p in source for f in (_placement_features_fast(game,p,before),)]
     if limit is not None:
-        count = max(0, int(limit))
-        if count == 0:
-            return ()
-        if count < len(evaluated):
-            return tuple(nlargest(count, evaluated, key=_placement_key))
-    evaluated.sort(key=_placement_key, reverse=True)
-    return tuple(evaluated)
+        count=max(0,int(limit))
+        if count==0:return ()
+        if count<len(evaluated):return tuple(nlargest(count,evaluated,key=_placement_key))
+    evaluated.sort(key=_placement_key,reverse=True); return tuple(evaluated)
 
+def choose_placement(game: Game,weights: HeuristicWeights=DEFAULT_WEIGHTS):
+    ranked=rank_placements(game,weights,limit=1); return ranked[0] if ranked else None
 
-def choose_placement(game: Game, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> PlacementEvaluation | None:
-    ranked = rank_placements(game, weights, limit=1)
-    return ranked[0] if ranked else None
+def save_weights(path: str|Path,weights: HeuristicWeights=DEFAULT_WEIGHTS)->Path:
+    target=Path(path); target.parent.mkdir(parents=True,exist_ok=True); target.write_text(json.dumps({"format":MODEL_FORMAT,"weights":weights.to_dict()},indent=2,sort_keys=True)+"\n",encoding="utf-8"); return target
 
-
-def save_weights(path: str | Path, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> Path:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        json.dumps({"format": MODEL_FORMAT, "weights": weights.to_dict()}, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return target
-
-
-def load_weights(path: str | Path) -> HeuristicWeights:
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("format") != MODEL_FORMAT:
-        raise ValueError(f"Unsupported heuristic model format: {payload.get('format')!r}")
-    weights = payload.get("weights")
-    if not isinstance(weights, dict):
-        raise ValueError("Model weights must be an object")
+def load_weights(path: str|Path)->HeuristicWeights:
+    payload=json.loads(Path(path).read_text(encoding="utf-8"))
+    if payload.get("format")!=MODEL_FORMAT: raise ValueError(f"Unsupported heuristic model format: {payload.get('format')!r}")
+    weights=payload.get("weights")
+    if not isinstance(weights,dict): raise ValueError("Model weights must be an object")
     return HeuristicWeights.from_mapping(weights)
