@@ -30,6 +30,10 @@ class HeuristicWeights:
     lines: float = 0.760666
     attack: float = 0.850000
     spin_lines: float = 1.250000
+    b2b_chain: float = 0.0
+    b2b_break: float = 0.0
+    b2b_difficult: float = 0.0
+    surge_charge: float = 0.0
     perfect_clear: float = 8.000000
     game_over: float = -1_000_000.0
 
@@ -61,6 +65,10 @@ class PlacementFeatures:
     game_over: bool
     spin: str | None = None
     t_spin_slot_delta: int = 0
+    b2b_chain: int = 0
+    b2b_break: bool = False
+    b2b_difficult: bool = False
+    surge_charge: int = 0
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = self.board.to_dict()
@@ -70,6 +78,10 @@ class PlacementFeatures:
             "lines": self.lines,
             "attack": self.attack,
             "spin_lines": self.spin_lines,
+            "b2b_chain": self.b2b_chain,
+            "b2b_break": self.b2b_break,
+            "b2b_difficult": self.b2b_difficult,
+            "surge_charge": self.surge_charge,
             "perfect_clear": self.perfect_clear,
             "game_over": self.game_over,
             "spin": self.spin,
@@ -100,6 +112,10 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
         + features.lines * weights.lines
         + features.attack * weights.attack
         + features.spin_lines * weights.spin_lines
+        + features.b2b_chain * weights.b2b_chain
+        + int(features.b2b_break) * weights.b2b_break
+        + int(features.b2b_difficult) * weights.b2b_difficult
+        + features.surge_charge * weights.surge_charge
         + int(features.perfect_clear) * weights.perfect_clear
         + int(features.game_over) * weights.game_over
     )
@@ -164,6 +180,10 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
         game_over=topped_out or hidden_occupied,
         spin=spin,
         t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
+        b2b_chain=b2b.chain,
+        b2b_break=bool(game.back_to_back and lines > 0 and not b2b.active),
+        b2b_difficult=bool(difficult and lines > 0),
+        surge_charge=b2b.charge,
     )
 
 
