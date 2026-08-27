@@ -1,4 +1,4 @@
-name: Strength tournament fresh validation
+name: Strength tournament versus final
 
 on:
   push:
@@ -8,15 +8,8 @@ on:
       - .github/workflows/strength-tournament.yml
 
 jobs:
-  fresh:
+  versus:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        candidate:
-          - baseline
-          - slot-delta-025
-          - b2b-break-075
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -26,50 +19,39 @@ jobs:
           enable-cache: true
       - name: Sync package
         run: uv sync --extra dev
-      - name: Run unseen and fresh validation
-        env:
-          CANDIDATE: ${{ matrix.candidate }}
+      - name: Run mirrored versus against baseline
         run: |
           uv run --no-sync python - <<'PY'
-          import os
           from dataclasses import replace
-          from time import perf_counter
-          from minoflux_ai.benchmark import run_heuristic_benchmark
           from minoflux_ai.heuristic import DEFAULT_WEIGHTS
-          from minoflux_ai.search import DEFAULT_SEARCH_CONFIG
+          from minoflux_ai.versus_benchmark import run_versus_benchmark
 
-          name = os.environ["CANDIDATE"]
-          changes = {
-              "baseline": {},
-              "slot-delta-025": {"t_spin_slot_delta": 0.25},
-              "b2b-break-075": {"b2b_break": -0.75},
-          }[name]
-          weights = replace(DEFAULT_WEIGHTS, **changes)
-          totals = {"pieces": 0, "attack": 0, "topouts": 0, "completed": 0, "games": 0,
-                    "spins": 0, "spin_lines": 0, "tsd": 0, "tst": 0, "seconds": 0.0}
-          for label, base, step in (
-              ("unseen", 982451653, 104729),
-              ("fresh-a", 161803399, 32452843),
-              ("fresh-b", 433494437, 15485863),
-          ):
-              started = perf_counter()
-              r = run_heuristic_benchmark(
-                  games=3, max_pieces=150, seed_base=base, seed_step=step,
-                  weights=weights, search_config=DEFAULT_SEARCH_CONFIG, workers=3,
-              )
-              elapsed = perf_counter() - started
-              app = r.attack / r.pieces if r.pieces else 0.0
-              print(f"FRESH case={label} candidate={name} pieces={r.pieces} attack={r.attack} app={app:.6f} topouts={r.topouts} completed={r.completed}/{r.games} spins={r.spins} spin_lines={r.spin_lines} tsd={r.t_spin_doubles} tst={r.t_spin_triples} elapsed={elapsed:.3f}")
-              totals["pieces"] += r.pieces
-              totals["attack"] += r.attack
-              totals["topouts"] += r.topouts
-              totals["completed"] += r.completed
-              totals["games"] += r.games
-              totals["spins"] += r.spins
-              totals["spin_lines"] += r.spin_lines
-              totals["tsd"] += r.t_spin_doubles
-              totals["tst"] += r.t_spin_triples
-              totals["seconds"] += elapsed
-          app = totals["attack"] / totals["pieces"] if totals["pieces"] else 0.0
-          print(f"TOTAL candidate={name} pieces={totals['pieces']} attack={totals['attack']} app={app:.6f} topouts={totals['topouts']} completed={totals['completed']}/{totals['games']} spins={totals['spins']} spin_lines={totals['spin_lines']} tsd={totals['tsd']} tst={totals['tst']} elapsed={totals['seconds']:.3f}")
+          baseline = DEFAULT_WEIGHTS
+          candidate = replace(DEFAULT_WEIGHTS, t_spin_slot_delta=0.25)
+          r = run_versus_benchmark(
+              games=8,
+              max_turns=120,
+              seed_base=86028121,
+              seed_step=49979687,
+              player_weights=candidate,
+              ai_weights=baseline,
+          )
+          n = len(r.per_game)
+          player_canceled = sum(g.player_canceled for g in r.per_game) / n
+          ai_canceled = sum(g.ai_canceled for g in r.per_game) / n
+          player_received = sum(g.player_received for g in r.per_game) / n
+          ai_received = sum(g.ai_received for g in r.per_game) / n
+          player_b2b = sum(g.player_max_b2b for g in r.per_game) / n
+          ai_b2b = sum(g.ai_max_b2b for g in r.per_game) / n
+          print(
+              f"VERSUS candidate=slot-delta-025 games={r.games} wins={r.player_wins} "
+              f"losses={r.ai_wins} draws={r.draws} candidate_attack={r.player_mean_attack:.3f} "
+              f"baseline_attack={r.ai_mean_attack:.3f} candidate_sent={r.player_mean_sent:.3f} "
+              f"baseline_sent={r.ai_mean_sent:.3f} candidate_canceled={player_canceled:.3f} "
+              f"baseline_canceled={ai_canceled:.3f} candidate_received={player_received:.3f} "
+              f"baseline_received={ai_received:.3f} candidate_max_b2b={player_b2b:.3f} "
+              f"baseline_max_b2b={ai_b2b:.3f} mean_turns={r.mean_turns:.3f}"
+          )
+          for game in r.per_game:
+              print("GAME", game)
           PY
