@@ -1,4 +1,4 @@
-name: Self-improve strength sweep
+name: Self-improve strength validation
 
 on:
   push:
@@ -9,18 +9,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  sweep:
-    name: sweep (${{ matrix.candidate }})
+  solo:
+    name: solo (${{ matrix.candidate }})
     strategy:
       fail-fast: false
       matrix:
-        candidate:
-          - baseline
-          - attack-heavy
-          - tspin-heavy
-          - survival-heavy
-          - lookahead-2
-          - beam-8
+        candidate: [baseline, survival-heavy]
     runs-on: ubuntu-latest
     env:
       CANDIDATE: ${{ matrix.candidate }}
@@ -33,7 +27,7 @@ jobs:
           enable-cache: true
       - name: Sync package
         run: uv sync --extra dev
-      - name: Run strength screen
+      - name: Run longer solo validation
         run: |
           uv run --no-sync python - <<'PY'
           import os
@@ -44,30 +38,21 @@ jobs:
 
           name = os.environ["CANDIDATE"]
           weights = DEFAULT_WEIGHTS
-          config = DEFAULT_SEARCH_CONFIG
-          if name == "attack-heavy":
-              weights = replace(DEFAULT_WEIGHTS, attack=1.60)
-          elif name == "tspin-heavy":
-              weights = replace(DEFAULT_WEIGHTS, spin_lines=2.50, attack=1.00)
-          elif name == "survival-heavy":
+          if name == "survival-heavy":
               weights = replace(DEFAULT_WEIGHTS, max_height=-0.35, holes=-1.00, new_holes=-1.60)
-          elif name == "lookahead-2":
-              config = replace(DEFAULT_SEARCH_CONFIG, lookahead_pieces=2)
-          elif name == "beam-8":
-              config = replace(DEFAULT_SEARCH_CONFIG, beam_width=8)
 
           for case, seed_base, seed_step in (
               ("fixed", 104729, 7919),
               ("unseen", 982451653, 104729),
           ):
               result = run_heuristic_benchmark(
-                  games=2,
-                  max_pieces=40,
+                  games=4,
+                  max_pieces=120,
                   seed_base=seed_base,
                   seed_step=seed_step,
                   weights=weights,
-                  search_config=config,
-                  workers=2,
+                  search_config=DEFAULT_SEARCH_CONFIG,
+                  workers=4,
               )
               app = result.attack / result.pieces if result.pieces else 0.0
               print(
@@ -79,4 +64,46 @@ jobs:
                   f"tss={result.t_spin_singles} tsd={result.t_spin_doubles} "
                   f"tst={result.t_spin_triples} pc={result.perfect_clears}"
               )
+          PY
+
+  versus:
+    name: survival-heavy versus baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync package
+        run: uv sync --extra dev
+      - name: Run mirrored versus validation
+        run: |
+          uv run --no-sync python - <<'PY'
+          from dataclasses import replace
+          from minoflux_ai.heuristic import DEFAULT_WEIGHTS
+          from minoflux_ai.versus_benchmark import run_versus_benchmark
+          from minoflux_ai.versus_search import DEFAULT_VERSUS_SEARCH_CONFIG
+
+          candidate = replace(DEFAULT_WEIGHTS, max_height=-0.35, holes=-1.00, new_holes=-1.60)
+          cfg = replace(DEFAULT_VERSUS_SEARCH_CONFIG, candidate_width=4, opponent_reply_width=1)
+          result = run_versus_benchmark(
+              games=4,
+              max_turns=40,
+              seed_base=314159,
+              seed_step=271828,
+              player_weights=candidate,
+              ai_weights=DEFAULT_WEIGHTS,
+              player_config=cfg,
+              ai_config=cfg,
+          )
+          print(
+              f"VERSUS candidate_wins={result.player_wins} baseline_wins={result.ai_wins} "
+              f"draws={result.draws} candidate_attack={result.player_mean_attack:.3f} "
+              f"baseline_attack={result.ai_mean_attack:.3f} "
+              f"candidate_sent={result.player_mean_sent:.3f} baseline_sent={result.ai_mean_sent:.3f}"
+          )
+          for game in result.per_game:
+              print("GAME", game)
           PY
