@@ -14,6 +14,8 @@ from minoflux_ai import (
     run_heuristic_benchmark,
     save_weights,
 )
+from minoflux_ai.features import BoardFeatures
+from minoflux_ai.heuristic import PlacementFeatures, score_features
 from minoflux_engine import BOARD_HEIGHT, BOARD_WIDTH, Game
 
 
@@ -80,12 +82,53 @@ class HeuristicTests(unittest.TestCase):
         self.assertTrue(ranked)
         self.assertEqual(game.snapshot(), before)
 
+    def test_slot_height_quality_formula(self) -> None:
+        board = BoardFeatures(
+            aggregate_height=0,
+            max_height=6,
+            holes=0,
+            hole_depth=0,
+            bumpiness=0,
+            wells=0,
+            t_spin_slots=2,
+            occupied_cells=0,
+        )
+        features = PlacementFeatures(
+            board=board,
+            new_holes=0,
+            lines=0,
+            attack=0,
+            spin_lines=0,
+            perfect_clear=False,
+            game_over=False,
+        )
+        weights = HeuristicWeights(
+            aggregate_height=0,
+            max_height=0,
+            holes=0,
+            hole_depth=0,
+            bumpiness=0,
+            wells=0,
+            t_spin_slots=0,
+            t_spin_slot_density=0,
+            t_spin_slot_delta=0,
+            t_spin_slot_height_quality=1,
+            new_holes=0,
+            lines=0,
+            attack=0,
+            spin_lines=0,
+            perfect_clear=0,
+            game_over=0,
+        )
+        self.assertAlmostEqual(score_features(features, weights), 1.0)
+
     def test_weights_round_trip(self) -> None:
         custom = HeuristicWeights(
             holes=-4.5,
             attack=2.25,
             t_spin_slots=0.9,
             t_spin_slot_density=0.4,
+            t_spin_slot_height_quality=0.65,
         )
         with TemporaryDirectory() as directory:
             path = save_weights(f"{directory}/weights.json", custom)
@@ -96,6 +139,15 @@ class HeuristicTests(unittest.TestCase):
         old_weights.pop("t_spin_slot_density")
         loaded = HeuristicWeights.from_mapping(old_weights)
         self.assertEqual(loaded.t_spin_slot_density, DEFAULT_WEIGHTS.t_spin_slot_density)
+
+    def test_old_weight_mapping_uses_slot_height_quality_default(self) -> None:
+        old_weights = DEFAULT_WEIGHTS.to_dict()
+        old_weights.pop("t_spin_slot_height_quality")
+        loaded = HeuristicWeights.from_mapping(old_weights)
+        self.assertEqual(
+            loaded.t_spin_slot_height_quality,
+            DEFAULT_WEIGHTS.t_spin_slot_height_quality,
+        )
 
     def test_unknown_weight_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
