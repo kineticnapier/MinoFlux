@@ -87,6 +87,8 @@ def _bonus(name: str, weight: float, game, ev) -> float:
 
 
 def install_candidate(candidate: str) -> None:
+    heuristic.rank_placements = _ORIGINAL_RANK
+    search.rank_placements = _ORIGINAL_RANK
     weight, name = CANDIDATES[candidate]
     if candidate == "baseline":
         return
@@ -127,7 +129,7 @@ def main() -> None:
     if args.phase == "screen":
         result = run_heuristic_benchmark(games=2, max_pieces=180, seed_base=41003, seed_step=97, workers=1)
     else:
-        result = run_heuristic_benchmark(games=3, max_pieces=450, seed_base=880301, seed_step=131, workers=1)
+        result = run_heuristic_benchmark(games=3, max_pieces=250, seed_base=880301, seed_step=131, workers=1)
     print("TOURNAMENT_RESULT=" + json.dumps({"candidate": args.candidate, "phase": args.phase, **summarize(result)}, sort_keys=True))
 
 
