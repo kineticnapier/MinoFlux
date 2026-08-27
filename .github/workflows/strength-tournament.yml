@@ -1,4 +1,4 @@
-name: Strength tournament screening
+name: Strength tournament fresh validation
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
       - .github/workflows/strength-tournament.yml
 
 jobs:
-  screen:
+  fresh:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -16,18 +16,7 @@ jobs:
         candidate:
           - baseline
           - slot-delta-025
-          - slot-delta-050
-          - slot-delta-075
-          - b2b-chain-010
-          - b2b-chain-020
           - b2b-break-075
-          - combo-010
-          - combo-020
-          - danger-003
-          - danger-006
-          - slot-b2b
-          - slot-danger
-          - b2b-combo-danger
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -37,13 +26,14 @@ jobs:
           enable-cache: true
       - name: Sync package
         run: uv sync --extra dev
-      - name: Run short fixed-seed screening
+      - name: Run unseen and fresh validation
         env:
           CANDIDATE: ${{ matrix.candidate }}
         run: |
           uv run --no-sync python - <<'PY'
           import os
           from dataclasses import replace
+          from time import perf_counter
           from minoflux_ai.benchmark import run_heuristic_benchmark
           from minoflux_ai.heuristic import DEFAULT_WEIGHTS
           from minoflux_ai.search import DEFAULT_SEARCH_CONFIG
@@ -52,32 +42,24 @@ jobs:
           changes = {
               "baseline": {},
               "slot-delta-025": {"t_spin_slot_delta": 0.25},
-              "slot-delta-050": {"t_spin_slot_delta": 0.50},
-              "slot-delta-075": {"t_spin_slot_delta": 0.75},
-              "b2b-chain-010": {"b2b_chain": 0.10},
-              "b2b-chain-020": {"b2b_chain": 0.20},
               "b2b-break-075": {"b2b_break": -0.75},
-              "combo-010": {"combo": 0.10},
-              "combo-020": {"combo": 0.20},
-              "danger-003": {"danger": -0.03},
-              "danger-006": {"danger": -0.06},
-              "slot-b2b": {"t_spin_slot_delta": 0.50, "b2b_chain": 0.10, "b2b_break": -0.50},
-              "slot-danger": {"t_spin_slot_delta": 0.50, "danger": -0.03},
-              "b2b-combo-danger": {"b2b_chain": 0.10, "b2b_break": -0.50, "combo": 0.10, "danger": -0.03},
           }[name]
           weights = replace(DEFAULT_WEIGHTS, **changes)
           totals = {"pieces": 0, "attack": 0, "topouts": 0, "completed": 0, "games": 0,
-                    "spins": 0, "spin_lines": 0, "tsd": 0, "tst": 0}
+                    "spins": 0, "spin_lines": 0, "tsd": 0, "tst": 0, "seconds": 0.0}
           for label, base, step in (
-              ("fixed-a", 104729, 7919),
-              ("fixed-b", 2750159, 104729),
+              ("unseen", 982451653, 104729),
+              ("fresh-a", 161803399, 32452843),
+              ("fresh-b", 433494437, 15485863),
           ):
+              started = perf_counter()
               r = run_heuristic_benchmark(
-                  games=2, max_pieces=100, seed_base=base, seed_step=step,
-                  weights=weights, search_config=DEFAULT_SEARCH_CONFIG, workers=2,
+                  games=3, max_pieces=150, seed_base=base, seed_step=step,
+                  weights=weights, search_config=DEFAULT_SEARCH_CONFIG, workers=3,
               )
+              elapsed = perf_counter() - started
               app = r.attack / r.pieces if r.pieces else 0.0
-              print(f"SCREEN case={label} candidate={name} pieces={r.pieces} attack={r.attack} app={app:.6f} topouts={r.topouts} completed={r.completed}/{r.games} spins={r.spins} spin_lines={r.spin_lines} tsd={r.t_spin_doubles} tst={r.t_spin_triples}")
+              print(f"FRESH case={label} candidate={name} pieces={r.pieces} attack={r.attack} app={app:.6f} topouts={r.topouts} completed={r.completed}/{r.games} spins={r.spins} spin_lines={r.spin_lines} tsd={r.t_spin_doubles} tst={r.t_spin_triples} elapsed={elapsed:.3f}")
               totals["pieces"] += r.pieces
               totals["attack"] += r.attack
               totals["topouts"] += r.topouts
@@ -87,6 +69,7 @@ jobs:
               totals["spin_lines"] += r.spin_lines
               totals["tsd"] += r.t_spin_doubles
               totals["tst"] += r.t_spin_triples
+              totals["seconds"] += elapsed
           app = totals["attack"] / totals["pieces"] if totals["pieces"] else 0.0
-          print(f"TOTAL candidate={name} pieces={totals['pieces']} attack={totals['attack']} app={app:.6f} topouts={totals['topouts']} completed={totals['completed']}/{totals['games']} spins={totals['spins']} spin_lines={totals['spin_lines']} tsd={totals['tsd']} tst={totals['tst']}")
+          print(f"TOTAL candidate={name} pieces={totals['pieces']} attack={totals['attack']} app={app:.6f} topouts={totals['topouts']} completed={totals['completed']}/{totals['games']} spins={totals['spins']} spin_lines={totals['spin_lines']} tsd={totals['tsd']} tst={totals['tst']} elapsed={totals['seconds']:.3f}")
           PY
