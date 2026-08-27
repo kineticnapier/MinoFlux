@@ -1,0 +1,59 @@
+name: Self-improve benchmark
+
+on:
+  push:
+    branches:
+      - self-improve
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync core dependencies
+        run: uv sync --extra dev
+      - name: Feature extraction microbenchmark
+        shell: bash
+        run: |
+          uv run --no-sync python - <<'PY'
+          from time import perf_counter
+          from minoflux_ai.features import extract_board_features
+          from minoflux_engine import BOARD_HEIGHT, BOARD_WIDTH
+
+          boards = []
+          for seed in range(32):
+              board = [[None] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
+              for y in range(BOARD_HEIGHT - 10, BOARD_HEIGHT):
+                  for x in range(BOARD_WIDTH):
+                      if ((x * 17 + y * 11 + seed * 7) % 5) < 3:
+                          board[y][x] = "T"
+              boards.append(board)
+
+          for _ in range(3):
+              start = perf_counter()
+              checksum = 0
+              for i in range(30000):
+                  f = extract_board_features(boards[i % len(boards)])
+                  checksum += f.aggregate_height + f.holes + f.wells + f.occupied_cells
+              elapsed = perf_counter() - start
+              print(f"FEATURE_TIME={elapsed:.6f} CHECKSUM={checksum}")
+          PY
+      - name: Fixed-seed benchmark
+        shell: bash
+        run: |
+          for i in 1 2; do
+            /usr/bin/time -f 'FIXED_TIME=%e' uv run --no-sync python -m minoflux benchmark --games 2 --max-pieces 40 --seed-base 1001 --seed-step 31 --workers 1 --fitness-profile attack_spin --hold --lookahead-pieces 1 --beam-width 2
+          done
+      - name: Unseen-seed benchmark
+        shell: bash
+        run: |
+          for i in 1 2; do
+            /usr/bin/time -f 'UNSEEN_TIME=%e' uv run --no-sync python -m minoflux benchmark --games 2 --max-pieces 40 --seed-base 9001 --seed-step 47 --workers 1 --fitness-profile attack_spin --hold --lookahead-pieces 1 --beam-width 2
+          done
+      - name: Versus benchmark
+        run: uv run --no-sync python -m minoflux versus-benchmark --games 2 --max-turns 20 --seed-base 12001 --seed-step 53 --candidate-width 2 --reply-width 1 --hold --lookahead-pieces 0 --beam-width 1
