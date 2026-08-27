@@ -1,0 +1,41 @@
+name: Self Improve Evaluation
+
+on:
+  push:
+    branches: [self-improve]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --extra game --extra dev
+      - name: Compare nonlinear danger penalties
+        run: |
+          uv run --no-sync python - <<'PY'
+          import minoflux_ai.heuristic as h
+          from minoflux_ai import run_heuristic_benchmark
+
+          original = h.score_features
+          sets = [(1,31,"fixed"),(1001,37,"unseen"),(5003,43,"fresh")]
+
+          def summarize(label):
+              total_pieces=total_attack=total_spins=total_spin_lines=total_tsd=total_tst=total_topouts=total_completed=0
+              for seed,step,name in sets:
+                  r=run_heuristic_benchmark(games=4,max_pieces=150,seed_base=seed,seed_step=step,workers=4)
+                  ap=r.attack/r.pieces if r.pieces else 0
+                  print(f"{label} {name}: pieces={r.pieces} attack={r.attack} app={ap:.6f} topouts={r.topouts} completed={r.completed}/4 spins={r.spins} spin_lines={r.spin_lines} tsd={r.t_spin_doubles} tst={r.t_spin_triples}")
+                  total_pieces += r.pieces; total_attack += r.attack; total_spins += r.spins; total_spin_lines += r.spin_lines; total_tsd += r.t_spin_doubles; total_tst += r.t_spin_triples; total_topouts += r.topouts; total_completed += r.completed
+              print(f"TOTAL {label}: pieces={total_pieces} attack={total_attack} app={total_attack/total_pieces:.6f} topouts={total_topouts} completed={total_completed}/12 spins={total_spins} spin_lines={total_spin_lines} tsd={total_tsd} tst={total_tst}")
+
+          summarize("baseline")
+          for penalty in (0.0025,0.005,0.01,0.02):
+              def nonlinear(features, weights=h.DEFAULT_WEIGHTS, *, p=penalty):
+                  return original(features, weights) - p * (features.board.max_height ** 2)
+              h.score_features = nonlinear
+              summarize(f"sq{penalty}")
+          PY
