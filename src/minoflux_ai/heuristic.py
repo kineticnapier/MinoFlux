@@ -225,18 +225,26 @@ def rank_placements(
     return tuple(evaluated)
 
 
-def save_weights(path: str | Path, weights: HeuristicWeights) -> None:
+def choose_placement(game: Game, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> PlacementEvaluation | None:
+    ranked = rank_placements(game, weights, limit=1)
+    return ranked[0] if ranked else None
+
+
+def save_weights(path: str | Path, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"format": MODEL_FORMAT, "weights": weights.to_dict()}
-    target.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    target.write_text(
+        json.dumps({"format": MODEL_FORMAT, "weights": weights.to_dict()}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return target
 
 
 def load_weights(path: str | Path) -> HeuristicWeights:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if payload.get("format") != MODEL_FORMAT:
-        raise ValueError(f"Unsupported model format: {payload.get('format')!r}")
-    values = payload.get("weights")
-    if not isinstance(values, dict):
-        raise ValueError("Model file does not contain a weights object")
-    return HeuristicWeights.from_mapping(values)
+        raise ValueError(f"Unsupported heuristic model format: {payload.get('format')!r}")
+    weights = payload.get("weights")
+    if not isinstance(weights, dict):
+        raise ValueError("Model weights must be an object")
+    return HeuristicWeights.from_mapping(weights)
