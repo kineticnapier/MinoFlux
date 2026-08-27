@@ -5,7 +5,7 @@ import unittest
 
 from minoflux_ai import CEMConfig, DEFAULT_WEIGHTS, choose_placement, evaluate_placement, train_cem
 from minoflux_ai.features import extract_board_features
-from minoflux_ai.heuristic import PlacementFeatures, score_features
+from minoflux_ai.heuristic import HeuristicWeights, PlacementFeatures, score_features
 from minoflux_engine import Game
 
 
@@ -16,7 +16,6 @@ class FastPlacementEvaluationTests(unittest.TestCase):
         simulation = deepcopy(game)
         result = simulation.place(placement)
         after = extract_board_features(simulation.board)
-        danger_height = max(0, after.max_height - 12)
         features = PlacementFeatures(
             board=after,
             new_holes=max(0, after.holes - before.holes),
@@ -27,10 +26,6 @@ class FastPlacementEvaluationTests(unittest.TestCase):
             game_over=result.game_over,
             spin=result.spin,
             t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
-            b2b_chain=simulation.b2b_chain if simulation.back_to_back else 0,
-            b2b_break=bool(game.back_to_back and result.lines > 0 and not simulation.back_to_back),
-            combo=max(0, simulation.combo),
-            danger=danger_height * danger_height,
         )
         return features, score_features(features, DEFAULT_WEIGHTS)
 
@@ -52,6 +47,46 @@ class FastPlacementEvaluationTests(unittest.TestCase):
             if game.game_over:
                 break
         self.assertGreater(checked, 250)
+
+    def test_evaluation_does_not_mutate_game_state(self) -> None:
+        game = Game(321)
+        for _ in range(8):
+            choice = choose_placement(game)
+            self.assertIsNotNone(choice)
+            game.place(choice.placement)
+        placement = game.legal_placements()[0]
+        board_before = deepcopy(game.board)
+        state_before = (
+            game.current_piece,
+            game.hold_piece,
+            game.pieces_placed,
+            game.lines,
+            game.attack,
+            game.combo,
+            game.back_to_back,
+            game.b2b_chain,
+        )
+        evaluate_placement(game, placement)
+        self.assertEqual(game.board, board_before)
+        self.assertEqual(
+            (
+                game.current_piece,
+                game.hold_piece,
+                game.pieces_placed,
+                game.lines,
+                game.attack,
+                game.combo,
+                game.back_to_back,
+                game.b2b_chain,
+            ),
+            state_before,
+        )
+
+    def test_old_weight_mapping_gets_new_slot_delta_default(self) -> None:
+        weights = HeuristicWeights.from_mapping({"attack": 0.85, "t_spin_slots": 1.2})
+        self.assertEqual(weights.attack, 0.85)
+        self.assertEqual(weights.t_spin_slots, 1.2)
+        self.assertEqual(weights.t_spin_slot_delta, 0.25)
 
 
 class ParallelCemTests(unittest.TestCase):
