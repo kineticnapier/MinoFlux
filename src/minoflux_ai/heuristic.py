@@ -109,13 +109,19 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
         rotation_kick_index=placement.rotation_kick_index,
     )
     topped_out = False
+    touched_rows: set[int] = set()
     for cell_x, cell_y in placement.cells:
         if cell_y < 0:
             topped_out = True
         else:
             board[cell_y][cell_x] = placement.piece
+            touched_rows.add(cell_y)
 
-    full_rows = [index for index, row in enumerate(board) if all(cell is not None for cell in row)]
+    # A valid game board has no uncleared full rows before placement, so only
+    # rows receiving a cell can become newly full. Checking at most four rows
+    # avoids rescanning the entire board for every candidate placement.
+    full_rows = [index for index in touched_rows if all(cell is not None for cell in board[index])]
+    full_rows.sort()
     lines = len(full_rows)
     if full_rows:
         full_set = set(full_rows)
