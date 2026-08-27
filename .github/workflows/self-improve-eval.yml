@@ -30,11 +30,11 @@ jobs:
           def summarize(label):
               total_pieces=total_attack=total_spins=total_spin_lines=total_tsd=total_tst=total_topouts=total_completed=0
               for seed,step,name in sets:
-                  r=run_heuristic_benchmark(games=2,max_pieces=100,seed_base=seed,seed_step=step,workers=2)
+                  r=run_heuristic_benchmark(games=1,max_pieces=50,seed_base=seed,seed_step=step,workers=1)
                   ap=r.attack/r.pieces if r.pieces else 0
-                  print(f"{label} {name}: pieces={r.pieces} attack={r.attack} app={ap:.6f} topouts={r.topouts} completed={r.completed}/2 spins={r.spins} spin_lines={r.spin_lines} tsd={r.t_spin_doubles} tst={r.t_spin_triples}")
+                  print(f"{label} {name}: pieces={r.pieces} attack={r.attack} app={ap:.6f} topouts={r.topouts} completed={r.completed}/1 spins={r.spins} spin_lines={r.spin_lines} tsd={r.t_spin_doubles} tst={r.t_spin_triples}")
                   total_pieces += r.pieces; total_attack += r.attack; total_spins += r.spins; total_spin_lines += r.spin_lines; total_tsd += r.t_spin_doubles; total_tst += r.t_spin_triples; total_topouts += r.topouts; total_completed += r.completed
-              print(f"TOTAL {label}: pieces={total_pieces} attack={total_attack} app={total_attack/total_pieces:.6f} topouts={total_topouts} completed={total_completed}/6 spins={total_spins} spin_lines={total_spin_lines} tsd={total_tsd} tst={total_tst}")
+              print(f"TOTAL {label}: pieces={total_pieces} attack={total_attack} app={total_attack/total_pieces:.6f} topouts={total_topouts} completed={total_completed}/3 spins={total_spins} spin_lines={total_spin_lines} tsd={total_tsd} tst={total_tst}")
 
           summarize("baseline")
           for penalty in (0.005,0.01):
