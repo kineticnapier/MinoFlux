@@ -29,6 +29,7 @@ class HeuristicWeights:
     t_spin_slot_height_quality: float = 0.700000
     t_spin_slot_low_clean: float = 0.900000
     t_spin_slot_supply_match: float = 0.550000
+    t_arrival_conversion: float = 1.000000
     new_holes: float = -1.200000
     lines: float = 0.760666
     attack: float = 0.850000
@@ -131,12 +132,25 @@ def _t_spin_slot_supply_match(t_spin_slots: int, next_t_distance: int) -> float:
     return availability * min(1, t_spin_slots) - 0.35 * excess_slots * (1.0 - availability)
 
 
+def _t_arrival_conversion_score(game: Game, features: PlacementFeatures) -> float:
+    if game.current != "T":
+        return 0.0
+    if features.spin_lines > 0:
+        return 1.20 * features.spin_lines + 0.20 * features.attack
+    slot_loss = max(0, -features.t_spin_slot_delta)
+    return -0.80 * slot_loss
+
+
 def _context_score(game: Game, features: PlacementFeatures, weights: HeuristicWeights) -> float:
     supply_match = _t_spin_slot_supply_match(
         features.board.t_spin_slots,
         _next_t_distance(game),
     )
-    return supply_match * weights.t_spin_slot_supply_match
+    arrival_conversion = _t_arrival_conversion_score(game, features)
+    return (
+        supply_match * weights.t_spin_slot_supply_match
+        + arrival_conversion * weights.t_arrival_conversion
+    )
 
 
 def _placement_features_fast(game: Game, placement: Placement, before: BoardFeatures) -> PlacementFeatures:
