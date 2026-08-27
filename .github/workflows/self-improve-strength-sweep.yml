@@ -1,0 +1,68 @@
+name: Self-improve strength sweep
+
+on:
+  push:
+    branches: [self-improve]
+
+concurrency:
+  group: self-improve-strength-sweep
+  cancel-in-progress: true
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync package
+        run: uv sync --extra dev
+      - name: Compare five strength candidates
+        run: |
+          uv run --no-sync python - <<'PY'
+          from dataclasses import replace
+          from minoflux_ai.benchmark import run_heuristic_benchmark
+          from minoflux_ai.heuristic import DEFAULT_WEIGHTS
+          from minoflux_ai.search import DEFAULT_SEARCH_CONFIG
+
+          candidates = {
+              "baseline": (DEFAULT_WEIGHTS, DEFAULT_SEARCH_CONFIG),
+              "attack-heavy": (replace(DEFAULT_WEIGHTS, attack=1.60), DEFAULT_SEARCH_CONFIG),
+              "tspin-heavy": (replace(DEFAULT_WEIGHTS, spin_lines=2.50, attack=1.00), DEFAULT_SEARCH_CONFIG),
+              "survival-heavy": (
+                  replace(DEFAULT_WEIGHTS, max_height=-0.35, holes=-1.00, new_holes=-1.60),
+                  DEFAULT_SEARCH_CONFIG,
+              ),
+              "lookahead-2": (DEFAULT_WEIGHTS, replace(DEFAULT_SEARCH_CONFIG, lookahead_pieces=2)),
+              "beam-8": (DEFAULT_WEIGHTS, replace(DEFAULT_SEARCH_CONFIG, beam_width=8)),
+          }
+          cases = (
+              ("fixed", 104729, 7919),
+              ("unseen", 982451653, 104729),
+          )
+
+          for case, seed_base, seed_step in cases:
+              for name, (weights, config) in candidates.items():
+                  result = run_heuristic_benchmark(
+                      games=2,
+                      max_pieces=60,
+                      seed_base=seed_base,
+                      seed_step=seed_step,
+                      weights=weights,
+                      search_config=config,
+                      workers=2,
+                  )
+                  app = result.attack / result.pieces if result.pieces else 0.0
+                  print(
+                      f"RESULT case={case} candidate={name} pieces={result.pieces} "
+                      f"attack={result.attack} app={app:.6f} topouts={result.topouts} "
+                      f"completed={result.completed}/{result.games} lines={result.lines} "
+                      f"spins={result.spins} spin_lines={result.spin_lines} "
+                      f"tmini={result.t_spin_minis} tms={result.t_spin_mini_singles} "
+                      f"tss={result.t_spin_singles} tsd={result.t_spin_doubles} "
+                      f"tst={result.t_spin_triples} pc={result.perfect_clears}"
+                  )
+          PY
