@@ -17,6 +17,11 @@ class BoardFeatures:
     t_spin_slots: int
     occupied_cells: int
 
+    @property
+    def t_spin_slot_density(self) -> float:
+        """Reward T-spin cavities less when they coexist with buried holes."""
+        return self.t_spin_slots / (1 + self.holes)
+
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
 
