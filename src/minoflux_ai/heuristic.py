@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, fields
 from heapq import nlargest
 import json
-import os
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -86,51 +85,6 @@ class PlacementEvaluation:
     features: PlacementFeatures
 
 
-def _next_t_distance(game: Game) -> int:
-    if game.current == "T":
-        return 0
-    if game.hold_piece == "T":
-        return 1
-    for index, piece in enumerate(game.queue):
-        if piece == "T":
-            return index + 1
-    return 8
-
-
-def _tournament_bonus(game: Game, features: PlacementFeatures) -> float:
-    candidate = os.environ.get("MINOFLUX_TOURNAMENT_CANDIDATE", "baseline")
-    if candidate == "baseline":
-        return 0.0
-    b = features.board
-    tdist = _next_t_distance(game)
-    difficult = features.spin_lines > 0 or features.lines == 4
-    breaks_b2b = game.back_to_back and features.lines > 0 and not difficult
-    keeps_or_starts_b2b = difficult and features.lines > 0
-    near_t = max(0.0, 4.0 - float(tdist)) / 4.0
-    far_t = min(1.0, float(tdist) / 5.0)
-    slot_gain = max(0, features.t_spin_slot_delta)
-    slot_loss = max(0, -features.t_spin_slot_delta)
-    danger = max(0.0, b.max_height - 8.0)
-    garbage_present = any(cell == "G" for row in game.board for cell in row)
-    terms = {
-        "t_arrival_slot_preserve": 0.75 * near_t * (b.t_spin_slots - 1.5 * slot_loss),
-        "t_arrival_slot_create": 0.70 * near_t * slot_gain,
-        "t_far_clean_preserve": 0.55 * far_t * b.t_spin_slots / (1.0 + b.holes + features.new_holes),
-        "t_hold_slot_reserve": 0.75 * int(game.hold_piece == "T") * b.t_spin_slots / (1.0 + b.max_height / 10.0),
-        "t_current_conversion": 0.70 * int(game.current == "T") * (features.spin_lines + 0.4 * features.attack),
-        "b2b_break_cost": -1.15 * int(breaks_b2b) * (1.0 + 0.15 * game.b2b_chain),
-        "b2b_start_value": 0.75 * int((not game.back_to_back) and keeps_or_starts_b2b),
-        "b2b_chain_value": 0.45 * int(game.back_to_back and keeps_or_starts_b2b) * (1.0 + min(5, game.b2b_chain) / 5.0),
-        "surge_preservation": 0.28 * int(keeps_or_starts_b2b) * game.surge_charge - 0.32 * int(breaks_b2b) * game.surge_charge,
-        "danger_spin_escape": 0.11 * danger * (features.attack + features.spin_lines),
-        "danger_b2b_escape": 0.09 * danger * int(keeps_or_starts_b2b) * (1.0 + features.attack),
-        "garbage_downstack_attack": 0.35 * int(garbage_present) * features.lines * (1.0 + 0.35 * features.attack) / (1.0 + b.holes),
-        "garbage_hole_pressure": -0.20 * int(garbage_present) * (b.hole_depth + 2.0 * features.new_holes),
-        "combo_b2b_tradeoff": 0.28 * max(0, game.combo + 1) * features.lines + 0.60 * int(keeps_or_starts_b2b) - 0.75 * int(breaks_b2b),
-    }
-    return terms.get(candidate, 0.0)
-
-
 def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> float:
     board = features.board
     t_spin_slot_height_quality = board.t_spin_slots / (1.0 + board.max_height / 6.0)
@@ -175,11 +129,15 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
                 board[cell_y] = game.board[cell_y].copy()
                 copied_rows.add(cell_y)
             board[cell_y][cell_x] = placement.piece
+
     full_rows = [index for index, row in enumerate(board) if all(cell is not None for cell in row)]
     lines = len(full_rows)
     if full_rows:
         full_set = set(full_rows)
-        board = [[None] * game.width for _ in full_rows] + [row for index, row in enumerate(board) if index not in full_set]
+        board = [[None] * game.width for _ in full_rows] + [
+            row for index, row in enumerate(board) if index not in full_set
+        ]
+
     spin = t_spin_event(spin_kind, lines)
     perfect_clear = all(cell is None for row in board for cell in row)
     difficult = is_difficult_clear(lines, spin)
@@ -196,6 +154,7 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
         attack += min(4, combo // 2 + 1)
     if perfect_clear and lines:
         attack += 10
+
     hidden_occupied = any(cell is not None for row in board[: game.hidden_rows] for cell in row)
     after = extract_board_features(board)
     return PlacementFeatures(
@@ -211,23 +170,50 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
     )
 
 
-def evaluate_placement(game: Game, placement: Placement, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> PlacementEvaluation:
+def evaluate_placement(
+    game: Game,
+    placement: Placement,
+    weights: HeuristicWeights = DEFAULT_WEIGHTS,
+) -> PlacementEvaluation:
     before = extract_board_features(game.board)
-    features = _placement_features_fast(game, placement, before)
-    return PlacementEvaluation(placement=placement, score=score_features(features, weights) + _tournament_bonus(game, features), features=features)
+    placement_features = _placement_features_fast(game, placement, before)
+    return PlacementEvaluation(
+        placement=placement,
+        score=score_features(placement_features, weights),
+        features=placement_features,
+    )
 
 
 def _placement_key(item: PlacementEvaluation) -> tuple[float, int, int, int, int, int, int, int]:
-    return (item.score, item.features.attack, item.features.spin_lines, item.features.lines, -item.features.board.holes, -item.features.board.max_height, -item.placement.rotation, -item.placement.x)
+    return (
+        item.score,
+        item.features.attack,
+        item.features.spin_lines,
+        item.features.lines,
+        -item.features.board.holes,
+        -item.features.board.max_height,
+        -item.placement.rotation,
+        -item.placement.x,
+    )
 
 
-def rank_placements(game: Game, weights: HeuristicWeights = DEFAULT_WEIGHTS, *, placements: Iterable[Placement] | None = None, limit: int | None = None) -> tuple[PlacementEvaluation, ...]:
+def rank_placements(
+    game: Game,
+    weights: HeuristicWeights = DEFAULT_WEIGHTS,
+    *,
+    placements: Iterable[Placement] | None = None,
+    limit: int | None = None,
+) -> tuple[PlacementEvaluation, ...]:
     before = extract_board_features(game.board)
     source = game.legal_placements() if placements is None else placements
     evaluated = [
-        PlacementEvaluation(placement=p, score=score_features(f, weights) + _tournament_bonus(game, f), features=f)
-        for p in source
-        for f in (_placement_features_fast(game, p, before),)
+        PlacementEvaluation(
+            placement=placement,
+            score=score_features(features, weights),
+            features=features,
+        )
+        for placement in source
+        for features in (_placement_features_fast(game, placement, before),)
     ]
     if limit is not None:
         count = max(0, int(limit))
@@ -247,7 +233,10 @@ def choose_placement(game: Game, weights: HeuristicWeights = DEFAULT_WEIGHTS) ->
 def save_weights(path: str | Path, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps({"format": MODEL_FORMAT, "weights": weights.to_dict()}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    target.write_text(
+        json.dumps({"format": MODEL_FORMAT, "weights": weights.to_dict()}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return target
 
 
