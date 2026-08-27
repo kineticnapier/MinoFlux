@@ -5,9 +5,7 @@ import unittest
 
 from minoflux_ai import (
     DEFAULT_WEIGHTS,
-    BoardFeatures,
     HeuristicWeights,
-    PlacementFeatures,
     choose_placement,
     column_heights,
     extract_board_features,
@@ -15,7 +13,6 @@ from minoflux_ai import (
     rank_placements,
     run_heuristic_benchmark,
     save_weights,
-    score_features,
 )
 from minoflux_engine import BOARD_HEIGHT, BOARD_WIDTH, Game
 
@@ -28,7 +25,6 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(features.aggregate_height, 0)
         self.assertEqual(features.holes, 0)
         self.assertEqual(features.bumpiness, 0)
-        self.assertEqual(features.downstack_cost, 0)
         self.assertEqual(features.t_spin_slots, 0)
 
     def test_hole_and_depth_are_counted(self) -> None:
@@ -42,18 +38,7 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(features.max_height, 3)
         self.assertEqual(features.holes, 1)
         self.assertEqual(features.hole_depth, 1)
-        self.assertEqual(features.downstack_cost, 1)
         self.assertEqual(features.bumpiness, 3)
-
-    def test_downstack_cost_penalizes_deeply_covered_holes_nonlinearly(self) -> None:
-        board = [[None] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
-        board[-4][0] = "J"
-        board[-3][0] = "J"
-        board[-1][0] = "J"
-        features = extract_board_features(board)
-        self.assertEqual(features.holes, 1)
-        self.assertEqual(features.hole_depth, 2)
-        self.assertEqual(features.downstack_cost, 4)
 
     def test_three_corner_t_cavity_is_counted_as_t_spin_slot(self) -> None:
         board = [[None] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
@@ -90,46 +75,8 @@ class HeuristicTests(unittest.TestCase):
         self.assertTrue(ranked)
         self.assertEqual(game.snapshot(), before)
 
-    def test_strategic_features_are_scored(self) -> None:
-        board = BoardFeatures(
-            aggregate_height=0,
-            max_height=0,
-            holes=0,
-            hole_depth=0,
-            downstack_cost=5,
-            bumpiness=0,
-            wells=0,
-            t_spin_slots=2,
-            occupied_cells=0,
-        )
-        features = PlacementFeatures(
-            board=board,
-            new_holes=0,
-            lines=0,
-            attack=0,
-            spin_lines=0,
-            b2b_extend=1,
-            b2b_break=True,
-            perfect_clear=False,
-            game_over=False,
-        )
-        weights = HeuristicWeights(
-            downstack_cost=-0.5,
-            t_spin_slots=1.5,
-            b2b_extend=2.0,
-            b2b_break=-4.0,
-        )
-        self.assertAlmostEqual(score_features(features, weights), -1.5)
-
     def test_weights_round_trip(self) -> None:
-        custom = HeuristicWeights(
-            holes=-4.5,
-            attack=2.25,
-            downstack_cost=-0.03,
-            t_spin_slots=0.6,
-            b2b_extend=1.5,
-            b2b_break=-3.0,
-        )
+        custom = HeuristicWeights(holes=-4.5, attack=2.25, t_spin_slots=0.9)
         with TemporaryDirectory() as directory:
             path = save_weights(f"{directory}/weights.json", custom)
             self.assertEqual(load_weights(path), custom)
