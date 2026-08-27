@@ -9,36 +9,25 @@ on:
   workflow_dispatch:
 
 jobs:
-  screen:
+  fresh:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         candidate:
           - baseline
-          - t_proximity_slots
-          - t_proximity_preserve
-          - t_ready_b2b
-          - b2b_break_guard
-          - b2b_extend
-          - b2b_start
-          - downstack_holes
-          - downstack_depth
-          - downstack_combo
-          - danger_softcap
-          - danger_holes
           - clean_stack_flat
-          - clean_t_well
-          - slot_downstack
+          - downstack_holes
+          - t_proximity_preserve
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - name: Short fixed-seed screen
-        run: python tools/strength_tournament.py --candidate '${{ matrix.candidate }}' --seeds '431,947' --pieces 80 --out 'result-${{ matrix.candidate }}.json'
+      - name: Fresh-seed validation
+        run: python tools/strength_tournament.py --candidate '${{ matrix.candidate }}' --seeds '2203,3559,4787' --pieces 180 --out 'result-${{ matrix.candidate }}.json'
       - uses: actions/upload-artifact@v4
         with:
-          name: screen-${{ matrix.candidate }}
+          name: fresh-${{ matrix.candidate }}
           path: result-${{ matrix.candidate }}.json
