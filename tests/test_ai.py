@@ -26,6 +26,7 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(features.holes, 0)
         self.assertEqual(features.bumpiness, 0)
         self.assertEqual(features.t_spin_slots, 0)
+        self.assertEqual(features.t_spin_slot_density, 0.0)
 
     def test_hole_and_depth_are_counted(self) -> None:
         board = [[None] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
@@ -49,6 +50,10 @@ class FeatureTests(unittest.TestCase):
         board[pivot_y + 1][pivot_x - 1] = "S"
         features = extract_board_features(board)
         self.assertGreaterEqual(features.t_spin_slots, 1)
+        self.assertAlmostEqual(
+            features.t_spin_slot_density,
+            features.t_spin_slots / (1 + features.holes),
+        )
 
     def test_ragged_board_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -76,10 +81,21 @@ class HeuristicTests(unittest.TestCase):
         self.assertEqual(game.snapshot(), before)
 
     def test_weights_round_trip(self) -> None:
-        custom = HeuristicWeights(holes=-4.5, attack=2.25, t_spin_slots=0.9)
+        custom = HeuristicWeights(
+            holes=-4.5,
+            attack=2.25,
+            t_spin_slots=0.9,
+            t_spin_slot_density=0.4,
+        )
         with TemporaryDirectory() as directory:
             path = save_weights(f"{directory}/weights.json", custom)
             self.assertEqual(load_weights(path), custom)
+
+    def test_old_weight_mapping_uses_density_default(self) -> None:
+        old_weights = DEFAULT_WEIGHTS.to_dict()
+        old_weights.pop("t_spin_slot_density")
+        loaded = HeuristicWeights.from_mapping(old_weights)
+        self.assertEqual(loaded.t_spin_slot_density, DEFAULT_WEIGHTS.t_spin_slot_density)
 
     def test_unknown_weight_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
