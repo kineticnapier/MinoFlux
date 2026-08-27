@@ -27,6 +27,7 @@ class HeuristicWeights:
     t_spin_slot_density: float = 0.280000
     t_spin_slot_delta: float = 0.250000
     t_spin_slot_height_quality: float = 0.700000
+    t_spin_slot_low_clean: float = 0.900000
     new_holes: float = -1.200000
     lines: float = 0.760666
     attack: float = 0.850000
@@ -88,6 +89,9 @@ class PlacementEvaluation:
 def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> float:
     board = features.board
     t_spin_slot_height_quality = board.t_spin_slots / (1.0 + board.max_height / 6.0)
+    t_spin_slot_low_clean = board.t_spin_slots / (
+        1.0 + board.holes + board.max_height / 6.0
+    )
     return (
         board.aggregate_height * weights.aggregate_height
         + board.max_height * weights.max_height
@@ -99,6 +103,7 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
         + board.t_spin_slot_density * weights.t_spin_slot_density
         + features.t_spin_slot_delta * weights.t_spin_slot_delta
         + t_spin_slot_height_quality * weights.t_spin_slot_height_quality
+        + t_spin_slot_low_clean * weights.t_spin_slot_low_clean
         + features.new_holes * weights.new_holes
         + features.lines * weights.lines
         + features.attack * weights.attack
