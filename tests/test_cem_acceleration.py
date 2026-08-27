@@ -16,6 +16,7 @@ class FastPlacementEvaluationTests(unittest.TestCase):
         simulation = deepcopy(game)
         result = simulation.place(placement)
         after = extract_board_features(simulation.board)
+        danger_height = max(0, after.max_height - 12)
         features = PlacementFeatures(
             board=after,
             new_holes=max(0, after.holes - before.holes),
@@ -24,6 +25,12 @@ class FastPlacementEvaluationTests(unittest.TestCase):
             spin_lines=result.lines if result.spin is not None else 0,
             perfect_clear=result.perfect_clear,
             game_over=result.game_over,
+            spin=result.spin,
+            t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
+            b2b_chain=simulation.b2b_chain if simulation.back_to_back else 0,
+            b2b_break=bool(game.back_to_back and result.lines > 0 and not simulation.back_to_back),
+            combo=max(0, simulation.combo),
+            danger=danger_height * danger_height,
         )
         return features, score_features(features, DEFAULT_WEIGHTS)
 
