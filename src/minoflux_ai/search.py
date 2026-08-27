@@ -4,6 +4,7 @@ from collections import deque
 from copy import copy
 from dataclasses import asdict, dataclass
 from heapq import nlargest
+import random
 
 from minoflux_engine import Game, LockResult, Placement
 
@@ -11,21 +12,15 @@ from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights, PlacementEvaluation, r
 from .reachability import reachable_placements
 
 
-class _PreviewBag:
-    __slots__ = ()
-
-    def pop(self) -> str:
-        return "T"
-
-
-_PREVIEW_BAG = _PreviewBag()
-
-
 def clone_game(game: Game) -> Game:
     cloned = copy(game)
     cloned.board = [row.copy() for row in game.board]
     cloned.queue = deque(game.queue)
-    cloned._bag = _PREVIEW_BAG
+    cloned._bag = copy(game._bag)
+    cloned._bag._queue = deque(game._bag._queue)
+    cloned_rng = random.Random()
+    cloned_rng.setstate(game._bag._rng.getstate())
+    cloned._bag._rng = cloned_rng
     return cloned
 
 
