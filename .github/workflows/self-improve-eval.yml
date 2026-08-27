@@ -1,0 +1,43 @@
+name: Self Improve Eval
+
+on:
+  push:
+    branches: [self-improve]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -e .
+      - name: Compare t_spin_slots 1.0 vs 1.2
+        run: |
+          python - <<'PY'
+          from dataclasses import replace
+          from minoflux_ai.benchmark import run_heuristic_benchmark
+          from minoflux_ai.heuristic import DEFAULT_WEIGHTS
+
+          seeds = [(1, 31), (10001, 37), (20001, 43)]
+          for label, weights in [
+              ('baseline', DEFAULT_WEIGHTS),
+              ('candidate', replace(DEFAULT_WEIGHTS, t_spin_slots=1.2)),
+          ]:
+              totals = dict(pieces=0, attack=0, topouts=0, completed=0, spins=0, spin_lines=0, tsd=0, tst=0)
+              print(f'=== {label} ===')
+              for seed_base, seed_step in seeds:
+                  r = run_heuristic_benchmark(games=4, max_pieces=150, seed_base=seed_base, seed_step=seed_step, weights=weights, workers=4)
+                  ap = r.attack / r.pieces if r.pieces else 0.0
+                  print(f'set seed_base={seed_base}: attack_per_piece={ap:.6f} attack={r.attack} pieces={r.pieces} topouts={r.topouts} completed={r.completed} spins={r.spins} spin_lines={r.spin_lines} tsd={r.t_spin_doubles} tst={r.t_spin_triples}')
+                  totals['pieces'] += r.pieces
+                  totals['attack'] += r.attack
+                  totals['topouts'] += r.topouts
+                  totals['completed'] += r.completed
+                  totals['spins'] += r.spins
+                  totals['spin_lines'] += r.spin_lines
+                  totals['tsd'] += r.t_spin_doubles
+                  totals['tst'] += r.t_spin_triples
+              print(f"TOTAL attack_per_piece={totals['attack']/totals['pieces']:.6f} attack={totals['attack']} pieces={totals['pieces']} topouts={totals['topouts']} completed={totals['completed']}/12 spins={totals['spins']} spin_lines={totals['spin_lines']} tsd={totals['tsd']} tst={totals['tst']}")
+          PY
