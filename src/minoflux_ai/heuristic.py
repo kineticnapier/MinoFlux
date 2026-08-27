@@ -98,9 +98,8 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
 
 
 def _placement_features_fast(game: Game, placement: Placement, before: BoardFeatures) -> PlacementFeatures:
-    board = [row.copy() for row in game.board]
     spin_kind = classify_t_spin(
-        board,
+        game.board,
         piece=placement.piece,
         x=placement.x,
         y=placement.y,
@@ -108,11 +107,16 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
         last_move_was_rotation=placement.last_move_was_rotation,
         rotation_kick_index=placement.rotation_kick_index,
     )
+    board = list(game.board)
+    copied_rows: set[int] = set()
     topped_out = False
     for cell_x, cell_y in placement.cells:
         if cell_y < 0:
             topped_out = True
         else:
+            if cell_y not in copied_rows:
+                board[cell_y] = game.board[cell_y].copy()
+                copied_rows.add(cell_y)
             board[cell_y][cell_x] = placement.piece
 
     full_rows = [index for index, row in enumerate(board) if all(cell is not None for cell in row)]
