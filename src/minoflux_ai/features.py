@@ -16,6 +16,9 @@ class BoardFeatures:
     wells: int
     t_spin_slots: int
     occupied_cells: int
+    danger_excess: int = 0
+    deep_holes: int = 0
+    t_spin_clear_potential: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -49,16 +52,9 @@ def _empty(board: Board, x: int, y: int) -> bool:
     return 0 <= x < width and 0 <= y < height and board[y][x] is None
 
 
-def count_t_spin_slots(board: Board, *, start_y: int = 0) -> int:
-    """Count geometric T-spin slots using the Guideline three-corner rule.
-
-    This intentionally ignores reachability and kick history. A slot must have at
-    least three occupied pivot corners and enough empty cells for one complete T
-    orientation, which avoids rewarding arbitrary three-corner cavities.
-    """
-
+def _t_spin_slot_pivots(board: Board, *, start_y: int = 0) -> tuple[tuple[int, int], ...]:
     if not board:
-        return 0
+        return ()
     height = len(board)
     width = len(board[0])
     orientations = (
@@ -67,7 +63,7 @@ def count_t_spin_slots(board: Board, *, start_y: int = 0) -> int:
         ((-1, 0), (0, 0), (1, 0), (0, 1)),
         ((0, -1), (-1, 0), (0, 0), (0, 1)),
     )
-    slots = 0
+    pivots: list[tuple[int, int]] = []
     for pivot_y in range(max(0, int(start_y)), height):
         for pivot_x in range(width):
             if board[pivot_y][pivot_x] is not None:
@@ -84,8 +80,13 @@ def count_t_spin_slots(board: Board, *, start_y: int = 0) -> int:
                 all(_empty(board, pivot_x + dx, pivot_y + dy) for dx, dy in cells)
                 for cells in orientations
             ):
-                slots += 1
-    return slots
+                pivots.append((pivot_x, pivot_y))
+    return tuple(pivots)
+
+
+def count_t_spin_slots(board: Board, *, start_y: int = 0) -> int:
+    """Count geometric T-spin slots using the Guideline three-corner rule."""
+    return len(_t_spin_slot_pivots(board, start_y=start_y))
 
 
 def extract_board_features(board: Board) -> BoardFeatures:
@@ -100,6 +101,7 @@ def extract_board_features(board: Board) -> BoardFeatures:
     heights = column_heights(board)
     holes = 0
     hole_depth = 0
+    deep_holes = 0
     occupied_cells = 0
 
     for x in range(width):
@@ -114,6 +116,8 @@ def extract_board_features(board: Board) -> BoardFeatures:
             elif seen_block:
                 holes += 1
                 hole_depth += blocks_above
+                if blocks_above >= 3:
+                    deep_holes += 1
 
     bumpiness = sum(abs(left - right) for left, right in zip(heights, heights[1:]))
 
@@ -134,6 +138,14 @@ def extract_board_features(board: Board) -> BoardFeatures:
 
     max_height = max(heights, default=0)
     slot_start_y = height if max_height == 0 else max(0, height - max_height - 1)
+    pivots = _t_spin_slot_pivots(board, start_y=slot_start_y)
+    row_fill = [sum(cell is not None for cell in row) for row in board]
+    t_spin_clear_potential = 0
+    for _, pivot_y in pivots:
+        for row_y in (pivot_y - 1, pivot_y, pivot_y + 1):
+            if 0 <= row_y < height and row_fill[row_y] >= max(1, width - 3):
+                t_spin_clear_potential += 1
+    danger_excess = sum(max(0, value - 10) ** 2 for value in heights)
     return BoardFeatures(
         aggregate_height=sum(heights),
         max_height=max_height,
@@ -141,6 +153,9 @@ def extract_board_features(board: Board) -> BoardFeatures:
         hole_depth=hole_depth,
         bumpiness=bumpiness,
         wells=wells,
-        t_spin_slots=count_t_spin_slots(board, start_y=slot_start_y),
+        t_spin_slots=len(pivots),
         occupied_cells=occupied_cells,
+        danger_excess=danger_excess,
+        deep_holes=deep_holes,
+        t_spin_clear_potential=t_spin_clear_potential,
     )
