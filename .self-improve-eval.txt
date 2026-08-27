@@ -1,2 +1,0 @@
-baseline: discount=0.9, app=0.185000, attack=111, pieces=600, topouts=0/6, completed=6/6, spins=30, spin_lines=14, TSD=2, TST=0, group_app=0.145000,0.195000,0.215000
-candidate: discount=0.95, app=0.188333, attack=113, pieces=600, topouts=0/6, completed=6/6, spins=31, spin_lines=15, TSD=2, TST=0, group_app=0.145000,0.205000,0.215000
