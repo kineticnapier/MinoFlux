@@ -39,6 +39,12 @@ jobs:
       - name: Run headless smoke simulation
         if: matrix.python-version == '3.13'
         run: uv run --no-sync python -m minoflux smoke --games 1 --max-pieces 20
+      - name: Temporary fixed-seed self-improvement benchmark
+        if: matrix.python-version == '3.13'
+        run: time uv run --no-sync python -m minoflux benchmark --games 2 --max-pieces 40 --workers 1 --seed-base 101 --seed-step 31 --fitness-profile attack_spin --hold --lookahead-pieces 1 --beam-width 2
+      - name: Temporary unseen-seed self-improvement benchmark
+        if: matrix.python-version == '3.13'
+        run: time uv run --no-sync python -m minoflux benchmark --games 2 --max-pieces 40 --workers 1 --seed-base 10001 --seed-step 47 --fitness-profile attack_spin --hold --lookahead-pieces 1 --beam-width 2
       - name: Import Pygame clients and capture tools
         if: matrix.python-version == '3.13'
         run: uv run --no-sync python -c "from minoflux.replay import build_parser as replay_parser; from minoflux.versus_ai import build_parser as versus_parser; from minoflux_ai import load_tetrio_capture, align_capture_samples; print(replay_parser().prog, versus_parser().prog)"
