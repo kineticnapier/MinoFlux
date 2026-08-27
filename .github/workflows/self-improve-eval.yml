@@ -1,0 +1,56 @@
+name: Self Improve Eval
+
+on:
+  push:
+    branches: [self-improve]
+
+jobs:
+  evaluate:
+    if: contains(github.event.head_commit.message, 'Test T-spin setup weight 1.3')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -e .
+      - name: Compare 1.2 vs 1.3
+        run: |
+          python - <<'PY'
+          from dataclasses import replace
+          from minoflux_ai.benchmark import run_heuristic_benchmark
+          from minoflux_ai.heuristic import DEFAULT_WEIGHTS
+
+          baseline = replace(DEFAULT_WEIGHTS, t_spin_slots=1.2)
+          candidate = replace(DEFAULT_WEIGHTS, t_spin_slots=1.3)
+          sets = [(1,31),(10007,37),(420001,43)]
+
+          def collect(weights):
+              rows=[]
+              for base, step in sets:
+                  r=run_heuristic_benchmark(games=4,max_pieces=150,seed_base=base,seed_step=step,weights=weights,workers=4)
+                  rows.append(r)
+              return rows
+
+          def summarize(rows):
+              pieces=sum(r.pieces for r in rows)
+              attack=sum(r.attack for r in rows)
+              return {
+                  'pieces': pieces,
+                  'attack': attack,
+                  'app': attack/pieces if pieces else 0.0,
+                  'topouts': sum(r.topouts for r in rows),
+                  'completed': sum(r.completed for r in rows),
+                  'spins': sum(r.spins for r in rows),
+                  'spin_lines': sum(r.spin_lines for r in rows),
+                  'tsd': sum(r.t_spin_doubles for r in rows),
+                  'tst': sum(r.t_spin_triples for r in rows),
+                  'per_set_app': [r.attack/r.pieces if r.pieces else 0.0 for r in rows],
+              }
+
+          b=summarize(collect(baseline))
+          c=summarize(collect(candidate))
+          print('BASELINE', b)
+          print('CANDIDATE', c)
+          PY
