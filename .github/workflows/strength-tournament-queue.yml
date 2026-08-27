@@ -8,32 +8,21 @@ on:
       - .github/workflows/strength-tournament-queue.yml
 
 jobs:
-  screen:
+  fresh:
     strategy:
       fail-fast: false
       matrix:
         candidate:
           - baseline
-          - supply_balance
-          - supply_low_clean_balance
-          - supply_density_balance
-          - supply_height_balance
-          - supply_surplus_tax
-          - supply_deficit_build
           - t_ready_quality
-          - t_slot_conversion
-          - t_slot_waste_tax
-          - non_t_slot_damage
-          - b2b_spin_safety
-          - b2b_attack_efficiency
-          - surge_attack_timing
           - hold_t_release
+          - t_slot_conversion
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - run: python tools/strength_tournament_queue.py --phase screen --candidate "${{ matrix.candidate }}"
+      - run: python tools/strength_tournament_queue.py --phase fresh --candidate "${{ matrix.candidate }}"
