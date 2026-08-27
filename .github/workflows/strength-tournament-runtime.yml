@@ -4,14 +4,8 @@ on:
     branches: [self-improve]
     paths:
       - 'tools/strength_tournament_runtime.py'
-      - 'src/minoflux_ai/heuristic.py'
-      - '.github/workflows/strength-tournament-runtime.yml'
 jobs:
-  fresh:
-    strategy:
-      fail-fast: false
-      matrix:
-        candidate: [baseline, setup_preserve_attack, well_danger, spin_clear_efficiency]
+  versus:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,8 +13,8 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - name: Run fresh candidate
+      - name: Run mirrored versus finalist
         env:
-          CANDIDATE: ${{ matrix.candidate }}
-          PHASE: fresh
+          CANDIDATE: well_danger
+          PHASE: versus
         run: python tools/strength_tournament_runtime.py
