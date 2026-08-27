@@ -49,7 +49,7 @@ def _empty(board: Board, x: int, y: int) -> bool:
     return 0 <= x < width and 0 <= y < height and board[y][x] is None
 
 
-def count_t_spin_slots(board: Board) -> int:
+def count_t_spin_slots(board: Board, *, start_y: int = 0) -> int:
     """Count geometric T-spin slots using the Guideline three-corner rule.
 
     This intentionally ignores reachability and kick history. A slot must have at
@@ -68,7 +68,7 @@ def count_t_spin_slots(board: Board) -> int:
         ((0, -1), (-1, 0), (0, 0), (0, 1)),
     )
     slots = 0
-    for pivot_y in range(height):
+    for pivot_y in range(max(0, int(start_y)), height):
         for pivot_x in range(width):
             if board[pivot_y][pivot_x] is not None:
                 continue
@@ -132,13 +132,15 @@ def extract_board_features(board: Board) -> BoardFeatures:
             else:
                 depth = 0
 
+    max_height = max(heights, default=0)
+    slot_start_y = height if max_height == 0 else max(0, height - max_height - 1)
     return BoardFeatures(
         aggregate_height=sum(heights),
-        max_height=max(heights, default=0),
+        max_height=max_height,
         holes=holes,
         hole_depth=hole_depth,
         bumpiness=bumpiness,
         wells=wells,
-        t_spin_slots=count_t_spin_slots(board),
+        t_spin_slots=count_t_spin_slots(board, start_y=slot_start_y),
         occupied_cells=occupied_cells,
     )
