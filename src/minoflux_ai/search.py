@@ -29,7 +29,7 @@ class SearchConfig:
     allow_hold: bool = True
     lookahead_pieces: int = 1
     beam_width: int = 4
-    discount: float = 0.95
+    discount: float = 0.90
     srs_reachable: bool = True
     allow_180: bool = False
     reachability_node_limit: int = 8_000
