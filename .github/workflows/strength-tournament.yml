@@ -6,11 +6,7 @@ on:
       - '.github/workflows/strength-tournament.yml'
   workflow_dispatch:
 jobs:
-  fresh:
-    strategy:
-      fail-fast: false
-      matrix:
-        candidate: [baseline, slot_delta_quality, danger_newhole, slot_low_clean]
+  versus:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,4 +14,4 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - run: python tools/strength_tournament_round.py '${{ matrix.candidate }}' --games 3 --pieces 150 --seed 910001 --step 104729
+      - run: python tools/strength_tournament_versus.py
