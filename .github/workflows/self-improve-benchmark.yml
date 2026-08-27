@@ -17,13 +17,65 @@ jobs:
           enable-cache: true
       - name: Sync core dependencies
         run: uv sync --extra dev
-      - name: Feature extraction microbenchmark
+      - name: Paired baseline/candidate benchmark
         shell: bash
         run: |
           uv run --no-sync python - <<'PY'
           from time import perf_counter
-          from minoflux_ai.features import extract_board_features
+          import minoflux_ai.features as features
+          import minoflux_ai.heuristic as heuristic
+          from minoflux_ai.benchmark import run_heuristic_benchmark
+          from minoflux_ai.search import SearchConfig
           from minoflux_engine import BOARD_HEIGHT, BOARD_WIDTH
+
+          candidate = features.extract_board_features
+
+          def legacy(board):
+              if not board:
+                  return features.BoardFeatures(0, 0, 0, 0, 0, 0, 0)
+              height = len(board)
+              width = len(board[0])
+              if any(len(row) != width for row in board):
+                  raise ValueError("Board rows must have equal width")
+              heights = features.column_heights(board)
+              holes = 0
+              hole_depth = 0
+              occupied_cells = 0
+              for x in range(width):
+                  seen_block = False
+                  blocks_above = 0
+                  for y in range(height):
+                      if board[y][x] is not None:
+                          seen_block = True
+                          blocks_above += 1
+                          occupied_cells += 1
+                      elif seen_block:
+                          holes += 1
+                          hole_depth += blocks_above
+              bumpiness = sum(abs(left - right) for left, right in zip(heights, heights[1:]))
+              wells = 0
+              for x in range(width):
+                  depth = 0
+                  for y in range(height):
+                      if board[y][x] is not None:
+                          depth = 0
+                          continue
+                      left_filled = x == 0 or board[y][x - 1] is not None
+                      right_filled = x == width - 1 or board[y][x + 1] is not None
+                      if left_filled and right_filled:
+                          depth += 1
+                          wells += depth
+                      else:
+                          depth = 0
+              return features.BoardFeatures(
+                  aggregate_height=sum(heights),
+                  max_height=max(heights, default=0),
+                  holes=holes,
+                  hole_depth=hole_depth,
+                  bumpiness=bumpiness,
+                  wells=wells,
+                  occupied_cells=occupied_cells,
+              )
 
           boards = []
           for seed in range(32):
@@ -33,27 +85,40 @@ jobs:
                       if ((x * 17 + y * 11 + seed * 7) % 5) < 3:
                           board[y][x] = "T"
               boards.append(board)
+          for board in boards:
+              assert candidate(board) == legacy(board)
 
-          for _ in range(3):
-              start = perf_counter()
-              checksum = 0
-              for i in range(30000):
-                  f = extract_board_features(boards[i % len(boards)])
-                  checksum += f.aggregate_height + f.holes + f.wells + f.occupied_cells
-              elapsed = perf_counter() - start
-              print(f"FEATURE_TIME={elapsed:.6f} CHECKSUM={checksum}")
+          for round_index in range(4):
+              order = (("legacy", legacy), ("candidate", candidate)) if round_index % 2 == 0 else (("candidate", candidate), ("legacy", legacy))
+              for name, fn in order:
+                  start = perf_counter()
+                  checksum = 0
+                  for i in range(30000):
+                      f = fn(boards[i % len(boards)])
+                      checksum += f.aggregate_height + f.holes + f.wells + f.occupied_cells
+                  print(f"FEATURE_AB round={round_index} name={name} time={perf_counter()-start:.6f} checksum={checksum}")
+
+          config = SearchConfig(allow_hold=True, lookahead_pieces=1, beam_width=2)
+          expected = {}
+          for seed_base, label in ((1001, "fixed"), (9001, "unseen")):
+              for round_index in range(3):
+                  order = (("legacy", legacy), ("candidate", candidate)) if round_index % 2 == 0 else (("candidate", candidate), ("legacy", legacy))
+                  for name, fn in order:
+                      heuristic.extract_board_features = fn
+                      start = perf_counter()
+                      result = run_heuristic_benchmark(
+                          games=2,
+                          max_pieces=30,
+                          seed_base=seed_base,
+                          seed_step=31 if label == "fixed" else 47,
+                          search_config=config,
+                          workers=1,
+                      )
+                      elapsed = perf_counter() - start
+                      signature = (result.pieces, result.lines, result.attack, result.spins, result.spin_lines, result.t_spin_minis, result.t_spin_mini_singles, result.t_spin_singles, result.t_spin_doubles, result.t_spin_triples, result.topouts)
+                      if label not in expected:
+                          expected[label] = signature
+                      assert signature == expected[label], (label, name, signature, expected[label])
+                      print(f"SEARCH_AB set={label} round={round_index} name={name} time={elapsed:.6f} signature={signature}")
+          heuristic.extract_board_features = candidate
           PY
-      - name: Fixed-seed benchmark
-        shell: bash
-        run: |
-          for i in 1 2; do
-            /usr/bin/time -f 'FIXED_TIME=%e' uv run --no-sync python -m minoflux benchmark --games 2 --max-pieces 40 --seed-base 1001 --seed-step 31 --workers 1 --fitness-profile attack_spin --hold --lookahead-pieces 1 --beam-width 2
-          done
-      - name: Unseen-seed benchmark
-        shell: bash
-        run: |
-          for i in 1 2; do
-            /usr/bin/time -f 'UNSEEN_TIME=%e' uv run --no-sync python -m minoflux benchmark --games 2 --max-pieces 40 --seed-base 9001 --seed-step 47 --workers 1 --fitness-profile attack_spin --hold --lookahead-pieces 1 --beam-width 2
-          done
-      - name: Versus benchmark
-        run: uv run --no-sync python -m minoflux versus-benchmark --games 2 --max-turns 20 --seed-base 12001 --seed-step 53 --candidate-width 2 --reply-width 1 --hold --lookahead-pieces 0 --beam-width 1
