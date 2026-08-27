@@ -43,29 +43,6 @@ jobs:
         if: matrix.python-version == '3.13'
         run: uv run --no-sync python -c "from minoflux.replay import build_parser as replay_parser; from minoflux.versus_ai import build_parser as versus_parser; from minoflux_ai import load_tetrio_capture, align_capture_samples; print(replay_parser().prog, versus_parser().prog)"
 
-  self-improve-benchmark:
-    name: self-improve-benchmark (3.13)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/self-improve'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          python-version: "3.13"
-          enable-cache: true
-      - name: Sync package and dev dependencies
-        run: uv sync --extra dev
-      - name: Fixed-seed benchmark
-        run: |
-          /usr/bin/time -f 'WALL_SECONDS=%e' uv run --no-sync python -m minoflux benchmark --games 2 --max-pieces 40 --seed-base 1 --seed-step 31 --workers 2 --fitness-profile attack_spin --hold --lookahead-pieces 1 --beam-width 2
-      - name: Unseen-seed benchmark
-        run: |
-          /usr/bin/time -f 'WALL_SECONDS=%e' uv run --no-sync python -m minoflux benchmark --games 2 --max-pieces 40 --seed-base 100003 --seed-step 7919 --workers 2 --fitness-profile attack_spin --hold --lookahead-pieces 1 --beam-width 2
-      - name: Small versus benchmark
-        run: |
-          /usr/bin/time -f 'WALL_SECONDS=%e' uv run --no-sync python -m minoflux versus-benchmark --games 2 --max-turns 20 --seed-base 200003 --seed-step 7907 --candidate-width 2 --reply-width 0 --hold --lookahead-pieces 0 --beam-width 1
-
   full-validation:
     name: full-validation (3.13)
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
