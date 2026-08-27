@@ -5,27 +5,17 @@ on:
     branches: [self-improve]
 
 jobs:
-  test-file:
-    name: ${{ matrix.file }}
+  test-case:
+    name: ${{ matrix.node }}
     strategy:
       fail-fast: false
       matrix:
-        file:
-          - tests/test_attack_promotion.py
-          - tests/test_b2b_versus.py
-          - tests/test_cem_acceleration.py
-          - tests/test_engine.py
-          - tests/test_imitation.py
-          - tests/test_input.py
-          - tests/test_lab_model_selection.py
-          - tests/test_lock_and_srs.py
-          - tests/test_replay_cem.py
-          - tests/test_replay_hold.py
-          - tests/test_search.py
-          - tests/test_search_acceleration.py
-          - tests/test_srs_reachability.py
-          - tests/test_tetrio_capture.py
-          - tests/test_versus_search.py
+        node:
+          - tests/test_search_acceleration.py::BoundedRankingTests::test_limited_placement_ranking_matches_full_prefix
+          - tests/test_search_acceleration.py::BoundedRankingTests::test_limited_hold_ranking_matches_full_prefix
+          - tests/test_search_acceleration.py::BoundedRankingTests::test_discount_is_applied_to_future_score
+          - tests/test_search_acceleration.py::PreviewCloneTests::test_preview_clone_matches_exact_stream_within_search_horizon
+          - tests/test_search_acceleration.py::ParallelBenchmarkTests::test_parallel_and_serial_benchmarks_match
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,4 +23,4 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --extra game --extra dev
-      - run: uv run --no-sync python -m pytest -q ${{ matrix.file }}
+      - run: uv run --no-sync python -m pytest -q ${{ matrix.node }}
