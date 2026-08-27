@@ -9,31 +9,20 @@ on:
   workflow_dispatch:
 
 jobs:
-  screen:
+  fresh:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         candidate:
           - baseline
-          - safe_attack
-          - attack_no_holes
-          - spin_safety
           - slot_bump_quality
           - slot_depth_quality
           - slot_supply_match
-          - slot_timing
-          - slot_single_focus
-          - danger_attack_escape
-          - clean_spin_attack
-          - line_safety
-          - deep_hole_danger
-          - nonspin_clear_tax
-          - slot_clear_conflict
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - run: python tools/strength_tournament_ctx.py --phase screen --candidate '${{ matrix.candidate }}'
+      - run: python tools/strength_tournament_ctx.py --phase fresh --candidate '${{ matrix.candidate }}'
