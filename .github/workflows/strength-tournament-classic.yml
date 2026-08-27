@@ -1,0 +1,39 @@
+name: Strength tournament classic features
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - tools/strength_tournament_classic.py
+      - .github/workflows/strength-tournament-classic.yml
+
+jobs:
+  screen:
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate:
+          - baseline
+          - row_transitions
+          - column_transitions
+          - hole_rows
+          - covered_holes
+          - deepest_hole
+          - landing_height
+          - surface_variance
+          - high_columns
+          - low_t_slot_transition
+          - eroded_cells
+          - clean_lines
+          - attack_safety
+          - shallow_hole_ratio
+          - classic_combo
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -e .
+      - run: python tools/strength_tournament_classic.py --phase screen --candidate "${{ matrix.candidate }}"
