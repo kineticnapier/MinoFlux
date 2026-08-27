@@ -15,7 +15,7 @@ from minoflux_ai import (
     save_weights,
 )
 from minoflux_ai.features import BoardFeatures
-from minoflux_ai.heuristic import PlacementFeatures, score_features
+from minoflux_ai.heuristic import PlacementFeatures, _t_spin_slot_supply_match, score_features
 from minoflux_engine import BOARD_HEIGHT, BOARD_WIDTH, Game
 
 
@@ -114,6 +114,7 @@ class HeuristicTests(unittest.TestCase):
             t_spin_slot_delta=0,
             t_spin_slot_height_quality=1,
             t_spin_slot_low_clean=0,
+            t_spin_slot_supply_match=0,
             new_holes=0,
             lines=0,
             attack=0,
@@ -155,6 +156,7 @@ class HeuristicTests(unittest.TestCase):
             t_spin_slot_delta=0,
             t_spin_slot_height_quality=0,
             t_spin_slot_low_clean=1,
+            t_spin_slot_supply_match=0,
             new_holes=0,
             lines=0,
             attack=0,
@@ -164,6 +166,13 @@ class HeuristicTests(unittest.TestCase):
         )
         self.assertAlmostEqual(score_features(features, weights), 1.0)
 
+    def test_slot_supply_match_tracks_t_availability_and_excess_slots(self) -> None:
+        self.assertAlmostEqual(_t_spin_slot_supply_match(1, 0), 1.0)
+        self.assertAlmostEqual(_t_spin_slot_supply_match(1, 3), 0.5)
+        self.assertAlmostEqual(_t_spin_slot_supply_match(0, 0), 0.0)
+        self.assertAlmostEqual(_t_spin_slot_supply_match(2, 6), -0.35)
+        self.assertAlmostEqual(_t_spin_slot_supply_match(2, 7), -0.35)
+
     def test_weights_round_trip(self) -> None:
         custom = HeuristicWeights(
             holes=-4.5,
@@ -172,6 +181,7 @@ class HeuristicTests(unittest.TestCase):
             t_spin_slot_density=0.4,
             t_spin_slot_height_quality=0.65,
             t_spin_slot_low_clean=0.75,
+            t_spin_slot_supply_match=0.6,
         )
         with TemporaryDirectory() as directory:
             path = save_weights(f"{directory}/weights.json", custom)
@@ -199,6 +209,15 @@ class HeuristicTests(unittest.TestCase):
         self.assertEqual(
             loaded.t_spin_slot_low_clean,
             DEFAULT_WEIGHTS.t_spin_slot_low_clean,
+        )
+
+    def test_old_weight_mapping_uses_slot_supply_match_default(self) -> None:
+        old_weights = DEFAULT_WEIGHTS.to_dict()
+        old_weights.pop("t_spin_slot_supply_match")
+        loaded = HeuristicWeights.from_mapping(old_weights)
+        self.assertEqual(
+            loaded.t_spin_slot_supply_match,
+            DEFAULT_WEIGHTS.t_spin_slot_supply_match,
         )
 
     def test_unknown_weight_is_rejected(self) -> None:
