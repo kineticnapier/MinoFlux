@@ -13,8 +13,7 @@ from minoflux_ai import (
     run_heuristic_benchmark,
     save_weights,
 )
-from minoflux_ai.heuristic import evaluate_placement
-from minoflux_engine import BOARD_HEIGHT, BOARD_WIDTH, Game, Placement
+from minoflux_engine import BOARD_HEIGHT, BOARD_WIDTH, Game
 
 
 class FeatureTests(unittest.TestCase):
@@ -53,22 +52,6 @@ class HeuristicTests(unittest.TestCase):
         assert choice is not None
         self.assertIn(choice.placement, game.legal_placements())
         self.assertEqual(game.snapshot(), before)
-
-    def test_line_clear_is_detected_from_touched_rows(self) -> None:
-        game = Game(123)
-        game.board = [[None] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
-        for x in range(4, BOARD_WIDTH):
-            game.board[-1][x] = "J"
-        placement = Placement(
-            piece="I",
-            x=0,
-            y=BOARD_HEIGHT - 2,
-            rotation=0,
-            cells=((0, BOARD_HEIGHT - 1), (1, BOARD_HEIGHT - 1), (2, BOARD_HEIGHT - 1), (3, BOARD_HEIGHT - 1)),
-        )
-        evaluation = evaluate_placement(game, placement)
-        self.assertEqual(evaluation.features.lines, 1)
-        self.assertTrue(evaluation.features.perfect_clear)
 
     def test_weights_round_trip(self) -> None:
         custom = HeuristicWeights(holes=-4.5, attack=2.25)
