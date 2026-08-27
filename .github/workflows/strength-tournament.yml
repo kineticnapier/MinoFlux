@@ -1,17 +1,8 @@
 name: Strength tournament
 on:
-  push:
-    branches: [self-improve]
-    paths:
-      - '.github/workflows/strength-tournament.yml'
   workflow_dispatch:
 jobs:
-  versus:
+  noop:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - run: python -m pip install -e .
-      - run: python tools/strength_tournament_versus.py
+      - run: echo temporary workflow disabled
