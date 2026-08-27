@@ -8,36 +8,24 @@ on:
       - .github/workflows/strength-tournament-runtime.yml
 
 jobs:
-  short:
+  fresh:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         candidate:
           - baseline
-          - tsd_ready
-          - tst_ready
-          - spin_efficiency
           - slot_height_quality
-          - slot_depth_quality
           - slot_delta_clean
           - slot_delta_holefree
-          - clean_attack
-          - danger_attack
-          - holes_height
-          - depth_height
-          - spin_clean
-          - efficient_clear
-          - slot_attack_combo
-          - safe_slot
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - name: Run short candidate
+      - name: Run fresh candidate
         env:
           CANDIDATE: ${{ matrix.candidate }}
-          PHASE: short
+          PHASE: fresh
         run: python tools/strength_tournament_runtime.py
