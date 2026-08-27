@@ -7,6 +7,9 @@ on:
       - 'src/minoflux_ai/search.py'
       - '.github/workflows/self-improve-eval.yml'
 
+permissions:
+  contents: write
+
 jobs:
   evaluate:
     runs-on: ubuntu-latest
@@ -19,6 +22,7 @@ jobs:
       - name: Compare discount 0.90 vs 0.95
         run: |
           python - <<'PY'
+          from pathlib import Path
           from minoflux_ai.benchmark import run_heuristic_benchmark
           from minoflux_ai.search import SearchConfig
 
@@ -46,6 +50,7 @@ jobs:
               totals['app'] = totals['attack'] / totals['pieces'] if totals['pieces'] else 0.0
               return totals, groups
 
+          lines = []
           for label, discount in [('baseline', 0.90), ('candidate', 0.95)]:
               t, groups = measure(discount)
               msg = (
@@ -54,6 +59,14 @@ jobs:
                   f"spins={t['spins']}, spin_lines={t['spin_lines']}, TSD={t['tsd']}, TST={t['tst']}, "
                   f"group_app={','.join(f'{x:.6f}' for x in groups)}"
               )
+              lines.append(msg)
               print(msg)
-              print(f"::notice title={label}::{msg}")
+          Path('.self-improve-eval.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
           PY
+      - name: Publish evaluation result
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .self-improve-eval.txt
+          git commit -m "Record temporary discount evaluation" || exit 0
+          git push
