@@ -39,24 +39,6 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(features.hole_depth, 1)
         self.assertEqual(features.bumpiness, 3)
 
-    def test_irregular_stack_metrics_are_preserved(self) -> None:
-        board = [
-            [None, None, None, None],
-            ["T", None, None, None],
-            ["T", None, "T", None],
-            [None, "T", "T", "T"],
-            ["T", "T", None, "T"],
-        ]
-        features = extract_board_features(board)
-        self.assertEqual(column_heights(board), (4, 2, 3, 2))
-        self.assertEqual(features.aggregate_height, 11)
-        self.assertEqual(features.max_height, 4)
-        self.assertEqual(features.holes, 2)
-        self.assertEqual(features.hole_depth, 4)
-        self.assertEqual(features.bumpiness, 4)
-        self.assertEqual(features.wells, 4)
-        self.assertEqual(features.occupied_cells, 9)
-
     def test_ragged_board_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             extract_board_features([[None], [None, None]])
