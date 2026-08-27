@@ -13,15 +13,22 @@ class FastPlacementEvaluationTests(unittest.TestCase):
     @staticmethod
     def reference_features(game: Game, placement):
         before = extract_board_features(game.board)
+        before_b2b = game.back_to_back
+        before_chain = game.b2b_chain
         simulation = deepcopy(game)
         result = simulation.place(placement)
         after = extract_board_features(simulation.board)
+        b2b_extend = max(0, result.b2b_chain - before_chain)
+        if result.lines and result.back_to_back and not before_b2b:
+            b2b_extend += 1
         features = PlacementFeatures(
             board=after,
             new_holes=max(0, after.holes - before.holes),
             lines=result.lines,
             attack=result.attack,
             spin_lines=result.lines if result.spin is not None else 0,
+            b2b_extend=b2b_extend,
+            b2b_break=bool(before_b2b and result.lines and not result.back_to_back),
             perfect_clear=result.perfect_clear,
             game_over=result.game_over,
         )
