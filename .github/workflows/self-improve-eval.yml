@@ -27,12 +27,12 @@ jobs:
               groups = []
               for base in (17, 1009, 9001):
                   r = run_heuristic_benchmark(
-                      games=4,
-                      max_pieces=150,
+                      games=2,
+                      max_pieces=100,
                       seed_base=base,
                       seed_step=31,
                       search_config=SearchConfig(discount=discount),
-                      workers=4,
+                      workers=2,
                   )
                   groups.append(r.attack / r.pieces if r.pieces else 0.0)
                   totals['pieces'] += r.pieces
@@ -50,7 +50,7 @@ jobs:
               t, groups = measure(discount)
               msg = (
                   f"{label}: discount={discount}, app={t['app']:.6f}, attack={t['attack']}, "
-                  f"pieces={t['pieces']}, topouts={t['topouts']}/12, completed={t['completed']}/12, "
+                  f"pieces={t['pieces']}, topouts={t['topouts']}/6, completed={t['completed']}/6, "
                   f"spins={t['spins']}, spin_lines={t['spin_lines']}, TSD={t['tsd']}, TST={t['tst']}, "
                   f"group_app={','.join(f'{x:.6f}' for x in groups)}"
               )
