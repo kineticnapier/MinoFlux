@@ -10,6 +10,7 @@ from minoflux_ai import (
     column_heights,
     extract_board_features,
     load_weights,
+    rank_placements,
     run_heuristic_benchmark,
     save_weights,
 )
@@ -51,6 +52,16 @@ class HeuristicTests(unittest.TestCase):
         self.assertIsNotNone(choice)
         assert choice is not None
         self.assertIn(choice.placement, game.legal_placements())
+        self.assertEqual(game.snapshot(), before)
+
+    def test_ranking_nonempty_board_does_not_mutate_game(self) -> None:
+        game = Game(321)
+        for _ in range(8):
+            placement = game.legal_placements()[0]
+            game.place(placement)
+        before = game.snapshot()
+        ranked = rank_placements(game)
+        self.assertTrue(ranked)
         self.assertEqual(game.snapshot(), before)
 
     def test_weights_round_trip(self) -> None:
