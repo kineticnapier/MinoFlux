@@ -28,6 +28,7 @@ class HeuristicWeights:
     t_spin_slot_delta: float = 0.250000
     t_spin_slot_height_quality: float = 0.700000
     t_spin_slot_low_clean: float = 0.900000
+    t_spin_slot_supply_match: float = 0.550000
     new_holes: float = -1.200000
     lines: float = 0.760666
     attack: float = 0.850000
@@ -113,6 +114,31 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
     )
 
 
+def _next_t_distance(game: Game) -> int:
+    if game.current == "T":
+        return 0
+    for index, piece in enumerate(game.queue):
+        if piece == "T":
+            return index + 1
+        if index >= 5:
+            break
+    return 7
+
+
+def _t_spin_slot_supply_match(t_spin_slots: int, next_t_distance: int) -> float:
+    availability = max(0.0, (6.0 - next_t_distance) / 6.0)
+    excess_slots = max(0, t_spin_slots - 1)
+    return availability * min(1, t_spin_slots) - 0.35 * excess_slots * (1.0 - availability)
+
+
+def _context_score(game: Game, features: PlacementFeatures, weights: HeuristicWeights) -> float:
+    supply_match = _t_spin_slot_supply_match(
+        features.board.t_spin_slots,
+        _next_t_distance(game),
+    )
+    return supply_match * weights.t_spin_slot_supply_match
+
+
 def _placement_features_fast(game: Game, placement: Placement, before: BoardFeatures) -> PlacementFeatures:
     spin_kind = classify_t_spin(
         game.board,
@@ -184,7 +210,7 @@ def evaluate_placement(
     placement_features = _placement_features_fast(game, placement, before)
     return PlacementEvaluation(
         placement=placement,
-        score=score_features(placement_features, weights),
+        score=score_features(placement_features, weights) + _context_score(game, placement_features, weights),
         features=placement_features,
     )
 
@@ -214,7 +240,7 @@ def rank_placements(
     evaluated = [
         PlacementEvaluation(
             placement=placement,
-            score=score_features(features, weights),
+            score=score_features(features, weights) + _context_score(game, features, weights),
             features=features,
         )
         for placement in source
