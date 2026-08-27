@@ -12,7 +12,6 @@ class BoardFeatures:
     max_height: int
     holes: int
     hole_depth: int
-    downstack_cost: int
     bumpiness: int
     wells: int
     t_spin_slots: int
@@ -92,7 +91,7 @@ def count_t_spin_slots(board: Board) -> int:
 def extract_board_features(board: Board) -> BoardFeatures:
     """Extract deterministic stack features from a board after line clears."""
     if not board:
-        return BoardFeatures(0, 0, 0, 0, 0, 0, 0, 0, 0)
+        return BoardFeatures(0, 0, 0, 0, 0, 0, 0, 0)
     height = len(board)
     width = len(board[0])
     if any(len(row) != width for row in board):
@@ -101,7 +100,6 @@ def extract_board_features(board: Board) -> BoardFeatures:
     heights = column_heights(board)
     holes = 0
     hole_depth = 0
-    downstack_cost = 0
     occupied_cells = 0
 
     for x in range(width):
@@ -116,7 +114,6 @@ def extract_board_features(board: Board) -> BoardFeatures:
             elif seen_block:
                 holes += 1
                 hole_depth += blocks_above
-                downstack_cost += blocks_above * blocks_above
 
     bumpiness = sum(abs(left - right) for left, right in zip(heights, heights[1:]))
 
@@ -140,7 +137,6 @@ def extract_board_features(board: Board) -> BoardFeatures:
         max_height=max(heights, default=0),
         holes=holes,
         hole_depth=hole_depth,
-        downstack_cost=downstack_cost,
         bumpiness=bumpiness,
         wells=wells,
         t_spin_slots=count_t_spin_slots(board),
