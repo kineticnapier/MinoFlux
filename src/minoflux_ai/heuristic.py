@@ -24,6 +24,7 @@ class HeuristicWeights:
     bumpiness: float = -0.184483
     wells: float = -0.060000
     t_spin_slots: float = 1.200000
+    t_spin_slot_density: float = 0.280000
     t_spin_slot_delta: float = 0.250000
     new_holes: float = -1.200000
     lines: float = 0.760666
@@ -93,6 +94,7 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
         + board.bumpiness * weights.bumpiness
         + board.wells * weights.wells
         + board.t_spin_slots * weights.t_spin_slots
+        + board.t_spin_slot_density * weights.t_spin_slot_density
         + features.t_spin_slot_delta * weights.t_spin_slot_delta
         + features.new_holes * weights.new_holes
         + features.lines * weights.lines
