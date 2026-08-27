@@ -9,25 +9,23 @@ on:
   workflow_dispatch:
 
 jobs:
-  fresh:
+  versus:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         candidate:
-          - baseline
-          - clean_stack_flat
-          - downstack_holes
           - t_proximity_preserve
+          - clean_stack_flat
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - name: Fresh-seed validation
-        run: python tools/strength_tournament.py --candidate '${{ matrix.candidate }}' --seeds '2203,3559,4787' --pieces 180 --out 'result-${{ matrix.candidate }}.json'
+      - name: Mirrored versus
+        run: python tools/strength_tournament.py --candidate '${{ matrix.candidate }}' --seeds '6007,8089,10037,12049' --versus-turns 120 --out 'result-${{ matrix.candidate }}.json'
       - uses: actions/upload-artifact@v4
         with:
-          name: fresh-${{ matrix.candidate }}
+          name: versus-${{ matrix.candidate }}
           path: result-${{ matrix.candidate }}.json
