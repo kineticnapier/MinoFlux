@@ -3,21 +3,14 @@ on:
   push:
     branches: [self-improve]
     paths:
-      - 'tools/strength_tournament_round.py'
       - '.github/workflows/strength-tournament.yml'
   workflow_dispatch:
-    inputs:
-      stage:
-        description: stage
-        required: true
-        default: short
 jobs:
-  short:
-    if: github.event_name == 'push' || inputs.stage == 'short'
+  fresh:
     strategy:
       fail-fast: false
       matrix:
-        candidate: [baseline, slot_low_clean, slot_stability, slot_shallow_holes, slot_delta_quality, preserve_unspent_slot, cashout_slot, attack_clean, attack_low, attack_slot, deep_hole_mean, danger_newhole, rough_high, safe_clear, spin_efficiency]
+        candidate: [baseline, slot_delta_quality, danger_newhole, slot_low_clean]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,4 +18,4 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - run: python tools/strength_tournament_round.py '${{ matrix.candidate }}' --games 2 --pieces 90 --seed 41001 --step 7919
+      - run: python tools/strength_tournament_round.py '${{ matrix.candidate }}' --games 3 --pieces 150 --seed 910001 --step 104729
