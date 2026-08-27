@@ -23,7 +23,7 @@ class HeuristicWeights:
     hole_depth: float = -0.120000
     bumpiness: float = -0.184483
     wells: float = -0.060000
-    t_spin_slots: float = 1.300000
+    t_spin_slots: float = 1.200000
     new_holes: float = -1.200000
     lines: float = 0.760666
     attack: float = 0.850000
