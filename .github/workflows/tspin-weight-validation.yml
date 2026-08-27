@@ -1,0 +1,94 @@
+name: T-spin setup weight validation
+
+on:
+  push:
+    branches: [self-improve]
+
+concurrency:
+  group: tspin-weight-validation
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: tspin-weight (${{ matrix.weight }})
+    strategy:
+      fail-fast: false
+      matrix:
+        weight: ["0.0", "0.4", "0.6", "0.8", "1.0"]
+    runs-on: ubuntu-latest
+    env:
+      TSPIN_WEIGHT: ${{ matrix.weight }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync package
+        run: uv sync --extra dev
+      - name: Run three-seed-set validation
+        run: |
+          uv run --no-sync python - <<'PY'
+          import os
+          from dataclasses import replace
+          from time import perf_counter
+
+          from minoflux_ai.benchmark import run_heuristic_benchmark
+          from minoflux_ai.heuristic import DEFAULT_WEIGHTS
+          from minoflux_ai.search import DEFAULT_SEARCH_CONFIG
+
+          value = float(os.environ["TSPIN_WEIGHT"])
+          weights = replace(DEFAULT_WEIGHTS, t_spin_slots=value)
+          total_attack = 0
+          total_pieces = 0
+          total_spins = 0
+          total_spin_lines = 0
+          total_topouts = 0
+          total_completed = 0
+          total_games = 0
+          elapsed_total = 0.0
+
+          for case, seed_base, seed_step in (
+              ("fixed", 104729, 7919),
+              ("unseen", 982451653, 104729),
+              ("fresh", 161803399, 32452843),
+          ):
+              started = perf_counter()
+              result = run_heuristic_benchmark(
+                  games=4,
+                  max_pieces=150,
+                  seed_base=seed_base,
+                  seed_step=seed_step,
+                  weights=weights,
+                  search_config=DEFAULT_SEARCH_CONFIG,
+                  workers=4,
+              )
+              elapsed = perf_counter() - started
+              elapsed_total += elapsed
+              total_attack += result.attack
+              total_pieces += result.pieces
+              total_spins += result.spins
+              total_spin_lines += result.spin_lines
+              total_topouts += result.topouts
+              total_completed += result.completed
+              total_games += result.games
+              app = result.attack / result.pieces if result.pieces else 0.0
+              print(
+                  f"RESULT case={case} weight={value:.2f} pieces={result.pieces} "
+                  f"attack={result.attack} app={app:.6f} topouts={result.topouts} "
+                  f"completed={result.completed}/{result.games} lines={result.lines} "
+                  f"spins={result.spins} spin_lines={result.spin_lines} "
+                  f"tmini={result.t_spin_minis} tms={result.t_spin_mini_singles} "
+                  f"tss={result.t_spin_singles} tsd={result.t_spin_doubles} "
+                  f"tst={result.t_spin_triples} pc={result.perfect_clears} "
+                  f"elapsed={elapsed:.3f}"
+              )
+
+          app = total_attack / total_pieces if total_pieces else 0.0
+          print(
+              f"TOTAL weight={value:.2f} pieces={total_pieces} attack={total_attack} "
+              f"app={app:.6f} topouts={total_topouts} completed={total_completed}/{total_games} "
+              f"spins={total_spins} spin_lines={total_spin_lines} elapsed={elapsed_total:.3f}"
+          )
+          PY
