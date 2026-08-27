@@ -8,31 +8,19 @@ on:
   workflow_dispatch:
 
 jobs:
-  short-screen:
+  fresh-seed:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         candidate:
           - baseline
-          - tsd_slot_delta
-          - tst_slot_delta
-          - spin_quality_delta
-          - covered_holes_delta
-          - deep_holes_delta
-          - danger_hole_product
-          - top_band
-          - clean_well
           - combo_continue
-          - tsd_event
-          - tst_event
-          - hold_t_for_slot
-          - use_t_on_slot
-          - low_stack_slot
+          - clean_well
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - run: python tools/self_improve_tournament.py --candidate '${{ matrix.candidate }}' --mode solo --games 2 --pieces 80 --seed-base 1701 --seed-step 97
+      - run: python tools/self_improve_tournament.py --candidate '${{ matrix.candidate }}' --mode solo --games 3 --pieces 150 --seed-base 91001 --seed-step 211
