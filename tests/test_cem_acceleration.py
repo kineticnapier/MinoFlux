@@ -57,7 +57,7 @@ class FastPlacementEvaluationTests(unittest.TestCase):
         placement = game.legal_placements()[0]
         board_before = deepcopy(game.board)
         state_before = (
-            game.current_piece,
+            game.current,
             game.hold_piece,
             game.pieces_placed,
             game.lines,
@@ -70,7 +70,7 @@ class FastPlacementEvaluationTests(unittest.TestCase):
         self.assertEqual(game.board, board_before)
         self.assertEqual(
             (
-                game.current_piece,
+                game.current,
                 game.hold_piece,
                 game.pieces_placed,
                 game.lines,
