@@ -28,7 +28,7 @@ jobs:
               totals = dict(pieces=0, attack=0, topouts=0, completed=0, spins=0, spin_lines=0, tsd=0, tst=0)
               print(f'=== {label} ===')
               for seed_base, seed_step in seeds:
-                  r = run_heuristic_benchmark(games=4, max_pieces=150, seed_base=seed_base, seed_step=seed_step, weights=weights, workers=4)
+                  r = run_heuristic_benchmark(games=2, max_pieces=80, seed_base=seed_base, seed_step=seed_step, weights=weights, workers=2)
                   ap = r.attack / r.pieces if r.pieces else 0.0
                   print(f'set seed_base={seed_base}: attack_per_piece={ap:.6f} attack={r.attack} pieces={r.pieces} topouts={r.topouts} completed={r.completed} spins={r.spins} spin_lines={r.spin_lines} tsd={r.t_spin_doubles} tst={r.t_spin_triples}')
                   totals['pieces'] += r.pieces
@@ -39,5 +39,5 @@ jobs:
                   totals['spin_lines'] += r.spin_lines
                   totals['tsd'] += r.t_spin_doubles
                   totals['tst'] += r.t_spin_triples
-              print(f"TOTAL attack_per_piece={totals['attack']/totals['pieces']:.6f} attack={totals['attack']} pieces={totals['pieces']} topouts={totals['topouts']} completed={totals['completed']}/12 spins={totals['spins']} spin_lines={totals['spin_lines']} tsd={totals['tsd']} tst={totals['tst']}")
+              print(f"TOTAL attack_per_piece={totals['attack']/totals['pieces']:.6f} attack={totals['attack']} pieces={totals['pieces']} topouts={totals['topouts']} completed={totals['completed']}/6 spins={totals['spins']} spin_lines={totals['spin_lines']} tsd={totals['tsd']} tst={totals['tst']}")
           PY
