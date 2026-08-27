@@ -45,30 +45,23 @@ def extract_board_features(board: Board) -> BoardFeatures:
     if any(len(row) != width for row in board):
         raise ValueError("Board rows must have equal width")
 
-    heights: list[int] = []
+    heights = column_heights(board)
     holes = 0
     hole_depth = 0
     occupied_cells = 0
 
-    # Height, hole, depth, and occupancy metrics all scan columns top-to-bottom.
-    # Compute them together so placement scoring does not traverse the board once
-    # for column_heights() and then immediately traverse the same cells again.
     for x in range(width):
-        top = height
         seen_block = False
         blocks_above = 0
-        for y, row in enumerate(board):
-            occupied = row[x] is not None
+        for y in range(height):
+            occupied = board[y][x] is not None
             if occupied:
-                if not seen_block:
-                    top = y
-                    seen_block = True
                 occupied_cells += 1
+                seen_block = True
                 blocks_above += 1
             elif seen_block:
                 holes += 1
                 hole_depth += blocks_above
-        heights.append(height - top)
 
     bumpiness = sum(abs(left - right) for left, right in zip(heights, heights[1:]))
 
