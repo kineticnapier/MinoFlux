@@ -5,11 +5,13 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+from minoflux_engine import VersusMatch
 from minoflux_ai import heuristic, search
 from minoflux_ai.benchmark import run_heuristic_game
 from minoflux_ai.features import extract_board_features
 from minoflux_ai.heuristic import DEFAULT_WEIGHTS, PlacementEvaluation
-from minoflux_ai.search import DEFAULT_SEARCH_CONFIG
+from minoflux_ai.search import DEFAULT_SEARCH_CONFIG, apply_search_action
+from minoflux_ai.versus_search import DEFAULT_VERSUS_SEARCH_CONFIG, choose_versus_action
 
 ORIGINAL_RANK = heuristic.rank_placements
 ACTIVE = "baseline"
@@ -83,15 +85,106 @@ def run(candidate: str, seeds: list[int], pieces: int) -> dict[str, object]:
     }
 
 
+def _play_versus_leg(candidate: str, seed: int, max_turns: int, *, candidate_player: bool) -> dict[str, object]:
+    global ACTIVE
+    search.rank_placements = experimental_rank
+    match = VersusMatch(seed, garbage_cap=8)
+    turn_side = "player"
+    turns = 0
+    max_b2b = {"player": 0, "ai": 0}
+    while match.winner is None and turns < max_turns:
+        candidate_turn = (turn_side == "player") == candidate_player
+        ACTIVE = candidate if candidate_turn else "baseline"
+        choice = choose_versus_action(match, turn_side, DEFAULT_WEIGHTS, DEFAULT_VERSUS_SEARCH_CONFIG)
+        if choice is None:
+            match.side(turn_side).game.game_over = True
+            match._update_winner()
+            break
+        side = match.side(turn_side)
+        result = apply_search_action(side.game, choice.action)
+        match.resolve_lock(turn_side, result)
+        turns += 1
+        max_b2b["player"] = max(max_b2b["player"], match.player.game.b2b_chain)
+        max_b2b["ai"] = max(max_b2b["ai"], match.ai.game.b2b_chain)
+        turn_side = "ai" if turn_side == "player" else "player"
+
+    cand_side = match.player if candidate_player else match.ai
+    base_side = match.ai if candidate_player else match.player
+    physical_winner = match.winner or "draw"
+    if physical_winner == "draw":
+        winner = "draw"
+    elif (physical_winner == "player") == candidate_player:
+        winner = "candidate"
+    else:
+        winner = "baseline"
+    cand_b2b = max_b2b["player" if candidate_player else "ai"]
+    base_b2b = max_b2b["ai" if candidate_player else "player"]
+    return {
+        "seed": seed,
+        "candidatePlayer": candidate_player,
+        "winner": winner,
+        "turns": turns,
+        "candidateAttack": cand_side.game.attack,
+        "baselineAttack": base_side.game.attack,
+        "candidateSent": cand_side.sent,
+        "baselineSent": base_side.sent,
+        "candidateCanceled": cand_side.canceled,
+        "baselineCanceled": base_side.canceled,
+        "candidateReceived": cand_side.received,
+        "baselineReceived": base_side.received,
+        "candidateMaxB2B": cand_b2b,
+        "baselineMaxB2B": base_b2b,
+        "candidateTopout": cand_side.game.game_over,
+        "baselineTopout": base_side.game.game_over,
+    }
+
+
+def run_versus(candidate: str, seeds: list[int], max_turns: int) -> dict[str, object]:
+    legs = []
+    for seed in seeds:
+        legs.append(_play_versus_leg(candidate, seed, max_turns, candidate_player=True))
+        legs.append(_play_versus_leg(candidate, seed, max_turns, candidate_player=False))
+    count = len(legs)
+    def mean(key: str) -> float:
+        return sum(float(item[key]) for item in legs) / count
+    return {
+        "candidate": candidate,
+        "games": count,
+        "maxTurns": max_turns,
+        "candidateWins": sum(item["winner"] == "candidate" for item in legs),
+        "baselineWins": sum(item["winner"] == "baseline" for item in legs),
+        "draws": sum(item["winner"] == "draw" for item in legs),
+        "candidateMeanAttack": mean("candidateAttack"),
+        "baselineMeanAttack": mean("baselineAttack"),
+        "candidateMeanSent": mean("candidateSent"),
+        "baselineMeanSent": mean("baselineSent"),
+        "candidateMeanCanceled": mean("candidateCanceled"),
+        "baselineMeanCanceled": mean("baselineCanceled"),
+        "candidateMeanReceived": mean("candidateReceived"),
+        "baselineMeanReceived": mean("baselineReceived"),
+        "candidateMeanMaxB2B": mean("candidateMaxB2B"),
+        "baselineMeanMaxB2B": mean("baselineMaxB2B"),
+        "candidateTopouts": sum(bool(item["candidateTopout"]) for item in legs),
+        "baselineTopouts": sum(bool(item["baselineTopout"]) for item in legs),
+        "perGame": legs,
+    }
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--candidate", required=True)
     p.add_argument("--seeds", required=True)
-    p.add_argument("--pieces", type=int, required=True)
+    p.add_argument("--pieces", type=int)
+    p.add_argument("--versus-turns", type=int)
     p.add_argument("--out", required=True)
     args = p.parse_args()
     seeds = [int(x) for x in args.seeds.split(",") if x]
-    result = run(args.candidate, seeds, args.pieces)
+    if args.versus_turns is not None:
+        result = run_versus(args.candidate, seeds, args.versus_turns)
+    else:
+        if args.pieces is None:
+            p.error("--pieces is required outside versus mode")
+        result = run(args.candidate, seeds, args.pieces)
     Path(args.out).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, sort_keys=True))
 
