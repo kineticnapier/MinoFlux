@@ -8,19 +8,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  fresh-seed:
+  versus-final:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        candidate:
-          - baseline
-          - combo_continue
-          - clean_well
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - run: python tools/self_improve_tournament.py --candidate '${{ matrix.candidate }}' --mode solo --games 3 --pieces 150 --seed-base 91001 --seed-step 211
+      - run: python tools/self_improve_tournament.py --candidate combo_continue --mode versus --games 4 --turns 80 --seed-base 44001 --seed-step 313
