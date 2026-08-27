@@ -8,14 +8,12 @@ on:
       - .github/workflows/strength-tournament-classic.yml
 
 jobs:
-  fresh:
+  versus:
     strategy:
       fail-fast: false
       matrix:
         candidate:
-          - baseline
           - row_transitions
-          - attack_safety
           - eroded_cells
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -25,4 +23,4 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - run: python tools/strength_tournament_classic.py --phase fresh --candidate "${{ matrix.candidate }}"
+      - run: python tools/strength_tournament_classic.py --phase versus --candidate "${{ matrix.candidate }}"
