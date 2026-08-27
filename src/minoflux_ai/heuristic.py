@@ -26,7 +26,7 @@ class HeuristicWeights:
     t_spin_slots: float = 1.200000
     t_spin_slot_density: float = 0.280000
     t_spin_slot_delta: float = 0.250000
-    t_spin_slot_height_quality: float = 0.000000
+    t_spin_slot_height_quality: float = 0.700000
     new_holes: float = -1.200000
     lines: float = 0.760666
     attack: float = 0.850000
