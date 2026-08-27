@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import argparse, json, math
+import argparse, json
 from dataclasses import replace
 
 from minoflux_engine import VersusMatch
@@ -32,15 +32,16 @@ _ORIGINAL_RANK = heuristic.rank_placements
 
 
 def _after_board(game, placement):
-    board = [row.copy() for row in game.board]
+    pre = [row.copy() for row in game.board]
     for x, y in placement.cells:
         if y >= 0:
-            board[y][x] = placement.piece
-    full = [i for i, row in enumerate(board) if all(c is not None for c in row)]
+            pre[y][x] = placement.piece
+    full = [i for i, row in enumerate(pre) if all(c is not None for c in row)]
+    board = pre
     if full:
         s = set(full)
-        board = [[None] * game.width for _ in full] + [row for i, row in enumerate(board) if i not in s]
-    return board, len(full)
+        board = [[None] * game.width for _ in full] + [row for i, row in enumerate(pre) if i not in s]
+    return board, tuple(full)
 
 
 def _heights(board):
@@ -55,7 +56,7 @@ def _heights(board):
     return out
 
 
-def _classic(board, placement, lines):
+def _classic(board, placement, full_rows):
     h, w = len(board), len(board[0])
     heights = _heights(board)
     row_trans = 0
@@ -87,13 +88,8 @@ def _classic(board, placement, lines):
     variance=sum((v-mean)**2 for v in heights)/w
     high_cols=sum(max(0, v-10) for v in heights)
     landing=max((y for _, y in placement.cells), default=0)
-    eroded=lines * sum(1 for _, y in placement.cells if y >= 0 and y in range(h) and all(c is not None for c in game.board[y]) if False)
-    # exact eroded cells need pre-clear full rows; approximate with piece cells in cleared rows reconstructed from placement.
-    pre=[row.copy() for row in game.board]
-    for x,y in placement.cells:
-        if y>=0: pre[y][x]=placement.piece
-    full={i for i,row in enumerate(pre) if all(c is not None for c in row)}
-    eroded=lines*sum(1 for _,y in placement.cells if y in full)
+    full=set(full_rows)
+    eroded=len(full_rows)*sum(1 for _,y in placement.cells if y in full)
     return {
         "row_transitions": row_trans,
         "column_transitions": col_trans,
@@ -110,8 +106,8 @@ def _classic(board, placement, lines):
 
 def _bonus(name, weight, game, ev):
     if name == "baseline": return 0.0
-    board, lines = _after_board(game, ev.placement)
-    m = _classic(board, ev.placement, lines)
+    board, full = _after_board(game, ev.placement)
+    m = _classic(board, ev.placement, full)
     b = ev.features.board
     if name in m: return weight * m[name]
     if name == "low_t_slot_transition": return weight * m["row_transitions"] * b.t_spin_slots / (1+b.max_height/6)
