@@ -56,18 +56,18 @@ DEFAULT_WEIGHTS = HeuristicWeights()
 @dataclass(frozen=True, slots=True)
 class PlacementFeatures:
     board: BoardFeatures
-    t_spin_slot_delta: int
     new_holes: int
     lines: int
     attack: int
     spin_lines: int
-    b2b_chain: int
-    b2b_break: bool
-    combo: int
-    danger: int
     perfect_clear: bool
     game_over: bool
     spin: str | None = None
+    t_spin_slot_delta: int = 0
+    b2b_chain: int = 0
+    b2b_break: bool = False
+    combo: int = 0
+    danger: int = 0
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = self.board.to_dict()
@@ -171,18 +171,18 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
     danger_height = max(0, after.max_height - 12)
     return PlacementFeatures(
         board=after,
-        t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
         new_holes=max(0, after.holes - before.holes),
         lines=lines,
         attack=attack,
         spin_lines=lines if spin is not None else 0,
+        perfect_clear=perfect_clear,
+        game_over=topped_out or hidden_occupied,
+        spin=spin,
+        t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
         b2b_chain=b2b.chain if b2b.active else 0,
         b2b_break=bool(game.back_to_back and lines > 0 and not b2b.active),
         combo=max(0, combo),
         danger=danger_height * danger_height,
-        perfect_clear=perfect_clear,
-        game_over=topped_out or hidden_occupied,
-        spin=spin,
     )
 
 
