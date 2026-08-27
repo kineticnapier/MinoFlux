@@ -6,23 +6,12 @@ on:
       - 'tools/strength_tournament_runtime.py'
       - 'src/minoflux_ai/heuristic.py'
       - '.github/workflows/strength-tournament-runtime.yml'
-  workflow_dispatch:
-    inputs:
-      phase:
-        description: phase
-        required: true
-        default: short
-      candidates:
-        description: comma-separated candidates
-        required: false
-        default: baseline
 jobs:
-  short:
-    if: github.event_name == 'push'
+  fresh:
     strategy:
       fail-fast: false
       matrix:
-        candidate: [baseline, slot_depth_efficiency, slot_smoothness, slot_clean_height, spin_attack_efficiency, spin_clear_efficiency, setup_preserve_clear, setup_preserve_attack, danger_slot_quality, hole_pressure, buried_hole_pressure, well_danger, clean_attack, spin_clean_attack, slot_attack_balance]
+        candidate: [baseline, setup_preserve_attack, well_danger, spin_clear_efficiency]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,24 +19,8 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install -e .
-      - name: Run short candidate
+      - name: Run fresh candidate
         env:
           CANDIDATE: ${{ matrix.candidate }}
-          PHASE: short
+          PHASE: fresh
         run: python tools/strength_tournament_runtime.py
-  dispatch:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - run: python -m pip install -e .
-      - name: Run requested candidates
-        env:
-          PHASE: ${{ inputs.phase }}
-          CANDIDATES: ${{ inputs.candidates }}
-        run: |
-          IFS=',' read -ra CS <<< "$CANDIDATES"
-          for C in "${CS[@]}"; do CANDIDATE="$C" python tools/strength_tournament_runtime.py; done
