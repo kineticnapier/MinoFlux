@@ -5,7 +5,27 @@ on:
     branches: [self-improve]
 
 jobs:
-  ai-tests:
+  test-file:
+    name: ${{ matrix.file }}
+    strategy:
+      fail-fast: false
+      matrix:
+        file:
+          - tests/test_attack_promotion.py
+          - tests/test_b2b_versus.py
+          - tests/test_cem_acceleration.py
+          - tests/test_engine.py
+          - tests/test_imitation.py
+          - tests/test_input.py
+          - tests/test_lab_model_selection.py
+          - tests/test_lock_and_srs.py
+          - tests/test_replay_cem.py
+          - tests/test_replay_hold.py
+          - tests/test_search.py
+          - tests/test_search_acceleration.py
+          - tests/test_srs_reachability.py
+          - tests/test_tetrio_capture.py
+          - tests/test_versus_search.py
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -13,13 +33,4 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --extra game --extra dev
-      - run: uv run --no-sync python -m pytest -q tests/test_ai.py
-  other-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
-        with:
-          python-version: "3.13"
-      - run: uv sync --extra game --extra dev
-      - run: uv run --no-sync python -m pytest -q --ignore=tests/test_ai.py
+      - run: uv run --no-sync python -m pytest -q ${{ matrix.file }}
