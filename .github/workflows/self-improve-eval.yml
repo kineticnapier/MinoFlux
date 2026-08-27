@@ -50,6 +50,11 @@ jobs:
 
           b=summarize(collect(baseline))
           c=summarize(collect(candidate))
-          print('BASELINE', b)
-          print('CANDIDATE', c)
+          text=f'BASELINE {b}\nCANDIDATE {c}\n'
+          print(text, end='')
+          open('self-improve-result.txt','w',encoding='utf-8').write(text)
           PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: self-improve-result
+          path: self-improve-result.txt
