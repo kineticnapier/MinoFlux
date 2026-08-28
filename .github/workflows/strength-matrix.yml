@@ -8,29 +8,18 @@ on:
       - '.github/workflows/strength-matrix.yml'
 
 jobs:
-  short:
+  fresh:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         candidate:
           - baseline
-          - slot_preserve_until_t
-          - b2b_break_cost_dynamic
-          - b2b_attack_conversion
-          - danger_hole_depth_product
           - danger_new_hole_product
-          - downstack_depth_recovery
-          - downstack_hole_recovery
-          - t_ready_low_dirty_cost
-          - hold_t_release_pressure
-          - hold_t_reserve_when_slots
-          - slot_supply_near_t_cap
-          - spin_conversion_efficiency
+          - b2b_attack_conversion
           - clean_attack_followthrough
-          - safe_difficult_clear_chain
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --extra game
-      - run: uv run python tools/self_improve_matrix.py short '${{ matrix.candidate }}'
+      - run: uv run python tools/self_improve_matrix.py fresh '${{ matrix.candidate }}'
