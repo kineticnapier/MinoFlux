@@ -45,7 +45,9 @@ def next_t_distance(game):
         return 0
     if game.hold_piece == "T" and not game.hold_used:
         return 1
-    for j, p in enumerate(game.queue[:6]):
+    for j, p in enumerate(game.queue):
+        if j >= 6:
+            break
         if p == "T":
             return j + 1
     return 8
@@ -55,7 +57,9 @@ def weighted_t_supply(game):
     score = 1.0 if game.current == "T" else 0.0
     if game.hold_piece == "T" and not game.hold_used:
         score += 0.85
-    for j, p in enumerate(game.queue[:6]):
+    for j, p in enumerate(game.queue):
+        if j >= 6:
+            break
         if p == "T":
             score += max(0.15, 0.75 - 0.10 * j)
     return score
