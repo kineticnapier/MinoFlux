@@ -18,6 +18,8 @@ from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights
 from .replay import Replay, ReplayStep, ReplaySummary
 from .search import DEFAULT_SEARCH_CONFIG, SearchConfig, apply_search_action, choose_search_action
 
+HIGH_STACK_HEIGHT = 15
+
 
 @dataclass(frozen=True, slots=True)
 class BenchmarkGame:
@@ -36,6 +38,13 @@ class BenchmarkGame:
     t_spin_singles: int = 0
     t_spin_doubles: int = 0
     t_spin_triples: int = 0
+    mean_holes: float = 0.0
+    mean_hole_depth: float = 0.0
+    mean_bumpiness: float = 0.0
+    mean_max_height: float = 0.0
+    peak_max_height: int = 0
+    high_stack_steps: int = 0
+    high_stack_fraction: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +77,13 @@ class BenchmarkResult:
     mean_t_spin_triples: float = 0.0
     perfect_clears: int = 0
     mean_perfect_clears: float = 0.0
+    mean_holes: float = 0.0
+    mean_hole_depth: float = 0.0
+    mean_bumpiness: float = 0.0
+    mean_max_height: float = 0.0
+    peak_max_height: int = 0
+    high_stack_steps: int = 0
+    high_stack_fraction: float = 0.0
     topouts: int = 0
     completed: int = 0
     per_game: tuple[BenchmarkGame, ...] = ()
@@ -106,6 +122,13 @@ class BenchmarkResult:
             "meanTSpinTriples": self.mean_t_spin_triples,
             "perfectClears": self.perfect_clears,
             "meanPerfectClears": self.mean_perfect_clears,
+            "meanHoles": self.mean_holes,
+            "meanHoleDepth": self.mean_hole_depth,
+            "meanBumpiness": self.mean_bumpiness,
+            "meanMaxHeight": self.mean_max_height,
+            "peakMaxHeight": self.peak_max_height,
+            "highStackSteps": self.high_stack_steps,
+            "highStackFraction": self.high_stack_fraction,
             "topouts": self.topouts,
             "completed": self.completed,
             "bestGame": asdict(self.best_game),
@@ -146,13 +169,35 @@ def _play_heuristic_game(
         "t_spin_triples": 0,
         "perfect_clears": 0,
     }
+    stack_samples = 0
+    holes_sum = 0
+    hole_depth_sum = 0
+    bumpiness_sum = 0
+    max_height_sum = 0
+    peak_max_height = 0
+    high_stack_steps = 0
+
     while not game.game_over and game.pieces_placed < limit:
         choice = choose_search_action(game, weights, cfg)
         if choice is None:
             break
         action = choice.action
+        board_features = choice.immediate.features.board
         result = apply_search_action(game, action)
         placement = action.placement
+
+        # The immediate evaluation is the board after this exact root action. Reuse
+        # it here rather than scanning the board again; this keeps CEM quality
+        # telemetry cheap even when thousands of candidates are evaluated.
+        stack_samples += 1
+        holes_sum += board_features.holes
+        hole_depth_sum += board_features.hole_depth
+        bumpiness_sum += board_features.bumpiness
+        max_height_sum += board_features.max_height
+        peak_max_height = max(peak_max_height, board_features.max_height)
+        if board_features.max_height >= HIGH_STACK_HEIGHT:
+            high_stack_steps += 1
+
         if result.spin is not None:
             counts["spins"] += 1
             counts["spin_lines"] += result.lines
@@ -190,6 +235,8 @@ def _play_heuristic_game(
                     rotation_to=placement.rotation_to,
                 )
             )
+
+    sample_denominator = max(1, stack_samples)
     summary = BenchmarkGame(
         seed=int(seed),
         pieces=game.pieces_placed,
@@ -198,6 +245,13 @@ def _play_heuristic_game(
         score=game.score,
         topout=game.game_over,
         completed=not game.game_over and game.pieces_placed >= limit,
+        mean_holes=holes_sum / sample_denominator,
+        mean_hole_depth=hole_depth_sum / sample_denominator,
+        mean_bumpiness=bumpiness_sum / sample_denominator,
+        mean_max_height=max_height_sum / sample_denominator,
+        peak_max_height=peak_max_height,
+        high_stack_steps=high_stack_steps,
+        high_stack_fraction=high_stack_steps / sample_denominator,
         **counts,
     )
     replay = None
@@ -291,6 +345,14 @@ def run_heuristic_benchmark(
             "perfect_clears",
         )
     }
+    stack_samples = totals["pieces"]
+    stack_denominator = max(1, stack_samples)
+    mean_holes = sum(item.mean_holes * item.pieces for item in results) / stack_denominator
+    mean_hole_depth = sum(item.mean_hole_depth * item.pieces for item in results) / stack_denominator
+    mean_bumpiness = sum(item.mean_bumpiness * item.pieces for item in results) / stack_denominator
+    mean_max_height = sum(item.mean_max_height * item.pieces for item in results) / stack_denominator
+    high_stack_steps = sum(item.high_stack_steps for item in results)
+
     best_game = max(results, key=_best_game_key)
     best_replay = None
     if record_best_replay:
@@ -326,6 +388,13 @@ def run_heuristic_benchmark(
         mean_t_spin_triples=totals["t_spin_triples"] / count,
         perfect_clears=totals["perfect_clears"],
         mean_perfect_clears=totals["perfect_clears"] / count,
+        mean_holes=mean_holes,
+        mean_hole_depth=mean_hole_depth,
+        mean_bumpiness=mean_bumpiness,
+        mean_max_height=mean_max_height,
+        peak_max_height=max((item.peak_max_height for item in results), default=0),
+        high_stack_steps=high_stack_steps,
+        high_stack_fraction=high_stack_steps / stack_denominator,
         topouts=sum(item.topout for item in results),
         completed=sum(item.completed for item in results),
         per_game=results,
