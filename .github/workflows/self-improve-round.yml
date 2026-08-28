@@ -1,0 +1,45 @@
+name: Self improve round
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - tools/self_improve_round.py
+      - .github/workflows/self-improve-round.yml
+  workflow_dispatch:
+
+jobs:
+  short:
+    name: short-${{ matrix.candidate }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate:
+          - baseline
+          - clear_depth_relief
+          - clear_hole_access
+          - clear_compaction
+          - attack_clean_exit
+          - attack_height_recovery
+          - attack_slot_exit
+          - t_near_depth_guard
+          - t_near_clear_path
+          - slot_creation_escape
+          - slot_retention_downstack
+          - b2b_clean_difficult
+          - b2b_break_damage
+          - t_arrival_downstack
+          - hold_t_stack_buffer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --extra game --extra dev
+      - name: Run short benchmark
+        env:
+          CANDIDATE: ${{ matrix.candidate }}
+          STAGE: short
+        run: uv run --no-sync python tools/self_improve_round.py
