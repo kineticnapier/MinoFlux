@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -15,7 +16,12 @@ from minoflux_ai import (
     save_weights,
 )
 from minoflux_ai.features import BoardFeatures
-from minoflux_ai.heuristic import PlacementFeatures, _t_spin_slot_supply_match, score_features
+from minoflux_ai.heuristic import (
+    PlacementFeatures,
+    _hold_t_supply_balance_score,
+    _t_spin_slot_supply_match,
+    score_features,
+)
 from minoflux_engine import BOARD_HEIGHT, BOARD_WIDTH, Game
 
 
@@ -173,6 +179,18 @@ class HeuristicTests(unittest.TestCase):
         self.assertAlmostEqual(_t_spin_slot_supply_match(2, 6), -0.35)
         self.assertAlmostEqual(_t_spin_slot_supply_match(2, 7), -0.35)
 
+    def test_hold_t_supply_balance_only_applies_after_hold(self) -> None:
+        game = Game(123)
+        game.current = "I"
+        game.queue = deque(["I"] * 7)
+        game.hold_piece = "T"
+        game.hold_used = False
+        self.assertEqual(_hold_t_supply_balance_score(game, 1), 0.0)
+
+        game.hold_used = True
+        self.assertAlmostEqual(_hold_t_supply_balance_score(game, 1), 0.12)
+        self.assertAlmostEqual(_hold_t_supply_balance_score(game, 3), -0.44)
+
     def test_weights_round_trip(self) -> None:
         custom = HeuristicWeights(
             holes=-4.5,
@@ -182,6 +200,7 @@ class HeuristicTests(unittest.TestCase):
             t_spin_slot_height_quality=0.65,
             t_spin_slot_low_clean=0.75,
             t_spin_slot_supply_match=0.6,
+            hold_t_supply_balance=0.8,
         )
         with TemporaryDirectory() as directory:
             path = save_weights(f"{directory}/weights.json", custom)
@@ -218,6 +237,15 @@ class HeuristicTests(unittest.TestCase):
         self.assertEqual(
             loaded.t_spin_slot_supply_match,
             DEFAULT_WEIGHTS.t_spin_slot_supply_match,
+        )
+
+    def test_old_weight_mapping_uses_hold_t_supply_balance_default(self) -> None:
+        old_weights = DEFAULT_WEIGHTS.to_dict()
+        old_weights.pop("hold_t_supply_balance")
+        loaded = HeuristicWeights.from_mapping(old_weights)
+        self.assertEqual(
+            loaded.hold_t_supply_balance,
+            DEFAULT_WEIGHTS.hold_t_supply_balance,
         )
 
     def test_unknown_weight_is_rejected(self) -> None:
