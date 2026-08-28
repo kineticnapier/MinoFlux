@@ -8,28 +8,17 @@ on:
   workflow_dispatch:
 
 jobs:
-  short:
-    name: short-${{ matrix.candidate }}
+  fresh:
+    name: fresh-${{ matrix.candidate }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         candidate:
           - baseline
-          - slot_open_top_access
-          - slot_shallow_access
-          - slot_kick_space
-          - slot_access_combo
-          - slot_entrance_preserve
-          - hole_cover_relief
-          - bottom_hole_cover_relief
-          - isolated_peak_risk
-          - roofed_valley_risk
-          - danger_accessible_slot
           - t_arrival_accessible_conversion
-          - b2b_accessible_reserve
           - hold_accessible_supply
-          - pending_slot_escape
+          - b2b_accessible_reserve
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -37,5 +26,5 @@ jobs:
       - name: Evaluate
         env:
           CANDIDATE: ${{ matrix.candidate }}
-          STAGE: short
+          STAGE: fresh
         run: uv run python tools/self_improve_round.py
