@@ -1,0 +1,37 @@
+name: Strength matrix
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - 'tools/self_improve_matrix.py'
+      - '.github/workflows/strength-matrix.yml'
+
+jobs:
+  short:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 15
+      matrix:
+        candidate:
+          - baseline
+          - t_window_reserve
+          - slot_survival_margin
+          - attack_reserve_margin
+          - b2b_clean_continuation
+          - downstack_access_gain
+          - deep_hole_emergency
+          - clean_slot_after_downstack
+          - slot_attack_balance
+          - t_supply_safety_margin
+          - spin_exit_reserve
+          - height_recovery_with_slot
+          - hole_depth_recovery_attack
+          - net_pending_advantage
+          - attack_race_margin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --extra game
+      - run: uv run python tools/self_improve_matrix.py short '${{ matrix.candidate }}'
