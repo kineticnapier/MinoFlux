@@ -1,0 +1,33 @@
+name: Self improve round
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - '.github/workflows/self-improve-round.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: self-improve
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --all-extras --dev
+      - name: Evaluate candidates
+        env:
+          STAGE: short
+          CANDIDATES: baseline,pressure_clean_exit,pressure_hole_relief,pressure_depth_relief,pressure_height_relief,pressure_surface_relief,pressure_damage_cost,spin_clean_exit,b2b_clean_pressure,danger_pressure_recovery,pressure_slot_preserve,pressure_slot_create,tspin_slot_exit,downstack_pressure_exit,pressure_consistency
+        run: uv run python tools/self_improve_round.py
+      - name: Commit results
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add self-improve-results.json
+          git commit -m 'Record short pressure-quality screen' || exit 0
+          git push origin HEAD:self-improve
