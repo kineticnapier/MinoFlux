@@ -14,6 +14,8 @@ from .cem import (
 )
 from .heuristic import HeuristicWeights, load_weights, save_weights
 from .search import SearchConfig
+from .versus_benchmark import VersusBenchmarkResult, run_versus_benchmark
+from .versus_search import VersusSearchConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,8 +27,21 @@ class PromotionConfig:
     minimum_fitness_gain: float = 0.0
     max_completion_loss: int = 1
     workers: int = 0
+    versus_games: int = 8
+    versus_max_turns: int = 120
+    versus_seed_offset: int = 10_000_019
+    versus_seed_step: int = 193
+    versus_garbage_cap: int = 8
+    versus_candidate_width: int = 6
+    versus_reply_width: int = 1
+    minimum_versus_win_margin: int = 1
 
     def normalized(self) -> "PromotionConfig":
+        versus_games = max(2, int(self.versus_games))
+        # Mirrored benchmarking pairs consecutive games on the same seed with
+        # candidate/champion sides swapped. Keep the sample fully paired.
+        if versus_games % 2:
+            versus_games += 1
         return PromotionConfig(
             games=max(1, int(self.games)),
             max_pieces=max(1, int(self.max_pieces)),
@@ -35,6 +50,16 @@ class PromotionConfig:
             minimum_fitness_gain=float(self.minimum_fitness_gain),
             max_completion_loss=max(0, int(self.max_completion_loss)),
             workers=max(0, int(self.workers)),
+            versus_games=versus_games,
+            versus_max_turns=max(1, int(self.versus_max_turns)),
+            versus_seed_offset=int(self.versus_seed_offset),
+            versus_seed_step=max(1, int(self.versus_seed_step)),
+            versus_garbage_cap=max(1, int(self.versus_garbage_cap)),
+            versus_candidate_width=min(64, max(1, int(self.versus_candidate_width))),
+            versus_reply_width=min(16, max(0, int(self.versus_reply_width))),
+            # A versus check is intentionally mandatory for an existing
+            # champion: ties do not replace a known-good model.
+            minimum_versus_win_margin=max(1, int(self.minimum_versus_win_margin)),
         )
 
 
@@ -50,6 +75,8 @@ class PromotionResult:
     config: PromotionConfig
     candidate: BenchmarkResult
     champion: BenchmarkResult | None
+    versus: VersusBenchmarkResult | None = None
+    versus_win_margin: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -59,11 +86,40 @@ class PromotionResult:
             "championFitness": self.champion_fitness,
             "fitnessGain": self.fitness_gain,
             "completionLoss": self.completion_loss,
+            "versusWinMargin": self.versus_win_margin,
             "fitnessProfile": self.profile.to_dict(),
             "config": asdict(self.config),
             "candidate": self.candidate.to_dict(),
             "champion": self.champion.to_dict() if self.champion is not None else None,
+            "versus": self.versus.to_dict() if self.versus is not None else None,
         }
+
+
+def _solo_rejection_reason(
+    *,
+    gain: float,
+    completion_loss: int,
+    config: PromotionConfig,
+) -> str | None:
+    if completion_loss > config.max_completion_loss:
+        return (
+            f"Rejected before versus: candidate completed {completion_loss} fewer game(s), "
+            f"above the allowed loss of {config.max_completion_loss}."
+        )
+    if gain <= config.minimum_fitness_gain:
+        return (
+            f"Rejected before versus: fitness gain {gain:.3f} did not exceed the required "
+            f"{config.minimum_fitness_gain:.3f}."
+        )
+    return None
+
+
+def _promotion_versus_config(search_config: SearchConfig, config: PromotionConfig) -> VersusSearchConfig:
+    return VersusSearchConfig(
+        placement_search=search_config.normalized(),
+        candidate_width=config.versus_candidate_width,
+        opponent_reply_width=config.versus_reply_width,
+    ).normalized()
 
 
 def compare_candidate_to_champion(
@@ -114,23 +170,54 @@ def compare_candidate_to_champion(
     gain = candidate_fitness - champion_fitness
     completion_loss = max(0, champion.completed - candidate.completed)
 
-    if completion_loss > cfg.max_completion_loss:
-        promoted = False
-        reason = (
-            f"Rejected: candidate completed {completion_loss} fewer game(s), "
-            f"above the allowed loss of {cfg.max_completion_loss}."
+    solo_rejection = _solo_rejection_reason(
+        gain=gain,
+        completion_loss=completion_loss,
+        config=cfg,
+    )
+    if solo_rejection is not None:
+        return PromotionResult(
+            promoted=False,
+            reason=solo_rejection,
+            candidate_fitness=candidate_fitness,
+            champion_fitness=champion_fitness,
+            fitness_gain=gain,
+            completion_loss=completion_loss,
+            profile=profile,
+            config=cfg,
+            candidate=candidate,
+            champion=champion,
         )
-    elif gain <= cfg.minimum_fitness_gain:
+
+    versus_config = _promotion_versus_config(search_config, cfg)
+    versus = run_versus_benchmark(
+        cfg.versus_games,
+        max_turns=cfg.versus_max_turns,
+        seed_base=cfg.seed_base + cfg.versus_seed_offset,
+        seed_step=cfg.versus_seed_step,
+        player_weights=candidate_weights,
+        ai_weights=champion_weights,
+        player_config=versus_config,
+        ai_config=versus_config,
+        garbage_cap=cfg.versus_garbage_cap,
+    )
+    versus_win_margin = versus.player_wins - versus.ai_wins
+
+    if versus_win_margin < cfg.minimum_versus_win_margin:
         promoted = False
         reason = (
-            f"Rejected: fitness gain {gain:.3f} did not exceed the required "
-            f"{cfg.minimum_fitness_gain:.3f}."
+            f"Rejected by mirrored versus: candidate went {versus.player_wins}-{versus.ai_wins} "
+            f"with {versus.draws} draw(s), win margin {versus_win_margin} below required "
+            f"{cfg.minimum_versus_win_margin}; mean sent "
+            f"{versus.player_mean_sent:.3f} vs {versus.ai_mean_sent:.3f}."
         )
     else:
         promoted = True
         reason = (
-            f"Promoted: fitness improved by {gain:.3f} with completion loss "
-            f"{completion_loss}/{cfg.max_completion_loss}."
+            f"Promoted: solo fitness improved by {gain:.3f} with completion loss "
+            f"{completion_loss}/{cfg.max_completion_loss}, then candidate won mirrored versus "
+            f"{versus.player_wins}-{versus.ai_wins} with {versus.draws} draw(s); mean sent "
+            f"{versus.player_mean_sent:.3f} vs {versus.ai_mean_sent:.3f}."
         )
 
     return PromotionResult(
@@ -144,6 +231,8 @@ def compare_candidate_to_champion(
         config=cfg,
         candidate=candidate,
         champion=champion,
+        versus=versus,
+        versus_win_margin=versus_win_margin,
     )
 
 
