@@ -43,6 +43,128 @@ jobs:
         if: matrix.python-version == '3.13'
         run: uv run --no-sync python -c "from minoflux.replay import build_parser as replay_parser; from minoflux.versus_ai import build_parser as versus_parser; from minoflux_ai import load_tetrio_capture, align_capture_samples; print(replay_parser().prog, versus_parser().prog)"
 
+  tournament-screen:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/self-improve'
+    name: screen (${{ matrix.candidate }})
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate:
+          - baseline
+          - b2b_slot_readiness
+          - b2b_spin_conversion
+          - t_queue_exact_match
+          - t_queue_clean_match
+          - t_arrival_attack_efficiency
+          - slot_creation_when_t_near
+          - slot_preserve_when_t_far
+          - adaptive_t_lookahead
+          - adaptive_slot_lookahead
+          - adaptive_danger_lookahead
+          - adaptive_hold_t_lookahead
+          - adaptive_t_discount
+          - adaptive_slot_discount
+          - adaptive_combined
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync package
+        run: uv sync --extra game --extra dev
+      - name: Fixed-seed strength screen
+        env:
+          CANDIDATE: ${{ matrix.candidate }}
+        run: |
+          uv run --no-sync python - <<'PY'
+          import json, os
+          from dataclasses import replace
+          from minoflux_ai import benchmark, heuristic, search
+          from minoflux_ai.features import extract_board_features
+
+          name = os.environ['CANDIDATE']
+          original_context = heuristic._context_score
+          original_choose = benchmark.choose_search_action
+
+          def t_distance(game):
+              if game.current == 'T': return 0
+              for i, piece in enumerate(game.queue):
+                  if piece == 'T': return i + 1
+                  if i >= 5: break
+              return 7
+
+          def extra_context(game, f):
+              slots = f.board.t_spin_slots
+              holes = f.board.holes
+              h = f.board.max_height
+              td = t_distance(game)
+              availability = max(0.0, (5.0 - td) / 5.0)
+              if name == 'b2b_slot_readiness':
+                  return (0.42 * slots / (1 + holes + h / 8.0)) if game.back_to_back else 0.0
+              if name == 'b2b_spin_conversion':
+                  if not game.back_to_back: return 0.0
+                  if f.spin_lines: return 0.55 * f.spin_lines + 0.12 * f.attack
+                  return -0.16 * f.lines if f.lines else 0.0
+              if name == 't_queue_exact_match':
+                  supply = (1 if game.current == 'T' else 0) + sum(1 for p in list(game.queue)[:6] if p == 'T') + (1 if game.hold_piece == 'T' else 0)
+                  return 0.24 * min(slots, supply) - 0.22 * abs(slots - supply)
+              if name == 't_queue_clean_match':
+                  supply = (1 if game.current == 'T' else 0) + sum(1 for p in list(game.queue)[:6] if p == 'T') + (1 if game.hold_piece == 'T' else 0)
+                  matched = min(slots, supply)
+                  return 0.32 * matched / (1 + holes + h / 10.0) - 0.18 * max(0, slots - supply)
+              if name == 't_arrival_attack_efficiency':
+                  if game.current != 'T': return 0.0
+                  if f.spin_lines: return 0.24 * f.attack + 0.22 * f.spin_lines - 0.10 * holes
+                  return -0.18 * max(0, -f.t_spin_slot_delta)
+              if name == 'slot_creation_when_t_near':
+                  return 0.34 * max(0, f.t_spin_slot_delta) * availability
+              if name == 'slot_preserve_when_t_far':
+                  far = min(1.0, td / 5.0)
+                  return -0.30 * max(0, -f.t_spin_slot_delta) * far / (1 + holes)
+              return 0.0
+
+          if name not in {'baseline','adaptive_t_lookahead','adaptive_slot_lookahead','adaptive_danger_lookahead','adaptive_hold_t_lookahead','adaptive_t_discount','adaptive_slot_discount','adaptive_combined'}:
+              heuristic._context_score = lambda game, f, w: original_context(game, f, w) + extra_context(game, f)
+
+          adaptive = name.startswith('adaptive_')
+          if adaptive:
+              def choose(game, weights, cfg):
+                  board = extract_board_features(game.board)
+                  td = t_distance(game)
+                  newcfg = cfg
+                  if name == 'adaptive_t_lookahead' and td <= 2:
+                      newcfg = replace(cfg, lookahead_pieces=2)
+                  elif name == 'adaptive_slot_lookahead' and board.t_spin_slots > 0:
+                      newcfg = replace(cfg, lookahead_pieces=2)
+                  elif name == 'adaptive_danger_lookahead' and board.max_height >= 11:
+                      newcfg = replace(cfg, lookahead_pieces=2)
+                  elif name == 'adaptive_hold_t_lookahead' and game.hold_piece == 'T':
+                      newcfg = replace(cfg, lookahead_pieces=2)
+                  elif name == 'adaptive_t_discount' and td <= 2:
+                      newcfg = replace(cfg, discount=1.0)
+                  elif name == 'adaptive_slot_discount' and board.t_spin_slots > 0:
+                      newcfg = replace(cfg, discount=1.0)
+                  elif name == 'adaptive_combined' and (td <= 2 or board.t_spin_slots > 0 or board.max_height >= 12):
+                      newcfg = replace(cfg, lookahead_pieces=2, discount=0.95)
+                  return original_choose(game, weights, newcfg)
+              benchmark.choose_search_action = choose
+
+          games = [benchmark.run_heuristic_game(seed, 160) for seed in (71001, 71018)]
+          pieces = sum(g.pieces for g in games); attack = sum(g.attack for g in games)
+          out = {
+              'candidate': name, 'games': len(games), 'pieces': pieces, 'attack': attack,
+              'attack_per_piece': attack / pieces if pieces else 0,
+              'topouts': sum(g.topout for g in games), 'completed': sum(g.completed for g in games),
+              'spins': sum(g.spins for g in games), 'spin_lines': sum(g.spin_lines for g in games),
+              'tsd': sum(g.t_spin_doubles for g in games), 'tst': sum(g.t_spin_triples for g in games),
+          }
+          print('TOURNAMENT_RESULT=' + json.dumps(out, sort_keys=True))
+          PY
+
   full-validation:
     name: full-validation (3.13)
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
