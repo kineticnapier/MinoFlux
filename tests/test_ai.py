@@ -188,8 +188,10 @@ class HeuristicTests(unittest.TestCase):
         self.assertEqual(_hold_t_supply_balance_score(game, 1), 0.0)
 
         game.hold_used = True
+        before = game.snapshot()
         self.assertAlmostEqual(_hold_t_supply_balance_score(game, 1), 0.12)
         self.assertAlmostEqual(_hold_t_supply_balance_score(game, 3), -0.44)
+        self.assertEqual(game.snapshot(), before)
 
     def test_weights_round_trip(self) -> None:
         custom = HeuristicWeights(
