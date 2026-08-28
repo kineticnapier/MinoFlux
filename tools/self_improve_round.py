@@ -5,20 +5,20 @@ import json
 import os
 
 import minoflux_ai.heuristic as heuristic
+import minoflux_ai.versus_benchmark as versus_benchmark
 import minoflux_ai.versus_search as versus_search
 from minoflux_ai import DEFAULT_WEIGHTS, SearchConfig, run_heuristic_benchmark
 from minoflux_ai.features import extract_board_features
-from minoflux_ai.versus_benchmark import run_versus_benchmark
 from minoflux_ai.versus_search import DEFAULT_VERSUS_WEIGHTS, VersusSearchConfig
 
 CANDIDATE = os.environ.get("CANDIDATE", "baseline")
 STAGE = os.environ.get("STAGE", "short")
 ORIGINAL_CONTEXT = heuristic._context_score
 ORIGINAL_VERSUS_SCORE = versus_search.score_versus_state
+ORIGINAL_CHOOSE_VERSUS = versus_search.choose_versus_action
 MARKER = 8.000001
-VERSUS_MARKER = -0.025001
 CANDIDATE_WEIGHTS = replace(DEFAULT_WEIGHTS, perfect_clear=MARKER)
-CANDIDATE_VERSUS_WEIGHTS = replace(DEFAULT_VERSUS_WEIGHTS, input_cost=VERSUS_MARKER)
+ACTIVE_VERSUS_MODIFIER = False
 
 VERSUS_ONLY = {
     "pending_height_coupling",
@@ -56,7 +56,6 @@ def _modifier(game, features) -> float:
     height_relief = max(0, before.max_height - after.max_height)
     slot_kept = min(before.t_spin_slots, after.t_spin_slots)
     slot_loss = max(0, before.t_spin_slots - after.t_spin_slots)
-    slot_created = max(0, after.t_spin_slots - before.t_spin_slots)
     tdist = _next_t_distance(game)
     urgency = max(0.0, (7.0 - tdist) / 7.0)
     far_t = min(1.0, max(0, tdist - 2) / 4.0)
@@ -126,7 +125,7 @@ def patched_versus_score(match, root_side, *, weights=DEFAULT_VERSUS_WEIGHTS, re
         path_length=path_length,
         action_side=action_side,
     )
-    if weights.input_cost > -0.0250005:
+    if not ACTIVE_VERSUS_MODIFIER:
         return base
     own = match.player if root_side == "player" else match.ai
     opp = match.ai if root_side == "player" else match.player
@@ -146,15 +145,25 @@ def patched_versus_score(match, root_side, *, weights=DEFAULT_VERSUS_WEIGHTS, re
     return base
 
 
+def patched_choose_versus(match, side, weights, config):
+    global ACTIVE_VERSUS_MODIFIER
+    previous = ACTIVE_VERSUS_MODIFIER
+    ACTIVE_VERSUS_MODIFIER = CANDIDATE in VERSUS_ONLY and weights.perfect_clear > 8.0000005
+    try:
+        return ORIGINAL_CHOOSE_VERSUS(match, side, weights, config)
+    finally:
+        ACTIVE_VERSUS_MODIFIER = previous
+
+
 heuristic._context_score = patched_context
 versus_search.score_versus_state = patched_versus_score
+versus_benchmark.choose_versus_action = patched_choose_versus
 cfg = SearchConfig(allow_hold=True, lookahead_pieces=1, beam_width=4, discount=0.9)
 weights = DEFAULT_WEIGHTS if CANDIDATE == "baseline" else CANDIDATE_WEIGHTS
 
 if STAGE == "versus":
     vcfg = VersusSearchConfig(placement_search=cfg, candidate_width=6, opponent_reply_width=1)
-    candidate_vw = CANDIDATE_VERSUS_WEIGHTS if CANDIDATE in VERSUS_ONLY else DEFAULT_VERSUS_WEIGHTS
-    result = run_versus_benchmark(
+    result = versus_benchmark.run_versus_benchmark(
         games=8,
         max_turns=120,
         seed_base=113_971,
@@ -163,21 +172,19 @@ if STAGE == "versus":
         ai_weights=DEFAULT_WEIGHTS,
         player_config=vcfg,
         ai_config=vcfg,
-        player_versus_weights=candidate_vw,
-        ai_versus_weights=DEFAULT_VERSUS_WEIGHTS,
         garbage_cap=8,
     )
-    games = result.per_game
+    match_games = result.per_game
     payload = result.to_dict()
     payload.update({
         "candidate": CANDIDATE,
         "stage": STAGE,
-        "playerMeanCanceled": sum(g.player_canceled for g in games) / len(games),
-        "aiMeanCanceled": sum(g.ai_canceled for g in games) / len(games),
-        "playerMeanReceived": sum(g.player_received for g in games) / len(games),
-        "aiMeanReceived": sum(g.ai_received for g in games) / len(games),
-        "playerMeanMaxB2B": sum(g.player_max_b2b for g in games) / len(games),
-        "aiMeanMaxB2B": sum(g.ai_max_b2b for g in games) / len(games),
+        "playerMeanCanceled": sum(g.player_canceled for g in match_games) / len(match_games),
+        "aiMeanCanceled": sum(g.ai_canceled for g in match_games) / len(match_games),
+        "playerMeanReceived": sum(g.player_received for g in match_games) / len(match_games),
+        "aiMeanReceived": sum(g.ai_received for g in match_games) / len(match_games),
+        "playerMeanMaxB2B": sum(g.player_max_b2b for g in match_games) / len(match_games),
+        "aiMeanMaxB2B": sum(g.ai_max_b2b for g in match_games) / len(match_games),
         "playerTopouts": result.ai_wins,
         "aiTopouts": result.player_wins,
     })
