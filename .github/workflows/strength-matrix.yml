@@ -8,18 +8,16 @@ on:
       - '.github/workflows/strength-matrix.yml'
 
 jobs:
-  fresh:
+  versus:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         candidate:
-          - baseline
-          - t_near_slot_surface_stability
           - t_near_slot_depth_quality
           - pending_height_emergency
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --extra game
-      - run: uv run python tools/self_improve_matrix.py fresh '${{ matrix.candidate }}'
+      - run: uv run python tools/self_improve_matrix.py versus '${{ matrix.candidate }}'
