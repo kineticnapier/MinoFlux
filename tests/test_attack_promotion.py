@@ -8,6 +8,7 @@ from unittest.mock import patch
 from minoflux_ai import (
     ATTACK_SPIN_FITNESS,
     BALANCED_FITNESS,
+    CLEAN_ATTACK_FITNESS,
     BenchmarkGame,
     BenchmarkResult,
     HeuristicWeights,
@@ -17,11 +18,23 @@ from minoflux_ai import (
     bootstrap_champion,
     compare_candidate_to_champion,
     load_weights,
+    run_heuristic_game,
     save_weights,
 )
 
 
-def make_benchmark(*, attack: int, spins: int, spin_lines: int, completed: int = 2) -> BenchmarkResult:
+def make_benchmark(
+    *,
+    attack: int,
+    spins: int,
+    spin_lines: int,
+    completed: int = 2,
+    mean_holes: float = 0.0,
+    mean_hole_depth: float = 0.0,
+    mean_bumpiness: float = 0.0,
+    mean_max_height: float = 0.0,
+    high_stack_fraction: float = 0.0,
+) -> BenchmarkResult:
     game = BenchmarkGame(
         seed=1,
         pieces=100,
@@ -33,6 +46,13 @@ def make_benchmark(*, attack: int, spins: int, spin_lines: int, completed: int =
         score=1000,
         topout=False,
         completed=True,
+        mean_holes=mean_holes,
+        mean_hole_depth=mean_hole_depth,
+        mean_bumpiness=mean_bumpiness,
+        mean_max_height=mean_max_height,
+        peak_max_height=int(mean_max_height),
+        high_stack_steps=int(high_stack_fraction * 100),
+        high_stack_fraction=high_stack_fraction,
     )
     return BenchmarkResult(
         games=2,
@@ -53,6 +73,13 @@ def make_benchmark(*, attack: int, spins: int, spin_lines: int, completed: int =
         mean_spin_lines=spin_lines / 2,
         perfect_clears=0,
         mean_perfect_clears=0,
+        mean_holes=mean_holes,
+        mean_hole_depth=mean_hole_depth,
+        mean_bumpiness=mean_bumpiness,
+        mean_max_height=mean_max_height,
+        peak_max_height=int(mean_max_height),
+        high_stack_steps=int(high_stack_fraction * 200),
+        high_stack_fraction=high_stack_fraction,
         topouts=2 - completed,
         completed=completed,
         per_game=(game, game),
@@ -67,6 +94,55 @@ class AttackFitnessTests(unittest.TestCase):
         attack_gain = benchmark_fitness(offensive, ATTACK_SPIN_FITNESS) - benchmark_fitness(defensive, ATTACK_SPIN_FITNESS)
         balanced_gain = benchmark_fitness(offensive, BALANCED_FITNESS) - benchmark_fitness(defensive, BALANCED_FITNESS)
         self.assertGreater(attack_gain, balanced_gain)
+
+    def test_clean_attack_profile_penalizes_dirty_high_stack(self) -> None:
+        clean = make_benchmark(
+            attack=120,
+            spins=8,
+            spin_lines=12,
+            mean_holes=0.5,
+            mean_hole_depth=0.8,
+            mean_bumpiness=5.0,
+            mean_max_height=7.0,
+            high_stack_fraction=0.0,
+        )
+        dirty = make_benchmark(
+            attack=120,
+            spins=8,
+            spin_lines=12,
+            mean_holes=4.0,
+            mean_hole_depth=9.0,
+            mean_bumpiness=18.0,
+            mean_max_height=14.0,
+            high_stack_fraction=0.25,
+        )
+        self.assertGreater(
+            benchmark_fitness(clean, CLEAN_ATTACK_FITNESS),
+            benchmark_fitness(dirty, CLEAN_ATTACK_FITNESS),
+        )
+
+    def test_clean_attack_profile_penalizes_topout_more_than_attack_spin(self) -> None:
+        safe = make_benchmark(attack=120, spins=8, spin_lines=12, completed=2)
+        fragile = make_benchmark(attack=120, spins=8, spin_lines=12, completed=1)
+        clean_loss = benchmark_fitness(safe, CLEAN_ATTACK_FITNESS) - benchmark_fitness(fragile, CLEAN_ATTACK_FITNESS)
+        attack_spin_loss = benchmark_fitness(safe, ATTACK_SPIN_FITNESS) - benchmark_fitness(fragile, ATTACK_SPIN_FITNESS)
+        self.assertGreater(clean_loss, attack_spin_loss)
+
+    def test_benchmark_collects_stack_quality_telemetry(self) -> None:
+        game = run_heuristic_game(
+            7,
+            max_pieces=12,
+            search_config=SearchConfig(lookahead_pieces=0, beam_width=1),
+        )
+        self.assertGreater(game.pieces, 0)
+        self.assertGreaterEqual(game.mean_holes, 0)
+        self.assertGreaterEqual(game.mean_hole_depth, 0)
+        self.assertGreaterEqual(game.mean_bumpiness, 0)
+        self.assertGreaterEqual(game.mean_max_height, 0)
+        self.assertGreaterEqual(game.peak_max_height, game.mean_max_height)
+        self.assertLessEqual(game.high_stack_steps, game.pieces)
+        self.assertGreaterEqual(game.high_stack_fraction, 0)
+        self.assertLessEqual(game.high_stack_fraction, 1)
 
 
 class PromotionTests(unittest.TestCase):
