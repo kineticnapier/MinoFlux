@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
 import json
+import multiprocessing as mp
 
 import minoflux_ai.heuristic as h
 from minoflux_ai.benchmark import run_heuristic_benchmark
@@ -52,7 +54,6 @@ def bonus(i, game, f):
     danger = min(2.5, max(0.0, (before.max_height - 8) / 5.0) + before.holes / 3.0)
     clean = 1.0 / (1.0 + after.holes + after.max_height / 7.0)
     difficult = bool(f.spin_lines or f.lines == 4)
-
     if i == 0:
         return (0.18 * f.attack + 0.16 * min(2, slots_after) - 0.28 * slot_loss) if difficult else 0.0
     if i == 1:
@@ -121,13 +122,21 @@ def key(row):
     return s["app"] - 0.06 * s["topouts"] + 0.002 * s["completed"] + 0.0015 * s["tsd"] + 0.0005 * s["spin_lines"]
 
 
+def _bench_task(task):
+    games, pieces, seed_base, seed_step, i = task
+    weights = BASE if i is None else candidate_weights(i)
+    r = run_heuristic_benchmark(games=games, max_pieces=pieces, seed_base=seed_base, seed_step=seed_step,
+                                weights=weights, workers=1)
+    return {"name": "baseline" if i is None else CANDIDATES[i], "index": i, "summary": summary(r)}
+
+
 def stage(games, pieces, seed_base, seed_step, indices):
-    rows = [{"name": "baseline", "index": None, "summary": summary(run_heuristic_benchmark(
-        games=games, max_pieces=pieces, seed_base=seed_base, seed_step=seed_step, weights=BASE, workers=1))}]
-    for i in indices:
-        r = run_heuristic_benchmark(games=games, max_pieces=pieces, seed_base=seed_base, seed_step=seed_step,
-                                    weights=candidate_weights(i), workers=1)
-        rows.append({"name": CANDIDATES[i], "index": i, "summary": summary(r)})
+    tasks = [(games, pieces, seed_base, seed_step, None)] + [
+        (games, pieces, seed_base, seed_step, i) for i in indices
+    ]
+    ctx = mp.get_context("fork")
+    with ProcessPoolExecutor(max_workers=min(8, len(tasks)), mp_context=ctx) as ex:
+        rows = list(ex.map(_bench_task, tasks))
     return rows
 
 
