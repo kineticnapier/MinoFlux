@@ -8,16 +8,13 @@ on:
       - .github/workflows/self-improve-tournament.yml
 
 jobs:
-  fresh:
+  versus:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         candidate:
-          - baseline
-          - deep_hole_tail_recovery
           - slot_vs_deep_hole_tradeoff
-          - hole_depth_per_hole
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -25,9 +22,9 @@ jobs:
       - name: Evaluate candidate
         env:
           CANDIDATE: ${{ matrix.candidate }}
-          STAGE: fresh
+          STAGE: versus
         run: uv run python tools/self_improve_tournament.py
       - uses: actions/upload-artifact@v4
         with:
-          name: fresh-${{ matrix.candidate }}
+          name: versus-${{ matrix.candidate }}
           path: result.json
