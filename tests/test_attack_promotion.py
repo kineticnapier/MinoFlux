@@ -33,7 +33,7 @@ def make_benchmark(
     mean_hole_depth: float = 0.0,
     mean_bumpiness: float = 0.0,
     mean_max_height: float = 0.0,
-    high_stack_rate: float = 0.0,
+    high_stack_fraction: float = 0.0,
 ) -> BenchmarkResult:
     game = BenchmarkGame(
         seed=1,
@@ -50,7 +50,7 @@ def make_benchmark(
         mean_hole_depth=mean_hole_depth,
         mean_bumpiness=mean_bumpiness,
         mean_max_height=mean_max_height,
-        high_stack_rate=high_stack_rate,
+        high_stack_fraction=high_stack_fraction,
     )
     return BenchmarkResult(
         games=2,
@@ -75,7 +75,7 @@ def make_benchmark(
         mean_hole_depth=mean_hole_depth,
         mean_bumpiness=mean_bumpiness,
         mean_max_height=mean_max_height,
-        high_stack_rate=high_stack_rate,
+        high_stack_fraction=high_stack_fraction,
         topouts=2 - completed,
         completed=completed,
         per_game=(game, game),
@@ -127,7 +127,7 @@ class AttackFitnessTests(unittest.TestCase):
             mean_hole_depth=8.0,
             mean_bumpiness=12.0,
             mean_max_height=13.0,
-            high_stack_rate=0.25,
+            high_stack_fraction=0.25,
         )
         self.assertGreater(
             benchmark_fitness(clean, CLEAN_ATTACK_FITNESS),
