@@ -9,17 +9,15 @@ on:
   workflow_dispatch:
 
 jobs:
-  fresh:
-    name: fresh-${{ matrix.candidate }}
+  versus:
+    name: versus-${{ matrix.candidate }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         candidate:
-          - baseline
-          - clear_depth_relief
-          - clear_hole_access
           - clear_compaction
+          - clear_depth_relief
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
@@ -27,8 +25,8 @@ jobs:
           python-version: "3.13"
           enable-cache: true
       - run: uv sync --extra game --extra dev
-      - name: Run fresh benchmark
+      - name: Run mirrored versus benchmark
         env:
           CANDIDATE: ${{ matrix.candidate }}
-          STAGE: fresh
+          STAGE: versus
         run: uv run --no-sync python tools/self_improve_round.py
