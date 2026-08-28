@@ -19,6 +19,7 @@ from minoflux_ai.features import BoardFeatures
 from minoflux_ai.heuristic import (
     PlacementFeatures,
     _hold_t_supply_balance_score,
+    _t_spin_slot_queue_match_score,
     _t_spin_slot_supply_match,
     score_features,
 )
@@ -179,6 +180,17 @@ class HeuristicTests(unittest.TestCase):
         self.assertAlmostEqual(_t_spin_slot_supply_match(2, 6), -0.35)
         self.assertAlmostEqual(_t_spin_slot_supply_match(2, 7), -0.35)
 
+    def test_queue_slot_match_tracks_exact_near_t_supply_without_mutation(self) -> None:
+        game = Game(123)
+        game.current = "T"
+        game.queue = deque(["I", "T", "O", "S", "T", "Z", "T"])
+        game.hold_piece = "T"
+        before = game.snapshot()
+        self.assertAlmostEqual(_t_spin_slot_queue_match_score(game, 4), 0.96)
+        self.assertAlmostEqual(_t_spin_slot_queue_match_score(game, 5), 0.74)
+        self.assertAlmostEqual(_t_spin_slot_queue_match_score(game, 2), 0.04)
+        self.assertEqual(game.snapshot(), before)
+
     def test_hold_t_supply_balance_only_applies_after_hold(self) -> None:
         game = Game(123)
         game.current = "I"
@@ -202,6 +214,7 @@ class HeuristicTests(unittest.TestCase):
             t_spin_slot_height_quality=0.65,
             t_spin_slot_low_clean=0.75,
             t_spin_slot_supply_match=0.6,
+            t_spin_slot_queue_match=0.7,
             hold_t_supply_balance=0.8,
         )
         with TemporaryDirectory() as directory:
@@ -239,6 +252,15 @@ class HeuristicTests(unittest.TestCase):
         self.assertEqual(
             loaded.t_spin_slot_supply_match,
             DEFAULT_WEIGHTS.t_spin_slot_supply_match,
+        )
+
+    def test_old_weight_mapping_uses_queue_match_default(self) -> None:
+        old_weights = DEFAULT_WEIGHTS.to_dict()
+        old_weights.pop("t_spin_slot_queue_match")
+        loaded = HeuristicWeights.from_mapping(old_weights)
+        self.assertEqual(
+            loaded.t_spin_slot_queue_match,
+            DEFAULT_WEIGHTS.t_spin_slot_queue_match,
         )
 
     def test_old_weight_mapping_uses_hold_t_supply_balance_default(self) -> None:
