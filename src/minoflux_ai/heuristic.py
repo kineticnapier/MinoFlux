@@ -30,6 +30,7 @@ class HeuristicWeights:
     t_spin_slot_low_clean: float = 0.900000
     t_spin_slot_supply_match: float = 0.550000
     t_spin_slot_queue_match: float = 1.000000
+    t_spin_slot_urgency_clean: float = 1.000000
     t_arrival_conversion: float = 1.000000
     hold_t_supply_balance: float = 1.000000
     new_holes: float = -1.200000
@@ -151,6 +152,12 @@ def _t_spin_slot_queue_match_score(game: Game, t_spin_slots: int) -> float:
     return 0.24 * matched - 0.22 * abs(t_spin_slots - supply)
 
 
+def _t_spin_slot_urgency_clean_score(game: Game, board: BoardFeatures) -> float:
+    next_t_distance = _next_t_distance(game)
+    urgency = max(0.0, (7.0 - next_t_distance) / 7.0)
+    return 0.34 * urgency * min(2, board.t_spin_slots) / (1.0 + board.holes)
+
+
 def _t_arrival_conversion_score(game: Game, features: PlacementFeatures) -> float:
     if game.current != "T":
         return 0.0
@@ -177,6 +184,7 @@ def _context_score(game: Game, features: PlacementFeatures, weights: HeuristicWe
         game,
         features.board.t_spin_slots,
     )
+    urgency_clean = _t_spin_slot_urgency_clean_score(game, features.board)
     arrival_conversion = _t_arrival_conversion_score(game, features)
     hold_t_supply_balance = _hold_t_supply_balance_score(
         game,
@@ -185,6 +193,7 @@ def _context_score(game: Game, features: PlacementFeatures, weights: HeuristicWe
     return (
         supply_match * weights.t_spin_slot_supply_match
         + queue_match * weights.t_spin_slot_queue_match
+        + urgency_clean * weights.t_spin_slot_urgency_clean
         + arrival_conversion * weights.t_arrival_conversion
         + hold_t_supply_balance * weights.hold_t_supply_balance
     )
