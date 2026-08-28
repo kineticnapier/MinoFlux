@@ -8,29 +8,18 @@ on:
       - '.github/workflows/strength-matrix.yml'
 
 jobs:
-  short:
+  fresh:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         candidate:
           - baseline
-          - slot_hole_depth_quality
-          - slot_bumpiness_quality
-          - slot_height_bumpiness_joint
-          - t_near_slot_depth_quality
           - t_near_slot_surface_stability
-          - attack_clean_ratio
-          - spin_clean_ratio
-          - difficult_clear_clean_exit
-          - low_slot_after_attack
-          - downstack_spin_synergy
+          - t_near_slot_depth_quality
           - pending_height_emergency
-          - pressure_finish
-          - cancel_survival
-          - garbage_clean_response
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --extra game
-      - run: uv run python tools/self_improve_matrix.py short '${{ matrix.candidate }}'
+      - run: uv run python tools/self_improve_matrix.py fresh '${{ matrix.candidate }}'
