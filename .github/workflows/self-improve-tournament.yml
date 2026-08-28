@@ -1,0 +1,47 @@
+name: Self improvement tournament
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - tools/self_improve_round.py
+      - .github/workflows/self-improve-tournament.yml
+
+jobs:
+  short:
+    name: short (${{ matrix.candidate }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 15
+      matrix:
+        candidate:
+          - baseline
+          - emergency_slot_liquidation
+          - setup_relief_synergy
+          - imminent_t_depth_guard
+          - attack_slot_option
+          - downstack_combo_relief
+          - difficult_depth_exit
+          - t_arrival_stack_reset
+          - slot_single_supply_low
+          - setup_b2b_reentry_clean
+          - hold_escape_clean
+          - pending_height_coupling
+          - pending_hole_coupling
+          - ko_sent_pressure
+          - cancel_survival_margin
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Sync package
+        run: uv sync --extra game --extra dev
+      - name: Evaluate
+        env:
+          CANDIDATE: ${{ matrix.candidate }}
+          STAGE: short
+        run: uv run --no-sync python tools/self_improve_round.py
