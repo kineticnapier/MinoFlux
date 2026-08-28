@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import replace
+from itertools import islice
 import json
 
 import minoflux_ai.heuristic as heuristic
@@ -18,14 +19,17 @@ CANDIDATES = (
     "hold_t_supply_balance", "hold_non_t_rescue",
 )
 
+def _queue(game, count):
+    return tuple(islice(game.queue, count))
+
 def _next_t_distance(game):
     if game.current == "T": return 0
-    for i, p in enumerate(game.queue[:7]):
+    for i, p in enumerate(_queue(game, 7)):
         if p == "T": return i + 1
     return 8
 
 def _t_count(game):
-    return (1 if game.current == "T" else 0) + sum(1 for p in game.queue[:6] if p == "T")
+    return (1 if game.current == "T" else 0) + sum(1 for p in _queue(game, 6) if p == "T")
 
 def _extra_score(name, game, features):
     before = extract_board_features(game.board)
@@ -52,7 +56,7 @@ def _extra_score(name, game, features):
         return urgency * (0.42 * max(0, slot_delta) + 0.16 * slots) - (1-urgency) * 0.20 * max(0, slots-1)
     if name == "post_spin_next_t_chain":
         if not spin: return 0.0
-        next_supply = sum(1 for p in game.queue[:6] if p == "T")
+        next_supply = sum(1 for p in _queue(game, 6) if p == "T")
         return 0.45 * features.spin_lines + 0.30 * min(slots, next_supply) * clean
     if name == "spin_conversion_efficiency":
         if not spin: return 0.0
