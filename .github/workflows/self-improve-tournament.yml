@@ -8,7 +8,7 @@ on:
       - .github/workflows/self-improve-tournament.yml
 
 jobs:
-  short:
+  fresh:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -16,19 +16,8 @@ jobs:
         candidate:
           - baseline
           - deep_hole_tail_recovery
-          - hole_depth_per_hole
-          - clean_clear_compaction
-          - low_damage_attack
-          - danger_deep_hole_escape
-          - danger_smooth_escape
-          - t_near_damage_avoidance
-          - t_near_clean_conversion_margin
           - slot_vs_deep_hole_tradeoff
-          - safe_slot_reserve
-          - clean_surface_recovery
-          - nonlinear_damage_guard
-          - high_stack_clean_attack
-          - spin_exit_quality
+          - hole_depth_per_hole
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -36,9 +25,9 @@ jobs:
       - name: Evaluate candidate
         env:
           CANDIDATE: ${{ matrix.candidate }}
-          STAGE: short
+          STAGE: fresh
         run: uv run python tools/self_improve_tournament.py
       - uses: actions/upload-artifact@v4
         with:
-          name: short-${{ matrix.candidate }}
+          name: fresh-${{ matrix.candidate }}
           path: result.json
