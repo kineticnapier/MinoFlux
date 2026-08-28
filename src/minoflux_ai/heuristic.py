@@ -30,6 +30,7 @@ class HeuristicWeights:
     t_spin_slot_low_clean: float = 0.900000
     t_spin_slot_supply_match: float = 0.550000
     t_arrival_conversion: float = 1.000000
+    hold_t_supply_balance: float = 1.000000
     new_holes: float = -1.200000
     lines: float = 0.760666
     attack: float = 0.850000
@@ -126,6 +127,16 @@ def _next_t_distance(game: Game) -> int:
     return 7
 
 
+def _t_supply_count(game: Game) -> int:
+    count = 1 if game.current == "T" else 0
+    for index, piece in enumerate(game.queue):
+        if index >= 6:
+            break
+        if piece == "T":
+            count += 1
+    return count
+
+
 def _t_spin_slot_supply_match(t_spin_slots: int, next_t_distance: int) -> float:
     availability = max(0.0, (6.0 - next_t_distance) / 6.0)
     excess_slots = max(0, t_spin_slots - 1)
@@ -141,15 +152,28 @@ def _t_arrival_conversion_score(game: Game, features: PlacementFeatures) -> floa
     return -0.80 * slot_loss
 
 
+def _hold_t_supply_balance_score(game: Game, t_spin_slots: int) -> float:
+    if not game.hold_used:
+        return 0.0
+    held_t = 1 if game.hold_piece == "T" else 0
+    unmet_slots = max(0, t_spin_slots - (_t_supply_count(game) + held_t))
+    return -0.28 * unmet_slots + 0.12 * held_t * min(1, t_spin_slots)
+
+
 def _context_score(game: Game, features: PlacementFeatures, weights: HeuristicWeights) -> float:
     supply_match = _t_spin_slot_supply_match(
         features.board.t_spin_slots,
         _next_t_distance(game),
     )
     arrival_conversion = _t_arrival_conversion_score(game, features)
+    hold_t_supply_balance = _hold_t_supply_balance_score(
+        game,
+        features.board.t_spin_slots,
+    )
     return (
         supply_match * weights.t_spin_slot_supply_match
         + arrival_conversion * weights.t_arrival_conversion
+        + hold_t_supply_balance * weights.hold_t_supply_balance
     )
 
 
