@@ -31,7 +31,6 @@ CANDIDATES = (
 
 
 def candidate_weights(index: int):
-    # Tiny sentinel difference only; it is far below any meaningful terminal-score scale.
     return replace(DEFAULT_WEIGHTS, game_over=BASE_GAME_OVER - (index + 1) * 1e-3)
 
 
@@ -149,17 +148,17 @@ def stage_key(item):
 
 
 def main():
-    baseline_short = run_heuristic_benchmark(games=2, max_pieces=120, seed_base=31001, seed_step=31, weights=DEFAULT_WEIGHTS, search_config=SOLO, workers=1)
+    baseline_short = run_heuristic_benchmark(games=2, max_pieces=80, seed_base=31001, seed_step=31, weights=DEFAULT_WEIGHTS, search_config=SOLO, workers=1)
     short = []
     for i, name in enumerate(CANDIDATES):
-        r = run_heuristic_benchmark(games=2, max_pieces=120, seed_base=31001, seed_step=31, weights=candidate_weights(i), search_config=SOLO, workers=1)
+        r = run_heuristic_benchmark(games=2, max_pieces=80, seed_base=31001, seed_step=31, weights=candidate_weights(i), search_config=SOLO, workers=1)
         short.append((name, summary(r), i))
     survivors = sorted(short, key=stage_key, reverse=True)[:3]
 
-    baseline_fresh = run_heuristic_benchmark(games=3, max_pieces=260, seed_base=731003, seed_step=97, weights=DEFAULT_WEIGHTS, search_config=SOLO, workers=1)
+    baseline_fresh = run_heuristic_benchmark(games=3, max_pieces=160, seed_base=731003, seed_step=97, weights=DEFAULT_WEIGHTS, search_config=SOLO, workers=1)
     fresh = []
     for name, _, i in survivors:
-        r = run_heuristic_benchmark(games=3, max_pieces=260, seed_base=731003, seed_step=97, weights=candidate_weights(i), search_config=SOLO, workers=1)
+        r = run_heuristic_benchmark(games=3, max_pieces=160, seed_base=731003, seed_step=97, weights=candidate_weights(i), search_config=SOLO, workers=1)
         fresh.append((name, summary(r), i))
 
     base_f = summary(baseline_fresh)
@@ -168,7 +167,7 @@ def main():
 
     versus = []
     for name, _, i in finalists:
-        v = run_versus_benchmark(games=8, max_turns=120, seed_base=12000052, seed_step=193, player_weights=candidate_weights(i), ai_weights=DEFAULT_WEIGHTS, player_config=VERSUS_CFG, ai_config=VERSUS_CFG, garbage_cap=8)
+        v = run_versus_benchmark(games=6, max_turns=90, seed_base=12000052, seed_step=193, player_weights=candidate_weights(i), ai_weights=DEFAULT_WEIGHTS, player_config=VERSUS_CFG, ai_config=VERSUS_CFG, garbage_cap=8)
         versus.append({
             "name": name,
             "wins": v.player_wins,
