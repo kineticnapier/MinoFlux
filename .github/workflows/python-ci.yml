@@ -43,17 +43,9 @@ jobs:
         if: matrix.python-version == '3.13'
         run: uv run --no-sync python -c "from minoflux.replay import build_parser as replay_parser; from minoflux.versus_ai import build_parser as versus_parser; from minoflux_ai import load_tetrio_capture, align_capture_samples; print(replay_parser().prog, versus_parser().prog)"
 
-  tournament-fresh:
+  tournament-versus:
     if: github.event_name == 'push' && github.ref == 'refs/heads/self-improve'
-    name: fresh (${{ matrix.candidate }})
-    strategy:
-      fail-fast: false
-      matrix:
-        candidate:
-          - baseline
-          - t_queue_clean_match
-          - t_queue_exact_match
-          - slot_creation_when_t_near
+    name: mirrored versus (t_queue_exact_match)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -65,54 +57,57 @@ jobs:
           enable-cache: true
       - name: Sync package
         run: uv sync --extra game --extra dev
-      - name: Fresh-seed strength validation
-        env:
-          CANDIDATE: ${{ matrix.candidate }}
+      - name: Mirrored versus validation
         run: |
           uv run --no-sync python - <<'PY'
-          import json, os
-          from minoflux_ai import benchmark, heuristic
+          import json
+          from dataclasses import replace
+          from minoflux_ai import heuristic
+          from minoflux_ai.versus_benchmark import run_versus_benchmark
 
-          name = os.environ['CANDIDATE']
           original_context = heuristic._context_score
+          candidate_weights = replace(heuristic.DEFAULT_WEIGHTS)
 
-          def t_distance(game):
-              if game.current == 'T': return 0
-              for i, piece in enumerate(game.queue):
-                  if piece == 'T': return i + 1
-                  if i >= 5: break
-              return 7
-
-          def extra_context(game, f):
+          def candidate_context(game, f):
               slots = f.board.t_spin_slots
-              holes = f.board.holes
-              h = f.board.max_height
-              if name == 't_queue_exact_match':
-                  supply = (1 if game.current == 'T' else 0) + sum(1 for p in list(game.queue)[:6] if p == 'T') + (1 if game.hold_piece == 'T' else 0)
-                  return 0.24 * min(slots, supply) - 0.22 * abs(slots - supply)
-              if name == 't_queue_clean_match':
-                  supply = (1 if game.current == 'T' else 0) + sum(1 for p in list(game.queue)[:6] if p == 'T') + (1 if game.hold_piece == 'T' else 0)
-                  matched = min(slots, supply)
-                  return 0.32 * matched / (1 + holes + h / 10.0) - 0.18 * max(0, slots - supply)
-              if name == 'slot_creation_when_t_near':
-                  td = t_distance(game)
-                  availability = max(0.0, (5.0 - td) / 5.0)
-                  return 0.34 * max(0, f.t_spin_slot_delta) * availability
-              return 0.0
+              supply = (1 if game.current == 'T' else 0) + sum(1 for p in list(game.queue)[:6] if p == 'T') + (1 if game.hold_piece == 'T' else 0)
+              return 0.24 * min(slots, supply) - 0.22 * abs(slots - supply)
 
-          if name != 'baseline':
-              heuristic._context_score = lambda game, f, w: original_context(game, f, w) + extra_context(game, f)
+          def patched_context(game, f, w):
+              base = original_context(game, f, w)
+              if w is candidate_weights:
+                  return base + candidate_context(game, f)
+              return base
 
-          games = [benchmark.run_heuristic_game(seed, 260) for seed in (82301, 82319, 82343)]
-          pieces = sum(g.pieces for g in games); attack = sum(g.attack for g in games)
+          heuristic._context_score = patched_context
+          result = run_versus_benchmark(
+              games=6,
+              max_turns=100,
+              seed_base=82411,
+              seed_step=37,
+              player_weights=candidate_weights,
+              ai_weights=heuristic.DEFAULT_WEIGHTS,
+          )
+          games = result.per_game
           out = {
-              'candidate': name, 'games': len(games), 'pieces': pieces, 'attack': attack,
-              'attack_per_piece': attack / pieces if pieces else 0,
-              'topouts': sum(g.topout for g in games), 'completed': sum(g.completed for g in games),
-              'spins': sum(g.spins for g in games), 'spin_lines': sum(g.spin_lines for g in games),
-              'tsd': sum(g.t_spin_doubles for g in games), 'tst': sum(g.t_spin_triples for g in games),
+              'games': result.games,
+              'candidate_wins': result.player_wins,
+              'baseline_wins': result.ai_wins,
+              'draws': result.draws,
+              'candidate_attack': sum(g.player_attack for g in games) / len(games),
+              'baseline_attack': sum(g.ai_attack for g in games) / len(games),
+              'candidate_sent': sum(g.player_sent for g in games) / len(games),
+              'baseline_sent': sum(g.ai_sent for g in games) / len(games),
+              'candidate_canceled': sum(g.player_canceled for g in games) / len(games),
+              'baseline_canceled': sum(g.ai_canceled for g in games) / len(games),
+              'candidate_received': sum(g.player_received for g in games) / len(games),
+              'baseline_received': sum(g.ai_received for g in games) / len(games),
+              'candidate_max_b2b': sum(g.player_max_b2b for g in games) / len(games),
+              'baseline_max_b2b': sum(g.ai_max_b2b for g in games) / len(games),
+              'candidate_topouts': sum(g.winner == 'ai' for g in games),
+              'baseline_topouts': sum(g.winner == 'player' for g in games),
           }
-          print('TOURNAMENT_RESULT=' + json.dumps(out, sort_keys=True))
+          print('VERSUS_RESULT=' + json.dumps(out, sort_keys=True))
           PY
 
   full-validation:
