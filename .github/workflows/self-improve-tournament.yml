@@ -8,18 +8,16 @@ on:
       - .github/workflows/self-improve-tournament.yml
 
 jobs:
-  fresh:
-    name: fresh (${{ matrix.candidate }})
+  versus:
+    name: versus (${{ matrix.candidate }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 2
       matrix:
         candidate:
-          - baseline
           - emergency_slot_liquidation
-          - downstack_combo_relief
-          - attack_slot_option
+          - pending_height_coupling
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -32,5 +30,5 @@ jobs:
       - name: Evaluate
         env:
           CANDIDATE: ${{ matrix.candidate }}
-          STAGE: fresh
+          STAGE: versus
         run: uv run --no-sync python tools/self_improve_round.py
