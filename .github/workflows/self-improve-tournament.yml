@@ -8,29 +8,18 @@ on:
       - .github/workflows/self-improve-tournament.yml
 
 jobs:
-  short:
-    name: short (${{ matrix.candidate }})
+  fresh:
+    name: fresh (${{ matrix.candidate }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 15
+      max-parallel: 4
       matrix:
         candidate:
           - baseline
           - emergency_slot_liquidation
-          - setup_relief_synergy
-          - imminent_t_depth_guard
-          - attack_slot_option
           - downstack_combo_relief
-          - difficult_depth_exit
-          - t_arrival_stack_reset
-          - slot_single_supply_low
-          - setup_b2b_reentry_clean
-          - hold_escape_clean
-          - pending_height_coupling
-          - pending_hole_coupling
-          - ko_sent_pressure
-          - cancel_survival_margin
+          - attack_slot_option
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -43,5 +32,5 @@ jobs:
       - name: Evaluate
         env:
           CANDIDATE: ${{ matrix.candidate }}
-          STAGE: short
+          STAGE: fresh
         run: uv run --no-sync python tools/self_improve_round.py
