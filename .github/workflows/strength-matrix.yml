@@ -8,19 +8,17 @@ on:
       - '.github/workflows/strength-matrix.yml'
 
 jobs:
-  fresh:
+  versus:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 2
       matrix:
         candidate:
-          - baseline
           - t_window_reserve
-          - t_supply_safety_margin
-          - slot_survival_margin
+          - net_pending_advantage
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --extra game
-      - run: uv run python tools/self_improve_matrix.py fresh '${{ matrix.candidate }}'
+      - run: uv run python tools/self_improve_matrix.py versus '${{ matrix.candidate }}'
