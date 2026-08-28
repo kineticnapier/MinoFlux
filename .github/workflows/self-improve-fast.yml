@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 env:
-  STAGE: short
+  STAGE: fresh
 
 jobs:
   candidate:
@@ -21,20 +21,9 @@ jobs:
       matrix:
         candidate:
           - baseline
-          - pressure_clean_exit
-          - pressure_hole_relief
-          - pressure_depth_relief
-          - pressure_height_relief
-          - pressure_surface_relief
-          - pressure_damage_cost
-          - spin_clean_exit
-          - b2b_clean_pressure
-          - danger_pressure_recovery
           - pressure_slot_preserve
-          - pressure_slot_create
-          - tspin_slot_exit
-          - downstack_pressure_exit
           - pressure_consistency
+          - danger_pressure_recovery
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -71,12 +60,12 @@ jobs:
               with open(p,encoding='utf-8') as f:
                   out.extend(json.load(f)['results'])
           with open('self-improve-fast-results.json','w',encoding='utf-8') as f:
-              json.dump({'stage':'short','results':out},f,indent=2)
+              json.dump({'stage':'fresh','results':out},f,indent=2)
           PY
       - name: Commit results
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add self-improve-fast-results.json
-          git commit -m 'Record parallel pressure-quality screen' || exit 0
+          git commit -m 'Record fresh pressure-quality finalists' || exit 0
           git push origin HEAD:self-improve
