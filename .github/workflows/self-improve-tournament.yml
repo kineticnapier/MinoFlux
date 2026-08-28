@@ -1,0 +1,44 @@
+name: Self improve tournament
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - tools/self_improve_tournament.py
+      - .github/workflows/self-improve-tournament.yml
+
+jobs:
+  short:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate:
+          - baseline
+          - slot_clean_exit
+          - slot_rebuild_after_spin
+          - t_arrival_clean_conversion
+          - t_near_preserve_exit
+          - non_t_setup_preservation
+          - b2b_tspin_conversion
+          - b2b_break_safety
+          - downstack_hole_recovery
+          - downstack_attack_recovery
+          - danger_clean_clear
+          - danger_height_escape
+          - hold_t_clean_reserve
+          - t_window_clean_capacity
+          - spin_downstack_followthrough
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --extra game
+      - name: Evaluate candidate
+        env:
+          CANDIDATE: ${{ matrix.candidate }}
+          STAGE: short
+        run: uv run python tools/self_improve_tournament.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: short-${{ matrix.candidate }}
+          path: result.json
