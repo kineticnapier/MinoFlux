@@ -7,6 +7,8 @@ import os
 import minoflux_ai.heuristic as heuristic
 from minoflux_ai import DEFAULT_WEIGHTS, SearchConfig, run_heuristic_benchmark
 from minoflux_ai.features import extract_board_features
+from minoflux_ai.versus_benchmark import run_versus_benchmark
+from minoflux_ai.versus_search import VersusSearchConfig
 
 CANDIDATE = os.environ.get("CANDIDATE", "baseline")
 STAGE = os.environ.get("STAGE", "short")
@@ -88,6 +90,39 @@ def patched_context(game, features, weights):
 
 heuristic._context_score = patched_context
 
+cfg = SearchConfig(allow_hold=True, lookahead_pieces=1, beam_width=4, discount=0.9)
+weights = DEFAULT_WEIGHTS if CANDIDATE == "baseline" else CANDIDATE_WEIGHTS
+
+if STAGE == "versus":
+    versus_cfg = VersusSearchConfig(placement_search=cfg, candidate_width=6, opponent_reply_width=1)
+    result = run_versus_benchmark(
+        games=8,
+        max_turns=120,
+        seed_base=91021,
+        seed_step=193,
+        player_weights=weights,
+        ai_weights=DEFAULT_WEIGHTS,
+        player_config=versus_cfg,
+        ai_config=versus_cfg,
+        garbage_cap=8,
+    )
+    payload = result.to_dict()
+    games = result.per_game
+    payload.update({
+        "candidate": CANDIDATE,
+        "stage": STAGE,
+        "playerMeanCanceled": sum(g.player_canceled for g in games) / len(games),
+        "aiMeanCanceled": sum(g.ai_canceled for g in games) / len(games),
+        "playerMeanReceived": sum(g.player_received for g in games) / len(games),
+        "aiMeanReceived": sum(g.ai_received for g in games) / len(games),
+        "playerMeanMaxB2B": sum(g.player_max_b2b for g in games) / len(games),
+        "aiMeanMaxB2B": sum(g.ai_max_b2b for g in games) / len(games),
+        "playerTopouts": result.ai_wins,
+        "aiTopouts": result.player_wins,
+    })
+    print("RESULT=" + json.dumps(payload, separators=(",", ":")))
+    raise SystemExit(0)
+
 if STAGE == "short":
     games, pieces, seed = 2, 120, 41001
 elif STAGE == "fresh":
@@ -95,8 +130,6 @@ elif STAGE == "fresh":
 else:
     raise SystemExit(f"unknown STAGE={STAGE}")
 
-cfg = SearchConfig(allow_hold=True, lookahead_pieces=1, beam_width=4, discount=0.9)
-weights = DEFAULT_WEIGHTS if CANDIDATE == "baseline" else CANDIDATE_WEIGHTS
 result = run_heuristic_benchmark(
     games=games,
     max_pieces=pieces,
