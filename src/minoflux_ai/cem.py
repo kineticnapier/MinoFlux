@@ -17,7 +17,12 @@ TRAINABLE_WEIGHT_NAMES = tuple(item.name for item in fields(HeuristicWeights) if
 
 FITNESS_PROFILE_BALANCED = "balanced"
 FITNESS_PROFILE_ATTACK_SPIN = "attack_spin"
-FITNESS_PROFILE_NAMES = (FITNESS_PROFILE_ATTACK_SPIN, FITNESS_PROFILE_BALANCED)
+FITNESS_PROFILE_CLEAN_ATTACK = "clean_attack"
+FITNESS_PROFILE_NAMES = (
+    FITNESS_PROFILE_CLEAN_ATTACK,
+    FITNESS_PROFILE_ATTACK_SPIN,
+    FITNESS_PROFILE_BALANCED,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +41,11 @@ class FitnessProfile:
     perfect_clears: float
     completion_bonus: float
     topout_penalty: float
+    mean_holes_penalty: float = 0.0
+    mean_hole_depth_penalty: float = 0.0
+    mean_bumpiness_penalty: float = 0.0
+    mean_max_height_penalty: float = 0.0
+    high_stack_penalty: float = 0.0
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -75,9 +85,35 @@ ATTACK_SPIN_FITNESS = FitnessProfile(
     topout_penalty=0.25,
 )
 
+# Offensive strength still dominates, but ugly/fragile stacks can no longer buy
+# their way to the top of CEM solely with short-term attack. Board penalties use
+# time-averaged telemetry from every placement rather than only the final board.
+CLEAN_ATTACK_FITNESS = FitnessProfile(
+    name=FITNESS_PROFILE_CLEAN_ATTACK,
+    pieces=0.20,
+    lines=0.25,
+    attack=8.0,
+    spins=0.0,
+    spin_lines=1.0,
+    t_spin_minis=0.25,
+    t_spin_mini_singles=1.0,
+    t_spin_singles=4.0,
+    t_spin_doubles=12.0,
+    t_spin_triples=20.0,
+    perfect_clears=24.0,
+    completion_bonus=0.75,
+    topout_penalty=2.50,
+    mean_holes_penalty=18.0,
+    mean_hole_depth_penalty=4.0,
+    mean_bumpiness_penalty=2.0,
+    mean_max_height_penalty=3.0,
+    high_stack_penalty=1.50,
+)
+
 _FITNESS_PROFILES = {
     BALANCED_FITNESS.name: BALANCED_FITNESS,
     ATTACK_SPIN_FITNESS.name: ATTACK_SPIN_FITNESS,
+    CLEAN_ATTACK_FITNESS.name: CLEAN_ATTACK_FITNESS,
 }
 
 
@@ -223,6 +259,7 @@ def benchmark_fitness(
     cfg = resolve_fitness_profile(profile)
     completion_bonus = (result.completed / result.games) * result.max_pieces * cfg.completion_bonus
     topout_penalty = (result.topouts / result.games) * result.max_pieces * cfg.topout_penalty
+    high_stack_penalty = result.high_stack_fraction * result.max_pieces * cfg.high_stack_penalty
     return (
         result.mean_pieces * cfg.pieces
         + result.mean_lines * cfg.lines
@@ -237,6 +274,11 @@ def benchmark_fitness(
         + result.mean_perfect_clears * cfg.perfect_clears
         + completion_bonus
         - topout_penalty
+        - result.mean_holes * cfg.mean_holes_penalty
+        - result.mean_hole_depth * cfg.mean_hole_depth_penalty
+        - result.mean_bumpiness * cfg.mean_bumpiness_penalty
+        - result.mean_max_height * cfg.mean_max_height_penalty
+        - high_stack_penalty
     )
 
 
