@@ -10,6 +10,7 @@ from minoflux_ai.heuristic import (
     PlacementFeatures,
     _center_garbage_resilience_score,
     _context_score,
+    _garbage_tspin_recovery_score,
     score_features,
 )
 from minoflux_engine import Game
@@ -33,6 +34,10 @@ class FastPlacementEvaluationTests(unittest.TestCase):
             spin=result.spin,
             t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
             center_garbage_resilience=_center_garbage_resilience_score(
+                simulation.board,
+                simulation.width,
+            ),
+            garbage_tspin_recovery=_garbage_tspin_recovery_score(
                 simulation.board,
                 simulation.width,
             ),
