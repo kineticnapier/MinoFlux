@@ -5,6 +5,7 @@ from copy import copy
 from dataclasses import asdict, dataclass
 from heapq import nlargest
 import random
+from typing import Protocol, Sequence
 
 from minoflux_engine import Game, LockResult, Placement
 
@@ -92,6 +93,60 @@ class _BeamNode:
     first_evaluation: PlacementEvaluation
 
 
+class SearchScorer(Protocol):
+    """Batch scorer for replacing heuristic leaf values without replacing move generation."""
+
+    def score_many(
+        self,
+        game: Game,
+        evaluations: Sequence[PlacementEvaluation],
+    ) -> Sequence[float]: ...
+
+
+def _evaluation_key(item: PlacementEvaluation) -> tuple[float, int, int, int, int, int, int, int]:
+    return (
+        item.score,
+        item.features.attack,
+        item.features.spin_lines,
+        item.features.lines,
+        -item.features.board.holes,
+        -item.features.board.max_height,
+        -item.placement.rotation,
+        -item.placement.x,
+    )
+
+
+def _score_evaluations(
+    game: Game,
+    evaluations: Sequence[PlacementEvaluation],
+    scorer: SearchScorer,
+    limit: int | None,
+) -> tuple[PlacementEvaluation, ...]:
+    if not evaluations:
+        return ()
+    values = tuple(float(value) for value in scorer.score_many(game, evaluations))
+    if len(values) != len(evaluations):
+        raise ValueError(
+            f"Search scorer returned {len(values)} values for {len(evaluations)} placements"
+        )
+    rescored = tuple(
+        PlacementEvaluation(
+            placement=evaluation.placement,
+            score=score,
+            features=evaluation.features,
+        )
+        for evaluation, score in zip(evaluations, values)
+    )
+    if limit is None:
+        return tuple(sorted(rescored, key=_evaluation_key, reverse=True))
+    count = max(0, int(limit))
+    if count == 0:
+        return ()
+    if count < len(rescored):
+        return tuple(nlargest(count, rescored, key=_evaluation_key))
+    return tuple(sorted(rescored, key=_evaluation_key, reverse=True))
+
+
 def _candidate_key(item: tuple[SearchAction, PlacementEvaluation]) -> tuple[float, int, int, int, int, int, int, int]:
     action, evaluation = item
     features = evaluation.features
@@ -123,32 +178,46 @@ def rank_search_actions(
     config: SearchConfig = DEFAULT_SEARCH_CONFIG,
     *,
     limit: int | None = None,
+    scorer: SearchScorer | None = None,
 ) -> tuple[tuple[SearchAction, PlacementEvaluation], ...]:
     cfg = config.normalized()
     branch_limit = None if limit is None else max(1, int(limit))
     direct_placements = _placements_for_game(game, cfg)
+    direct_evaluations = rank_placements(
+        game,
+        weights,
+        placements=direct_placements,
+        # A custom scorer must see the whole legal branch before pruning; otherwise
+        # the heuristic would silently decide which neural candidates are visible.
+        limit=branch_limit if scorer is None else None,
+    )
+    if scorer is not None:
+        direct_evaluations = _score_evaluations(game, direct_evaluations, scorer, branch_limit)
     candidates: list[tuple[SearchAction, PlacementEvaluation]] = [
         (SearchAction(False, evaluation.placement), evaluation)
-        for evaluation in rank_placements(
-            game,
-            weights,
-            placements=direct_placements,
-            limit=branch_limit,
-        )
+        for evaluation in direct_evaluations
     ]
 
     if cfg.allow_hold and not game.hold_used and not game.game_over:
         held = clone_game(game)
         if held.hold():
             held_placements = _placements_for_game(held, cfg)
+            held_evaluations = rank_placements(
+                held,
+                weights,
+                placements=held_placements,
+                limit=branch_limit if scorer is None else None,
+            )
+            if scorer is not None:
+                held_evaluations = _score_evaluations(
+                    held,
+                    held_evaluations,
+                    scorer,
+                    branch_limit,
+                )
             candidates.extend(
                 (SearchAction(True, evaluation.placement), evaluation)
-                for evaluation in rank_placements(
-                    held,
-                    weights,
-                    placements=held_placements,
-                    limit=branch_limit,
-                )
+                for evaluation in held_evaluations
             )
 
     if limit is not None:
@@ -187,10 +256,18 @@ def choose_search_action(
     game: Game,
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
     config: SearchConfig = DEFAULT_SEARCH_CONFIG,
+    *,
+    scorer: SearchScorer | None = None,
 ) -> SearchChoice | None:
     cfg = config.normalized()
     root_limit = 1 if cfg.lookahead_pieces == 0 else cfg.beam_width
-    ranked_root = rank_search_actions(game, weights, cfg, limit=root_limit)
+    ranked_root = rank_search_actions(
+        game,
+        weights,
+        cfg,
+        limit=root_limit,
+        scorer=scorer,
+    )
     if not ranked_root:
         return None
 
@@ -225,6 +302,7 @@ def choose_search_action(
                 weights,
                 cfg,
                 limit=cfg.beam_width,
+                scorer=scorer,
             ):
                 child = clone_game(node.game)
                 apply_search_action(child, action)
