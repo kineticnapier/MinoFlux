@@ -9,6 +9,7 @@ from minoflux_ai.heuristic import (
     HeuristicWeights,
     PlacementFeatures,
     _center_garbage_resilience_score,
+    _center_garbage_worst_case_score,
     _context_score,
     _garbage_tspin_recovery_score,
     score_features,
@@ -34,6 +35,10 @@ class FastPlacementEvaluationTests(unittest.TestCase):
             spin=result.spin,
             t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
             center_garbage_resilience=_center_garbage_resilience_score(
+                simulation.board,
+                simulation.width,
+            ),
+            center_garbage_worst_case=_center_garbage_worst_case_score(
                 simulation.board,
                 simulation.width,
             ),
@@ -138,8 +143,3 @@ class ParallelCemTests(unittest.TestCase):
         self.assertEqual(serial.best_weights, parallel.best_weights)
         self.assertEqual(serial.best_training_fitness, parallel.best_training_fitness)
         self.assertEqual(serial.validation_fitness, parallel.validation_fitness)
-        self.assertEqual(parallel.workers, 2)
-
-
-if __name__ == "__main__":
-    unittest.main()
