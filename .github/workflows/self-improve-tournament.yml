@@ -9,23 +9,14 @@ on:
   workflow_dispatch:
 
 jobs:
-  fresh:
+  versus:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        candidate:
-          - baseline
-          - t_near_garbage_recovery
-          - garbage_safe_attack
-          - t_arrival_recovery
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --extra dev
-      - run: uv run python tools/self_improve_tournament.py --candidate "${{ matrix.candidate }}" --stage fresh --output "results/${{ matrix.candidate }}.json"
+      - run: uv run python tools/self_improve_tournament.py --candidate t_near_garbage_recovery --stage versus --output results/t_near_garbage_recovery.json
       - uses: actions/upload-artifact@v4
         with:
-          name: fresh-${{ matrix.candidate }}
-          path: results/${{ matrix.candidate }}.json
+          name: versus-t_near_garbage_recovery
+          path: results/t_near_garbage_recovery.json
