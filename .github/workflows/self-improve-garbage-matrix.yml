@@ -1,0 +1,144 @@
+name: Self-improve garbage matrix
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - 'tools/self_improve_garbage_candidate.py'
+      - '.github/workflows/self-improve-garbage-matrix.yml'
+  workflow_dispatch:
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: [baseline, garbage_profile_min, garbage_profile_mean, garbage_profile_variance, garbage_tspin_recovery, garbage_hole_access, garbage_b2b_recovery, t_near_garbage_ready, attack_resilient_exit, spin_resilient_exit, danger_attack_cancel_proxy, adaptive_spike_2_4_6, worst_spike_2_4_6, hold_garbage_flex, garbage_clean_setup_balance]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --extra dev
+      - run: uv run python tools/self_improve_garbage_candidate.py screen '${{ matrix.candidate }}' 'screen-${{ matrix.candidate }}.json'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screen-${{ matrix.candidate }}
+          path: screen-${{ matrix.candidate }}.json
+
+  screen-summary:
+    needs: screen
+    runs-on: ubuntu-latest
+    outputs:
+      fresh: ${{ steps.pick.outputs.fresh }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: screen-*
+          merge-multiple: true
+          path: results
+      - id: pick
+        shell: python
+        run: |
+          import glob,json,os
+          rows=[json.load(open(p)) for p in glob.glob('results/*.json')]
+          base=next(x for x in rows if x['name']=='baseline')
+          safe=[x for x in rows if x['name']!='baseline' and x['topouts']<=base['topouts'] and x['completed']>=base['completed']]
+          key=lambda x:(x['completed'],-x['topouts'],x['app'],x['spin_lines'],x['t_spin_doubles'],x['pieces'])
+          top=sorted(safe,key=key,reverse=True)[:3]
+          names=['baseline']+[x['name'] for x in top]
+          open(os.environ['GITHUB_OUTPUT'],'a').write('fresh='+json.dumps(names,separators=(',',':'))+'\n')
+          json.dump({'baseline':base,'top3':[x['name'] for x in top],'screen':rows},open('screen-summary.json','w'),indent=2)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screen-summary
+          path: screen-summary.json
+
+  fresh:
+    needs: screen-summary
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ${{ fromJSON(needs.screen-summary.outputs.fresh) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --extra dev
+      - run: uv run python tools/self_improve_garbage_candidate.py fresh '${{ matrix.candidate }}' 'fresh-${{ matrix.candidate }}.json'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fresh-${{ matrix.candidate }}
+          path: fresh-${{ matrix.candidate }}.json
+
+  fresh-summary:
+    needs: fresh
+    runs-on: ubuntu-latest
+    outputs:
+      finalists: ${{ steps.pick.outputs.finalists }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fresh-*
+          merge-multiple: true
+          path: results
+      - id: pick
+        shell: python
+        run: |
+          import glob,json,os
+          rows=[json.load(open(p)) for p in glob.glob('results/*.json')]
+          base=next(x for x in rows if x['name']=='baseline')
+          key=lambda x:(x['completed'],-x['topouts'],x['app'],x['spin_lines'],x['t_spin_doubles'],x['pieces'])
+          safe=[x for x in rows if x['name']!='baseline' and x['topouts']<=base['topouts'] and x['completed']>=base['completed'] and x['app']>=base['app']]
+          top=sorted(safe,key=key,reverse=True)[:2]
+          names=[x['name'] for x in top] or ['__none__']
+          open(os.environ['GITHUB_OUTPUT'],'a').write('finalists='+json.dumps(names,separators=(',',':'))+'\n')
+          json.dump({'baseline':base,'finalists':[x['name'] for x in top],'fresh':rows},open('fresh-summary.json','w'),indent=2)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fresh-summary
+          path: fresh-summary.json
+
+  versus:
+    needs: fresh-summary
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ${{ fromJSON(needs.fresh-summary.outputs.finalists) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --extra dev
+      - run: uv run python tools/self_improve_garbage_candidate.py versus '${{ matrix.candidate }}' 'versus-${{ matrix.candidate }}.json'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: versus-${{ matrix.candidate }}
+          path: versus-${{ matrix.candidate }}.json
+
+  final-summary:
+    needs: [screen-summary, fresh-summary, versus]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-summary'
+          merge-multiple: true
+          path: summaries
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: versus-*
+          merge-multiple: true
+          path: versus
+      - shell: python
+        run: |
+          import glob,json
+          payload={}
+          for p in glob.glob('summaries/*.json'):
+            payload.update(json.load(open(p)))
+          payload['versus']=[json.load(open(p)) for p in glob.glob('versus/*.json')]
+          json.dump(payload,open('tournament-summary.json','w'),indent=2)
+          print(json.dumps(payload,separators=(',',':')))
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tournament-summary
+          path: tournament-summary.json
