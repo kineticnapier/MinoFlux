@@ -1,0 +1,42 @@
+name: Self improve tournament
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - tools/self_improve_tournament.py
+      - .github/workflows/self-improve-tournament.yml
+  workflow_dispatch:
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 15
+      matrix:
+        candidate:
+          - baseline
+          - t_near_garbage_recovery
+          - t_near_garbage_resilience
+          - attack_garbage_reserve
+          - b2b_garbage_recovery
+          - b2b_break_resilience
+          - t_arrival_recovery
+          - slot_loss_garbage_risk
+          - slot_gain_garbage_quality
+          - garbage_safe_attack
+          - danger_garbage_resilience
+          - danger_tspin_recovery
+          - hold_t_garbage_buffer
+          - queue_supply_recovery
+          - clean_pressure_release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --extra dev
+      - run: uv run python tools/self_improve_tournament.py --candidate "${{ matrix.candidate }}" --stage screen --output "results/${{ matrix.candidate }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screen-${{ matrix.candidate }}
+          path: results/${{ matrix.candidate }}.json
