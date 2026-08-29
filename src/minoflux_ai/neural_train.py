@@ -193,6 +193,7 @@ def _prepare_batch(
 def _loss_and_ranks(
     values: Any,
     groups: Sequence[tuple[int, int, int]],
+    torch: Any,
     F: Any,
     margin: float,
 ) -> tuple[Any, int, int, float]:
@@ -203,7 +204,7 @@ def _loss_and_ranks(
     for start, end, expert_index in groups:
         group = values[start:end]
         expert_value = group[expert_index]
-        rivals = torch_cat_without(group, expert_index)
+        rivals = torch.cat((group[:expert_index], group[expert_index + 1 :]))
         if rivals.numel() == 0:
             losses.append(group.sum() * 0.0)
         else:
@@ -212,24 +213,15 @@ def _loss_and_ranks(
         top1 += int(rank == 1)
         top3 += int(rank <= 3)
         rank_total += rank
-    return values.new_tensor(0.0) if not losses else values.new_tensor(1.0) * __stack_mean(losses), top1, top3, rank_total
-
-
-def torch_cat_without(values: Any, index: int) -> Any:
-    import torch
-    return torch.cat((values[:index], values[index + 1 :]))
-
-
-def __stack_mean(values: Sequence[Any]) -> Any:
-    import torch
-    return torch.stack(tuple(values)).mean()
+    loss = values.sum() * 0.0 if not losses else torch.stack(losses).mean()
+    return loss, top1, top3, rank_total
 
 
 def _iter_batches(
     records: Sequence[dict[str, object]],
     batch_size: int,
     rng: random.Random | None = None,
-) -> Sequence[list[dict[str, object]]]:
+) -> list[list[dict[str, object]]]:
     ordered = list(records)
     if rng is not None:
         rng.shuffle(ordered)
@@ -259,7 +251,7 @@ def _evaluate(
             boards, contexts, groups = _prepare_batch(batch, cfg, torch, device)
             values = model(boards, contexts)
             loss, batch_top1, batch_top3, batch_rank_total = _loss_and_ranks(
-                values, groups, F, margin
+                values, groups, torch, F, margin
             )
             count = len(groups)
             loss_total += float(loss.detach().cpu().item()) * count
@@ -330,7 +322,7 @@ def train_neural_value_model(
             boards, contexts, groups = _prepare_batch(batch, neural_config, torch, device)
             optimizer.zero_grad(set_to_none=True)
             values = model(boards, contexts)
-            loss, _, _, _ = _loss_and_ranks(values, groups, F, cfg.margin)
+            loss, _, _, _ = _loss_and_ranks(values, groups, torch, F, cfg.margin)
             loss.backward()
             optimizer.step()
             count = len(groups)

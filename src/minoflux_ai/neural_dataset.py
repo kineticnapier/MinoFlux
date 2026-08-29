@@ -166,11 +166,7 @@ def generate_neural_ranking_samples(
         seed = cfg.seed_base + game_index * cfg.seed_step
         game = Game(seed)
         while not game.game_over and game.pieces_placed < cfg.max_pieces:
-            # The label is the action the current Champion search would actually play.
-            # We intentionally do not train against the numeric heuristic score.
-            expert = choose_search_action(game, weights, cfg.search_config)
-            if expert is None:
-                break
+            # Enumerate the full root once so the dataset can keep hard alternatives.
             ranked = rank_search_actions(
                 game,
                 weights,
@@ -179,9 +175,22 @@ def generate_neural_ranking_samples(
             )
             if not ranked:
                 break
-            source = _keep_hard_candidates(ranked, expert.action, cfg.max_candidates)
+
+            # With no future lookahead, the best root candidate is exactly the move
+            # Champion would choose, so avoid a second identical SRS/search pass.
+            if cfg.search_config.lookahead_pieces == 0:
+                expert_action = ranked[0][0]
+            else:
+                expert = choose_search_action(game, weights, cfg.search_config)
+                if expert is None:
+                    break
+                expert_action = expert.action
+
+            # The label is the action Champion actually chooses. Numeric heuristic
+            # scores are deliberately not stored as neural regression targets.
+            source = _keep_hard_candidates(ranked, expert_action, cfg.max_candidates)
             actions = [action for action, _ in source]
-            if expert.action not in actions:
+            if expert_action not in actions:
                 raise AssertionError("Expert action disappeared from neural ranking candidates")
             candidates = tuple(
                 _candidate_state(game, action, cfg.neural_config)
@@ -190,10 +199,10 @@ def generate_neural_ranking_samples(
             yield NeuralRankingSample(
                 seed=seed,
                 piece_index=game.pieces_placed,
-                expert_index=actions.index(expert.action),
+                expert_index=actions.index(expert_action),
                 candidates=candidates,
             )
-            apply_search_action(game, expert.action)
+            apply_search_action(game, expert_action)
 
 
 def write_neural_ranking_dataset(
