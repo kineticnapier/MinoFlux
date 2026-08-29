@@ -37,6 +37,7 @@ class HeuristicWeights:
     center_garbage_worst_case: float = 1.000000
     garbage_tspin_recovery: float = 1.000000
     garbage_slot_supply_floor: float = 1.000000
+    garbage_slot_danger_survival: float = 1.000000
     new_holes: float = -1.200000
     lines: float = 0.760666
     attack: float = 0.850000
@@ -209,6 +210,10 @@ def _context_score(game: Game, features: PlacementFeatures, weights: HeuristicWe
         game,
         features.garbage_t_spin_slot_floor,
     )
+    garbage_slot_danger_survival = _garbage_slot_danger_survival_score(
+        game,
+        features,
+    )
     return (
         supply_match * weights.t_spin_slot_supply_match
         + queue_match * weights.t_spin_slot_queue_match
@@ -216,6 +221,7 @@ def _context_score(game: Game, features: PlacementFeatures, weights: HeuristicWe
         + arrival_conversion * weights.t_arrival_conversion
         + hold_t_supply_balance * weights.hold_t_supply_balance
         + garbage_slot_supply_floor * weights.garbage_slot_supply_floor
+        + garbage_slot_danger_survival * weights.garbage_slot_danger_survival
     )
 
 
@@ -240,6 +246,18 @@ def _garbage_slot_supply_floor_score(game: Game, slot_floor: int) -> float:
     matched = min(slot_floor, supply)
     surplus = max(0, slot_floor - supply)
     return 0.30 * matched - 0.22 * surplus
+
+
+def _garbage_slot_danger_survival_score(game: Game, features: PlacementFeatures) -> float:
+    """Prefer T supply that survives the worst center spike and penalize fragile setups."""
+
+    supply = _t_supply_count(game) + int(game.hold_piece == "T")
+    floor = features.garbage_t_spin_slot_floor
+    matched = min(floor, supply)
+    unmatched = max(0, floor - supply)
+    danger = max(0.0, -features.center_garbage_worst_case)
+    fragile_slots = max(0, features.board.t_spin_slots - floor)
+    return 0.34 * matched - 0.28 * unmatched - 0.05 * danger * fragile_slots
 
 
 def _center_garbage_resilience_score(board: list[list[str | None]], width: int) -> float:
