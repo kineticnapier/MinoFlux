@@ -1,0 +1,23 @@
+name: Self improve future clean versus
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - tools/self_improve_future_clean_versus.py
+      - .github/workflows/self-improve-future-clean-versus.yml
+  workflow_dispatch:
+
+jobs:
+  versus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --extra dev
+      - run: uv run python tools/self_improve_future_clean_versus.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: future-clean-versus-results
+          path: versus-results.json
