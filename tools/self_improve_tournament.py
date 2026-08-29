@@ -37,14 +37,14 @@ SEARCH = SearchConfig(allow_hold=True, lookahead_pieces=0, beam_width=4, discoun
 def _next_t_distance(game: Game) -> int:
     if game.current == "T":
         return 0
-    for i, piece in enumerate(game.queue[:6]):
+    for i, piece in enumerate(list(game.queue)[:6]):
         if piece == "T":
             return i + 1
     return 7
 
 
 def _t_supply(game: Game) -> int:
-    return int(game.current == "T") + int(game.hold_piece == "T") + sum(piece == "T" for piece in game.queue[:6])
+    return int(game.current == "T") + int(game.hold_piece == "T") + sum(piece == "T" for piece in list(game.queue)[:6])
 
 
 def _stress_board(board: Sequence[Sequence[str | None]], width: int, hole: int, lines: int = 4):
