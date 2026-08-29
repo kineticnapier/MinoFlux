@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 HEURISTIC = Path("src/minoflux_ai/heuristic.py")
+FAST_TEST = Path("tests/test_cem_acceleration.py")
 TEST = Path("tests/test_garbage_slot_supply_floor.py")
 WORKFLOW = Path(".github/workflows/self-improve-tournament.yml")
 SELF = Path("tools/self_improve_tournament.py")
@@ -46,6 +47,23 @@ for old, new in replacements:
     text = text.replace(old, new, 1)
 
 HEURISTIC.write_text(text, encoding="utf-8")
+
+fast_text = FAST_TEST.read_text(encoding="utf-8")
+fast_replacements = [
+    (
+        "    _garbage_tspin_recovery_score,\n    score_features,\n",
+        "    _garbage_t_spin_slot_floor,\n    _garbage_tspin_recovery_score,\n    score_features,\n",
+    ),
+    (
+        "            garbage_tspin_recovery=_garbage_tspin_recovery_score(\n                simulation.board,\n                simulation.width,\n            ),\n        )\n",
+        "            garbage_tspin_recovery=_garbage_tspin_recovery_score(\n                simulation.board,\n                simulation.width,\n            ),\n            garbage_t_spin_slot_floor=_garbage_t_spin_slot_floor(\n                simulation.board,\n                simulation.width,\n            ),\n        )\n",
+    ),
+]
+for old, new in fast_replacements:
+    if old not in fast_text:
+        raise RuntimeError(f"Expected fast-test anchor not found: {old[:80]!r}")
+    fast_text = fast_text.replace(old, new, 1)
+FAST_TEST.write_text(fast_text, encoding="utf-8")
 
 TEST.write_text(
     '''from __future__ import annotations
