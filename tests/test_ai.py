@@ -18,6 +18,7 @@ from minoflux_ai import (
 from minoflux_ai.features import BoardFeatures
 from minoflux_ai.heuristic import (
     PlacementFeatures,
+    _garbage_tspin_recovery_score,
     _hold_t_supply_balance_score,
     _t_spin_slot_queue_match_score,
     _t_spin_slot_supply_match,
@@ -205,6 +206,68 @@ class HeuristicTests(unittest.TestCase):
         self.assertAlmostEqual(_hold_t_supply_balance_score(game, 3), -0.44)
         self.assertEqual(game.snapshot(), before)
 
+    def test_garbage_tspin_recovery_matches_four_hole_average_without_mutation(self) -> None:
+        board = [[None] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
+        board[-1][1] = "J"
+        board[-1][2] = "L"
+        board[-2][4] = "S"
+        board[-1][5] = "Z"
+        before = [row.copy() for row in board]
+
+        slot_total = 0.0
+        quality_total = 0.0
+        for hole in (0, 3, 6, BOARD_WIDTH - 1):
+            stressed = [row.copy() for row in board]
+            for _ in range(4):
+                stressed.pop(0)
+                row = ["G"] * BOARD_WIDTH
+                row[hole] = None
+                stressed.append(row)
+            features = extract_board_features(stressed)
+            slot_total += features.t_spin_slots / (
+                1.0 + features.holes + features.max_height / 6.0
+            )
+            quality_total -= (
+                0.080 * features.holes
+                + 0.020 * features.hole_depth
+                + 0.030 * features.max_height
+            )
+        expected = 1.10 * slot_total / 4.0 + 0.20 * quality_total / 4.0
+
+        self.assertAlmostEqual(
+            _garbage_tspin_recovery_score(board, BOARD_WIDTH),
+            expected,
+        )
+        self.assertEqual(board, before)
+
+    def test_garbage_tspin_recovery_contributes_to_score(self) -> None:
+        board = BoardFeatures(
+            aggregate_height=0,
+            max_height=0,
+            holes=0,
+            hole_depth=0,
+            bumpiness=0,
+            wells=0,
+            t_spin_slots=0,
+            occupied_cells=0,
+        )
+        features = PlacementFeatures(
+            board=board,
+            new_holes=0,
+            lines=0,
+            attack=0,
+            spin_lines=0,
+            perfect_clear=False,
+            game_over=False,
+            garbage_tspin_recovery=0.75,
+        )
+        values = {name: 0.0 for name in DEFAULT_WEIGHTS.to_dict()}
+        values["garbage_tspin_recovery"] = 1.0
+        self.assertAlmostEqual(
+            score_features(features, HeuristicWeights.from_mapping(values)),
+            0.75,
+        )
+
     def test_weights_round_trip(self) -> None:
         custom = HeuristicWeights(
             holes=-4.5,
@@ -216,6 +279,7 @@ class HeuristicTests(unittest.TestCase):
             t_spin_slot_supply_match=0.6,
             t_spin_slot_queue_match=0.7,
             hold_t_supply_balance=0.8,
+            garbage_tspin_recovery=0.85,
         )
         with TemporaryDirectory() as directory:
             path = save_weights(f"{directory}/weights.json", custom)
@@ -270,6 +334,15 @@ class HeuristicTests(unittest.TestCase):
         self.assertEqual(
             loaded.hold_t_supply_balance,
             DEFAULT_WEIGHTS.hold_t_supply_balance,
+        )
+
+    def test_old_weight_mapping_uses_garbage_tspin_recovery_default(self) -> None:
+        old_weights = DEFAULT_WEIGHTS.to_dict()
+        old_weights.pop("garbage_tspin_recovery")
+        loaded = HeuristicWeights.from_mapping(old_weights)
+        self.assertEqual(
+            loaded.garbage_tspin_recovery,
+            DEFAULT_WEIGHTS.garbage_tspin_recovery,
         )
 
     def test_unknown_weight_is_rejected(self) -> None:
