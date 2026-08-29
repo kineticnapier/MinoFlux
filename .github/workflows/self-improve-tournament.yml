@@ -1,4 +1,4 @@
-name: Self improve tournament
+name: Apply self-improvement winner
 
 on:
   push:
@@ -11,9 +11,9 @@ permissions:
   contents: write
 
 jobs:
-  tournament:
+  apply:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,12 +22,15 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Sync
         run: uv sync --extra dev
-      - name: Run tournament
+      - name: Apply winner
         run: uv run python tools/self_improve_tournament.py
-      - name: Commit results
+      - name: Run tests
+        run: uv run pytest -q
+      - name: Commit winner
         run: |
           git config user.name "MinoFlux self-improve"
           git config user.email "actions@users.noreply.github.com"
-          git add data/self-improve/latest-tournament.json
-          git commit -m "Record self-improvement tournament results" || exit 0
+          git add -A
+          git commit -m "Adopt garbage slot supply floor" || exit 0
+          git pull --rebase origin self-improve
           git push origin HEAD:self-improve
