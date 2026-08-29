@@ -1,0 +1,24 @@
+name: Self improve frontier fast
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - 'tools/self_improve_frontier_tournament_fast.py'
+      - '.github/workflows/self-improve-frontier-fast.yml'
+
+jobs:
+  tournament:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --extra dev
+      - name: Run staged tournament
+        working-directory: tools
+        run: uv run python self_improve_frontier_tournament_fast.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: self-improve-frontier-fast-result
+          path: tools/tournament-result-fast.json
