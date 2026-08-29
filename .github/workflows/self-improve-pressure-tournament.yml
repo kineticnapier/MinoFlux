@@ -1,0 +1,29 @@
+name: Self improve pressure tournament
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - 'tools/self_improve_pressure_tournament.py'
+      - '.github/workflows/self-improve-pressure-tournament.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  tournament:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync package
+        run: uv sync --extra dev
+      - name: Run tournament
+        run: uv run python tools/self_improve_pressure_tournament.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pressure-tournament-result
+          path: pressure-tournament-result.json
+          if-no-files-found: warn
