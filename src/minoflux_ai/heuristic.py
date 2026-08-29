@@ -34,6 +34,7 @@ class HeuristicWeights:
     t_arrival_conversion: float = 1.000000
     hold_t_supply_balance: float = 1.000000
     center_garbage_resilience: float = 1.000000
+    center_garbage_worst_case: float = 1.000000
     garbage_tspin_recovery: float = 1.000000
     new_holes: float = -1.200000
     lines: float = 0.760666
@@ -71,6 +72,7 @@ class PlacementFeatures:
     spin: str | None = None
     t_spin_slot_delta: int = 0
     center_garbage_resilience: float = 0.0
+    center_garbage_worst_case: float = 0.0
     garbage_tspin_recovery: float = 0.0
 
     def to_dict(self) -> dict[str, object]:
@@ -78,6 +80,7 @@ class PlacementFeatures:
         value.update({
             "t_spin_slot_delta": self.t_spin_slot_delta,
             "center_garbage_resilience": self.center_garbage_resilience,
+            "center_garbage_worst_case": self.center_garbage_worst_case,
             "garbage_tspin_recovery": self.garbage_tspin_recovery,
             "new_holes": self.new_holes,
             "lines": self.lines,
@@ -116,6 +119,7 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
         + t_spin_slot_height_quality * weights.t_spin_slot_height_quality
         + t_spin_slot_low_clean * weights.t_spin_slot_low_clean
         + features.center_garbage_resilience * weights.center_garbage_resilience
+        + features.center_garbage_worst_case * weights.center_garbage_worst_case
         + features.garbage_tspin_recovery * weights.garbage_tspin_recovery
         + features.new_holes * weights.new_holes
         + features.lines * weights.lines
@@ -225,6 +229,28 @@ def _center_garbage_resilience_score(board: list[list[str | None]], width: int) 
     )
 
 
+def _center_garbage_worst_case_score(board: list[list[str | None]], width: int) -> float:
+    """Penalize the worst four-line spike among nearby center garbage holes."""
+
+    holes = tuple(sorted({min(width - 1, max(0, hole)) for hole in (3, 4, 5, 6)}))
+    dangers: list[float] = []
+    for hole in holes:
+        stressed = [row.copy() for row in board]
+        for _ in range(4):
+            stressed.pop(0)
+            garbage: list[str | None] = ["G"] * width
+            garbage[hole] = None
+            stressed.append(garbage)
+        features = extract_board_features(stressed)
+        dangers.append(
+            2.2 * features.holes
+            + 0.26 * features.hole_depth
+            + 0.72 * features.max_height
+            + 0.08 * features.bumpiness
+        )
+    return -0.15 * max(dangers, default=0.0)
+
+
 def _garbage_tspin_recovery_score(board: list[list[str | None]], width: int) -> float:
     """Reward boards that keep clean T-spin recovery options across likely garbage-hole positions."""
 
@@ -301,6 +327,7 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
     hidden_occupied = any(cell is not None for row in board[: game.hidden_rows] for cell in row)
     after = extract_board_features(board)
     center_garbage_resilience = _center_garbage_resilience_score(board, game.width)
+    center_garbage_worst_case = _center_garbage_worst_case_score(board, game.width)
     garbage_tspin_recovery = _garbage_tspin_recovery_score(board, game.width)
     return PlacementFeatures(
         board=after,
@@ -313,6 +340,7 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
         spin=spin,
         t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
         center_garbage_resilience=center_garbage_resilience,
+        center_garbage_worst_case=center_garbage_worst_case,
         garbage_tspin_recovery=garbage_tspin_recovery,
     )
 
