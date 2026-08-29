@@ -5,7 +5,13 @@ import unittest
 
 from minoflux_ai import CEMConfig, DEFAULT_WEIGHTS, choose_placement, evaluate_placement, train_cem
 from minoflux_ai.features import extract_board_features
-from minoflux_ai.heuristic import HeuristicWeights, PlacementFeatures, _context_score, score_features
+from minoflux_ai.heuristic import (
+    HeuristicWeights,
+    PlacementFeatures,
+    _center_garbage_resilience_score,
+    _context_score,
+    score_features,
+)
 from minoflux_engine import Game
 
 
@@ -26,6 +32,10 @@ class FastPlacementEvaluationTests(unittest.TestCase):
             game_over=result.game_over,
             spin=result.spin,
             t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
+            center_garbage_resilience=_center_garbage_resilience_score(
+                simulation.board,
+                simulation.width,
+            ),
         )
         return features, score_features(features, DEFAULT_WEIGHTS) + _context_score(
             game,
