@@ -21,6 +21,7 @@ dev = ["pytest>=8,<10"]
 minoflux = "minoflux.cli:main"
 minoflux-game = "minoflux.game:main"
 minoflux-lab = "minoflux.lab:main"
+minoflux-neural = "minoflux.neural_cli:main"
 minoflux-replay = "minoflux.replay:main"
 minoflux-versus = "minoflux.versus_ai:main"
 
