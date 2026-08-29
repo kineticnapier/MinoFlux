@@ -33,6 +33,7 @@ class HeuristicWeights:
     t_spin_slot_urgency_clean: float = 1.000000
     t_arrival_conversion: float = 1.000000
     hold_t_supply_balance: float = 1.000000
+    center_garbage_resilience: float = 1.000000
     new_holes: float = -1.200000
     lines: float = 0.760666
     attack: float = 0.850000
@@ -68,11 +69,13 @@ class PlacementFeatures:
     game_over: bool
     spin: str | None = None
     t_spin_slot_delta: int = 0
+    center_garbage_resilience: float = 0.0
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = self.board.to_dict()
         value.update({
             "t_spin_slot_delta": self.t_spin_slot_delta,
+            "center_garbage_resilience": self.center_garbage_resilience,
             "new_holes": self.new_holes,
             "lines": self.lines,
             "attack": self.attack,
@@ -109,6 +112,7 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
         + features.t_spin_slot_delta * weights.t_spin_slot_delta
         + t_spin_slot_height_quality * weights.t_spin_slot_height_quality
         + t_spin_slot_low_clean * weights.t_spin_slot_low_clean
+        + features.center_garbage_resilience * weights.center_garbage_resilience
         + features.new_holes * weights.new_holes
         + features.lines * weights.lines
         + features.attack * weights.attack
@@ -199,6 +203,24 @@ def _context_score(game: Game, features: PlacementFeatures, weights: HeuristicWe
     )
 
 
+def _center_garbage_resilience_score(board: list[list[str | None]], width: int) -> float:
+    """Score the post-placement board after a representative four-line center garbage spike."""
+
+    stressed = [row.copy() for row in board]
+    hole = min(width - 1, width // 2 - 1)
+    for _ in range(4):
+        stressed.pop(0)
+        garbage: list[str | None] = ["G"] * width
+        garbage[hole] = None
+        stressed.append(garbage)
+    features = extract_board_features(stressed)
+    return -(
+        0.075 * features.holes
+        + 0.018 * features.hole_depth
+        + 0.025 * features.max_height
+    )
+
+
 def _placement_features_fast(game: Game, placement: Placement, before: BoardFeatures) -> PlacementFeatures:
     spin_kind = classify_t_spin(
         game.board,
@@ -248,6 +270,7 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
 
     hidden_occupied = any(cell is not None for row in board[: game.hidden_rows] for cell in row)
     after = extract_board_features(board)
+    center_garbage_resilience = _center_garbage_resilience_score(board, game.width)
     return PlacementFeatures(
         board=after,
         new_holes=max(0, after.holes - before.holes),
@@ -258,6 +281,7 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
         game_over=topped_out or hidden_occupied,
         spin=spin,
         t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
+        center_garbage_resilience=center_garbage_resilience,
     )
 
 
