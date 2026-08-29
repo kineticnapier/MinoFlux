@@ -1,0 +1,28 @@
+name: Self-improve tournament
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - tools/self_improve_tournament.py
+      - .github/workflows/self-improve-tournament.yml
+  workflow_dispatch:
+
+jobs:
+  tournament:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync package
+        run: uv sync --extra dev
+      - name: Run tournament
+        env:
+          TOURNAMENT_WORKERS: 8
+        run: uv run python tools/self_improve_tournament.py
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-improve-tournament-result
+          path: tournament-result.json
