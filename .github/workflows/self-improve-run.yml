@@ -1,0 +1,33 @@
+name: Temporary self-improvement tournament
+
+on:
+  push:
+    branches: [self-improve]
+    paths:
+      - tools/self_improve_tournament.py
+      - .github/workflows/self-improve-run.yml
+
+permissions:
+  contents: write
+
+jobs:
+  tournament:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: self-improve
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync
+        run: uv sync --extra dev
+      - name: Run tournament
+        run: uv run python tools/self_improve_tournament.py
+      - name: Record result
+        run: |
+          git config user.name "MinoFlux self-improve"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/self-improve/latest-tournament.json
+          git commit -m "Record temporary self-improvement tournament" || exit 0
+          git push origin HEAD:self-improve
