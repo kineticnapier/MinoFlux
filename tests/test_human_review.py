@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from minoflux.human_review_pygame import _candidate_order
 from minoflux.neural_cli import build_parser
 from minoflux_ai import DEFAULT_WEIGHTS, SearchConfig
 from minoflux_ai.human_review import (
@@ -21,12 +22,14 @@ from minoflux_engine import Game
 def _queue_record() -> dict[str, object]:
     candidate = {
         "rows": [0] * 24,
+        "displayRows": ["." * 10] * 20,
         "context": [0.0] * 59,
         "move": {"hold": False, "piece": "T", "x": 3, "y": 20, "rotation": 0},
         "nnValue": 1.5,
     }
     other = {
         "rows": [1] * 24,
+        "displayRows": ["G" + "." * 9] * 20,
         "context": [0.0] * 59,
         "move": {"hold": True, "piece": "I", "x": 4, "y": 19, "rotation": 1},
         "nnValue": 1.4,
@@ -49,6 +52,7 @@ class HumanReviewTests(unittest.TestCase):
         candidates = labeled["candidates"]
         self.assertEqual(len(candidates), 2)
         self.assertNotIn("nnValue", candidates[0])
+        self.assertNotIn("displayRows", candidates[0])
 
     def test_append_human_label_deduplicates_position(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -59,7 +63,7 @@ class HumanReviewTests(unittest.TestCase):
             self.assertEqual(len(lines), 1)
             self.assertEqual(json.loads(lines[0])["expertIndex"], 0)
 
-    def test_review_record_contains_source_and_candidate_states(self) -> None:
+    def test_review_record_contains_colored_display_states(self) -> None:
         class HeuristicLikeScorer:
             def score_many(self, game, evaluations):
                 return [evaluation.score for evaluation in evaluations]
@@ -82,15 +86,27 @@ class HumanReviewTests(unittest.TestCase):
         self.assertIsNotNone(record)
         assert record is not None
         self.assertEqual(record["format"], NEURAL_REVIEW_QUEUE_FORMAT)
-        self.assertEqual(len(record["source"]["rows"]), 24)
+        source = record["source"]
+        self.assertEqual(len(source["rows"]), 24)
+        self.assertEqual(len(source["displayRows"]), 20)
         self.assertGreaterEqual(len(record["candidates"]), 2)
         self.assertLessEqual(len(record["candidates"]), 4)
+        for candidate in record["candidates"]:
+            self.assertEqual(len(candidate["displayRows"]), 20)
 
-    def test_review_cli_defaults_to_all_legal_candidates(self) -> None:
+    def test_pygame_candidate_order_is_deterministic_per_position(self) -> None:
+        record = _queue_record()
+        first = _candidate_order(record)
+        second = _candidate_order(record)
+        self.assertEqual(first, second)
+        self.assertEqual(sorted(first), [0, 1])
+
+    def test_review_cli_defaults_to_tqdm_and_all_legal_candidates(self) -> None:
         args = build_parser().parse_args(["review", "--collect-only"])
         self.assertEqual(args.command, "review")
         self.assertTrue(args.collect_only)
         self.assertEqual(args.max_candidates, 0)
+        self.assertFalse(args.no_progress)
         self.assertEqual(HumanReviewConfig().normalized().max_candidates, 0)
 
 
