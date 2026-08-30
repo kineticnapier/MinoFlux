@@ -344,9 +344,20 @@ def reachable_placements(
                 rotation_tos[node_index] if last_rotation else -1,
             )
 
-    for node_index in state_nodes:
-        if node_index != _NO_STATE:
-            emit(node_index)
+    if include_paths:
+        # Preserve historical shortest-hard-drop routes for replay/UI callers.
+        for node_index in state_nodes:
+            if node_index != _NO_STATE:
+                emit(node_index)
+    else:
+        # For pure evaluation, every non-rotation hard-drop geometry is already
+        # represented by its reachable grounded state. Skip all higher duplicates.
+        for state_id, node_index in enumerate(state_nodes):
+            if node_index != _NO_STATE and landing[state_id] == ys[node_index]:
+                emit(node_index)
+
+    # A hard drop does not clear the preceding rotation metadata, so rotation-ending
+    # nodes must still be considered even when they are above the landing position.
     for node_index in rotation_nodes:
         if node_index != _NO_STATE:
             emit(node_index)
