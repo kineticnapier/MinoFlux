@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 
-from minoflux_ai.bitboard import board_row_masks
+from minoflux_ai.bitboard import board_row_masks, collides_row_masks
 from minoflux_ai.features import extract_board_features, extract_board_features_from_masks
 from minoflux_ai.reachability import reachable_placements
 from minoflux_engine import Game
@@ -20,6 +20,15 @@ def _placement_signature(placement):
         placement.rotation_from,
         placement.rotation_to,
     )
+
+
+def test_negative_srs_anchor_bitboard_collision() -> None:
+    rows = (0,) * 24
+    # Vertical I has all occupied cells at dx=2, so x=-2 is a legal anchor.
+    assert not collides_row_masks(rows, "I", -2, 1, 1)
+    blocked = list(rows)
+    blocked[1] = 1
+    assert collides_row_masks(tuple(blocked), "I", -2, 1, 1)
 
 
 def test_mask_feature_extractor_matches_board_api() -> None:
