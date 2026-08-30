@@ -92,7 +92,12 @@ def _train(args: argparse.Namespace) -> int:
 
 
 def _evaluate(args: argparse.Namespace) -> int:
-    evaluator = NeuralValueEvaluator.from_checkpoint(args.model, device=args.device)
+    evaluator = NeuralValueEvaluator.from_checkpoint(
+        args.model,
+        device=args.device,
+        precision=args.precision,
+        compile_model=args.torch_compile,
+    )
     weights = _weights(args.heuristic_model)
     config = _search_config(args)
     games = [
@@ -142,8 +147,9 @@ def _evaluate(args: argparse.Namespace) -> int:
                 and not game.game_over
                 and game.pieces_placed < args.max_pieces
             ]
+            active_set = set(active)
             for index in range(len(games)):
-                if index not in done and index not in active:
+                if index not in done and index not in active_set:
                     finish(index)
             if not active:
                 break
@@ -157,6 +163,7 @@ def _evaluate(args: argparse.Namespace) -> int:
                     config,
                     scorer=evaluator,
                 )
+                batch_gained = 0
                 for game_index, choice in zip(indices, choices):
                     game = games[game_index]
                     if choice is None:
@@ -166,12 +173,13 @@ def _evaluate(args: argparse.Namespace) -> int:
                     before_pieces = game.pieces_placed
                     apply_search_action(game, choice.action)
                     gained_pieces = max(0, game.pieces_placed - before_pieces)
+                    batch_gained += gained_pieces
                     total_pieces += gained_pieces
                     total_attack += game.attack - before_attack
-                    if progress_bar is not None:
-                        progress_bar.update(gained_pieces)
                     if game.game_over or game.pieces_placed >= args.max_pieces:
                         finish(game_index)
+                if progress_bar is not None and batch_gained:
+                    progress_bar.update(batch_gained)
 
             if progress_bar is not None:
                 elapsed = max(time.perf_counter() - started, 1e-9)
@@ -185,8 +193,6 @@ def _evaluate(args: argparse.Namespace) -> int:
         if progress_bar is not None:
             progress_bar.close()
 
-    # Recompute totals from final game states as a correctness backstop for any
-    # early-stop path where no placement was applied in the last batch.
     total_pieces = sum(game.pieces_placed for game in games)
     total_attack = sum(game.attack for game in games)
     topouts = sum(int(game.game_over) for game in games)
@@ -198,6 +204,8 @@ def _evaluate(args: argparse.Namespace) -> int:
     result = {
         "model": args.model,
         "device": evaluator.device,
+        "precision": evaluator.precision,
+        "torchCompiled": evaluator.compiled,
         "games": args.games,
         "maxPieces": args.max_pieces,
         "gameBatchSize": batch_size,
@@ -217,7 +225,12 @@ def _evaluate(args: argparse.Namespace) -> int:
 def _review(args: argparse.Namespace) -> int:
     queue_path = Path(args.queue)
     if args.regenerate or not queue_path.is_file():
-        evaluator = NeuralValueEvaluator.from_checkpoint(args.model, device=args.device)
+        evaluator = NeuralValueEvaluator.from_checkpoint(
+            args.model,
+            device=args.device,
+            precision=args.precision,
+            compile_model=args.torch_compile,
+        )
         result = collect_neural_review_queue(
             queue_path,
             evaluator,
@@ -254,6 +267,20 @@ def _add_search_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--reachability-nodes", type=int, default=8000)
 
 
+def _add_inference_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--precision",
+        choices=("float32", "float16", "bfloat16", "auto"),
+        default="float32",
+        help="Inference precision. float32 preserves existing ranking most strictly.",
+    )
+    parser.add_argument(
+        "--torch-compile",
+        action="store_true",
+        help="Use torch.compile(reduce-overhead); optional because support varies by platform.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MinoFlux neural value learning tools")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -288,7 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluate = subparsers.add_parser("evaluate", help="Run solo games with a trained neural scorer")
     evaluate.add_argument("--model", default="data/models/neural-value.pt")
-    evaluate.add_argument("--heuristic-model", default=None, help="Only used for feature extraction/ties")
+    evaluate.add_argument("--heuristic-model", default=None, help="Fallback heuristic model")
     evaluate.add_argument("--device", default="auto")
     evaluate.add_argument("--games", type=int, default=8)
     evaluate.add_argument("--max-pieces", type=int, default=500)
@@ -297,10 +324,11 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument(
         "--game-batch-size",
         type=int,
-        default=8,
-        help="Games advanced together per neural GPU batch; use 1 for legacy per-game batching",
+        default=16,
+        help="Games advanced together per neural GPU batch",
     )
     evaluate.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
+    _add_inference_args(evaluate)
     _add_search_args(evaluate)
     evaluate.set_defaults(func=_evaluate)
 
@@ -331,6 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--regenerate", action="store_true", help="Replace an existing review queue")
     review.add_argument("--collect-only", action="store_true", help="Build the queue without launching Pygame")
     review.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
+    _add_inference_args(review)
     _add_search_args(review)
     review.set_defaults(func=_review)
     return parser
