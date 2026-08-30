@@ -56,9 +56,10 @@ def _queue_record() -> dict[str, object]:
 
 class HumanReviewTests(unittest.TestCase):
     def test_human_label_becomes_standard_ranking_sample(self) -> None:
-        labeled = human_label_record(_queue_record(), 1)
+        labeled = human_label_record(_queue_record(), 1, [0])
         self.assertEqual(labeled["format"], NEURAL_DATASET_FORMAT)
         self.assertEqual(labeled["expertIndex"], 1)
+        self.assertEqual(labeled["expertIndices"], [0, 1])
         self.assertEqual(labeled["source"], "human_review")
         candidates = labeled["candidates"]
         self.assertEqual(len(candidates), 2)
@@ -68,11 +69,13 @@ class HumanReviewTests(unittest.TestCase):
     def test_append_human_label_deduplicates_position(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "human.jsonl"
-            self.assertTrue(append_human_label(path, _queue_record(), 0))
+            self.assertTrue(append_human_label(path, _queue_record(), 0, [1]))
             self.assertFalse(append_human_label(path, _queue_record(), 1))
             lines = path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 1)
-            self.assertEqual(json.loads(lines[0])["expertIndex"], 0)
+            saved = json.loads(lines[0])
+            self.assertEqual(saved["expertIndex"], 0)
+            self.assertEqual(saved["expertIndices"], [0, 1])
 
     def test_review_record_contains_colored_display_states(self) -> None:
         class HeuristicLikeScorer:
@@ -85,6 +88,7 @@ class HumanReviewTests(unittest.TestCase):
             weights=DEFAULT_WEIGHTS,
             config=HumanReviewConfig(
                 max_candidates=4,
+                teacher_lookahead=0,
                 search_config=SearchConfig(
                     allow_hold=True,
                     lookahead_pieces=0,
@@ -102,6 +106,7 @@ class HumanReviewTests(unittest.TestCase):
         self.assertEqual(len(source["displayRows"]), 20)
         self.assertGreaterEqual(len(record["candidates"]), 2)
         self.assertLessEqual(len(record["candidates"]), 4)
+        self.assertIn("teacherMove", record)
         for candidate in record["candidates"]:
             self.assertEqual(len(candidate["displayRows"]), 20)
 
@@ -138,13 +143,26 @@ class HumanReviewTests(unittest.TestCase):
             1,
         )
 
-    def test_review_cli_defaults_to_tqdm_and_all_legal_candidates(self) -> None:
+    def test_review_cli_defaults_to_dagger_sampling(self) -> None:
         args = build_parser().parse_args(["review", "--collect-only"])
         self.assertEqual(args.command, "review")
         self.assertTrue(args.collect_only)
         self.assertEqual(args.max_candidates, 0)
         self.assertFalse(args.no_progress)
-        self.assertEqual(HumanReviewConfig().normalized().max_candidates, 0)
+        self.assertEqual(args.max_samples, 320)
+        self.assertEqual(args.teacher_lookahead, 1)
+        self.assertAlmostEqual(args.random_sample_rate, 0.03)
+        normalized = HumanReviewConfig().normalized()
+        self.assertEqual(normalized.max_candidates, 0)
+        self.assertEqual(normalized.teacher_lookahead, 1)
+
+    def test_generate_strong_enables_lookahead_and_rollouts(self) -> None:
+        args = build_parser().parse_args(["generate-strong"])
+        self.assertEqual(args.command, "generate-strong")
+        self.assertEqual(args.sampling_mode, "diverse")
+        self.assertEqual(args.teacher_lookahead, 1)
+        self.assertGreater(args.rollout_horizon, 0)
+        self.assertGreater(args.rollout_candidates, 0)
 
 
 if __name__ == "__main__":
