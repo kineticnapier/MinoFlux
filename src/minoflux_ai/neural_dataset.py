@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, replace
 import json
+import os
 from pathlib import Path
 import random
 from typing import Callable, Iterable, Sequence
@@ -10,7 +12,7 @@ from minoflux_engine import Game
 
 from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights
 from .neural import NeuralState, NeuralValueConfig, encode_game_state
-from .neural_supervision import rollout_clean_attack_target, teacher_scores_for_actions
+from .neural_supervision import rollout_clean_attack_target, teacher_score_action
 from .search import (
     SearchAction,
     SearchConfig,
@@ -48,6 +50,10 @@ class NeuralDatasetConfig:
     teacher_lookahead: int = 0
     teacher_beam_width: int = 4
     teacher_acceptable_margin: float = 0.0
+    # 0 preserves the legacy behavior and deep-scores every retained candidate.
+    # Strong generation normally uses a representative subset because the
+    # teacher's actual chosen action already comes from the full beam search.
+    teacher_score_candidates: int = 0
     rollout_horizon: int = 0
     rollout_candidates: int = 0
     rollout_lookahead: int = 1
@@ -74,6 +80,7 @@ class NeuralDatasetConfig:
             teacher_lookahead=min(3, max(0, int(self.teacher_lookahead))),
             teacher_beam_width=min(128, max(1, int(self.teacher_beam_width))),
             teacher_acceptable_margin=max(0.0, float(self.teacher_acceptable_margin)),
+            teacher_score_candidates=max(0, int(self.teacher_score_candidates)),
             rollout_horizon=max(0, int(self.rollout_horizon)),
             rollout_candidates=max(0, int(self.rollout_candidates)),
             rollout_lookahead=min(3, max(0, int(self.rollout_lookahead))),
@@ -303,24 +310,179 @@ def _select_diverse_candidates(
     )
 
 
-def _rollout_indices(
-    teacher_scores: Sequence[float],
+def _supervision_indices(
+    scores: Sequence[float],
     count: int,
     rng: random.Random,
+    *,
+    required_index: int,
 ) -> tuple[int, ...]:
-    if count <= 0 or not teacher_scores:
+    """Pick a representative subset while always keeping the teacher action."""
+
+    if not scores:
         return ()
-    count = min(len(teacher_scores), max(1, int(count)))
-    ordered = sorted(range(len(teacher_scores)), key=lambda index: teacher_scores[index], reverse=True)
-    top_count = min(count, max(1, (count + 1) // 2))
-    selected = set(ordered[:top_count])
-    if len(selected) < count and len(ordered) > 1:
+    if required_index < 0 or required_index >= len(scores):
+        raise ValueError("required supervision index is out of range")
+    if count <= 0 or count >= len(scores):
+        return tuple(range(len(scores)))
+
+    count = max(1, min(len(scores), int(count)))
+    ordered = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)
+    selected: set[int] = {required_index}
+
+    # Half of the budget stays on hard/high-value alternatives.
+    hard_count = min(count, max(1, (count + 1) // 2))
+    for index in ordered:
+        if len(selected) >= hard_count:
+            break
+        selected.add(index)
+
+    # One explicitly poor alternative anchors the low end of the value scale.
+    if len(selected) < count:
         selected.add(ordered[-1])
-    remaining = [index for index in range(len(teacher_scores)) if index not in selected]
+
+    # The rest is sampled from the middle/remaining pool for diversity.
+    remaining = [index for index in range(len(scores)) if index not in selected]
     need = count - len(selected)
     if need > 0:
         selected.update(rng.sample(remaining, min(need, len(remaining))))
     return tuple(sorted(selected))
+
+
+def _generate_game_samples(
+    cfg: NeuralDatasetConfig,
+    weights: HeuristicWeights,
+    game_index: int,
+) -> Iterable[NeuralRankingSample]:
+    seed = cfg.seed_base + game_index * cfg.seed_step
+    game = Game(seed)
+    while not game.game_over and game.pieces_placed < cfg.max_pieces:
+        ranked = rank_search_actions(
+            game,
+            weights,
+            cfg.search_config,
+            limit=None,
+        )
+        if not ranked:
+            break
+
+        teacher_cfg = replace(
+            cfg.search_config,
+            lookahead_pieces=cfg.teacher_lookahead,
+            beam_width=cfg.teacher_beam_width,
+        ).normalized()
+        if cfg.teacher_lookahead == 0:
+            teacher_action = ranked[0][0]
+        else:
+            teacher = choose_search_action(game, weights, teacher_cfg)
+            if teacher is None:
+                break
+            teacher_action = teacher.action
+
+        state_rng = random.Random(
+            cfg.random_seed
+            ^ int(seed)
+            ^ ((int(game.pieces_placed) + 1) * 0x9E3779B1)
+        )
+        selected = _select_diverse_candidates(ranked, teacher_action, cfg, state_rng)
+        selected_pairs = tuple((action, evaluation) for action, evaluation, _bucket in selected)
+        if not selected_pairs:
+            break
+
+        teacher_key = _action_key(teacher_action)
+        primary_index = next(
+            index
+            for index, (action, _evaluation) in enumerate(selected_pairs)
+            if _action_key(action) == teacher_key
+        )
+        immediate_scores = tuple(float(evaluation.score) for _action, evaluation in selected_pairs)
+
+        teacher_scores: dict[int, float] = {}
+        if cfg.teacher_lookahead == 0:
+            # Immediate scores are already available, so keeping all of them is free.
+            teacher_scores = {
+                index: score for index, score in enumerate(immediate_scores)
+            }
+        else:
+            teacher_indices = _supervision_indices(
+                immediate_scores,
+                cfg.teacher_score_candidates,
+                state_rng,
+                required_index=primary_index,
+            )
+            for index in teacher_indices:
+                action, evaluation = selected_pairs[index]
+                teacher_scores[index] = teacher_score_action(
+                    game,
+                    action,
+                    evaluation,
+                    weights,
+                    cfg.search_config,
+                    lookahead_pieces=cfg.teacher_lookahead,
+                    beam_width=cfg.teacher_beam_width,
+                )
+
+        acceptable = (primary_index,)
+        if cfg.teacher_acceptable_margin > 0.0:
+            primary_score = teacher_scores.get(primary_index)
+            if primary_score is not None:
+                acceptable = tuple(
+                    sorted(
+                        index
+                        for index, score in teacher_scores.items()
+                        if primary_score - score <= cfg.teacher_acceptable_margin + 1e-12
+                    )
+                )
+                if primary_index not in acceptable:
+                    acceptable = tuple(sorted((*acceptable, primary_index)))
+
+        rollout_targets: dict[int, float] = {}
+        if cfg.rollout_horizon > 0 and cfg.rollout_candidates > 0:
+            rollout_cfg = replace(
+                cfg.search_config,
+                lookahead_pieces=cfg.rollout_lookahead,
+                beam_width=cfg.rollout_beam_width,
+            ).normalized()
+            rollout_scores = tuple(
+                teacher_scores.get(index, immediate_scores[index])
+                for index in range(len(selected_pairs))
+            )
+            rollout_indices = _supervision_indices(
+                rollout_scores,
+                cfg.rollout_candidates,
+                state_rng,
+                required_index=primary_index,
+            )
+            for index in rollout_indices:
+                action, evaluation = selected_pairs[index]
+                rollout_targets[index] = rollout_clean_attack_target(
+                    game,
+                    action,
+                    evaluation,
+                    weights,
+                    rollout_cfg,
+                    horizon=cfg.rollout_horizon,
+                )
+
+        candidates = tuple(
+            _candidate_state(
+                game,
+                action,
+                cfg.neural_config,
+                teacher_score=teacher_scores.get(index),
+                target_value=rollout_targets.get(index),
+                sampling_bucket=bucket,
+            )
+            for index, (action, _evaluation, bucket) in enumerate(selected)
+        )
+        yield NeuralRankingSample(
+            seed=seed,
+            piece_index=game.pieces_placed,
+            expert_index=primary_index,
+            expert_indices=acceptable,
+            candidates=candidates,
+        )
+        apply_search_action(game, selected_pairs[primary_index][0])
 
 
 def generate_neural_ranking_samples(
@@ -329,96 +491,22 @@ def generate_neural_ranking_samples(
 ) -> Iterable[NeuralRankingSample]:
     cfg = config.normalized()
     for game_index in range(cfg.games):
-        seed = cfg.seed_base + game_index * cfg.seed_step
-        game = Game(seed)
-        while not game.game_over and game.pieces_placed < cfg.max_pieces:
-            ranked = rank_search_actions(
-                game,
-                weights,
-                cfg.search_config,
-                limit=None,
-            )
-            if not ranked:
-                break
+        yield from _generate_game_samples(cfg, weights, game_index)
 
-            teacher_cfg = replace(
-                cfg.search_config,
-                lookahead_pieces=cfg.teacher_lookahead,
-                beam_width=cfg.teacher_beam_width,
-            ).normalized()
-            if cfg.teacher_lookahead == 0:
-                teacher_action = ranked[0][0]
-            else:
-                teacher = choose_search_action(game, weights, teacher_cfg)
-                if teacher is None:
-                    break
-                teacher_action = teacher.action
 
-            state_rng = random.Random(
-                cfg.random_seed
-                ^ int(seed)
-                ^ ((int(game.pieces_placed) + 1) * 0x9E3779B1)
-            )
-            selected = _select_diverse_candidates(ranked, teacher_action, cfg, state_rng)
-            selected_pairs = tuple((action, evaluation) for action, evaluation, _bucket in selected)
-            teacher_scores = teacher_scores_for_actions(
-                game,
-                selected_pairs,
-                weights,
-                cfg.search_config,
-                lookahead_pieces=cfg.teacher_lookahead,
-                beam_width=cfg.teacher_beam_width,
-            )
-            if not teacher_scores:
-                break
+def _generate_game_task(
+    task: tuple[NeuralDatasetConfig, HeuristicWeights, int],
+) -> tuple[NeuralRankingSample, ...]:
+    cfg, weights, game_index = task
+    return tuple(_generate_game_samples(cfg, weights, game_index))
 
-            best_teacher = max(teacher_scores)
-            primary_index = max(range(len(teacher_scores)), key=lambda index: teacher_scores[index])
-            acceptable = tuple(
-                index
-                for index, score in enumerate(teacher_scores)
-                if best_teacher - score <= cfg.teacher_acceptable_margin + 1e-12
-            )
-            if primary_index not in acceptable:
-                acceptable = tuple(sorted((*acceptable, primary_index)))
 
-            rollout_targets: dict[int, float] = {}
-            if cfg.rollout_horizon > 0 and cfg.rollout_candidates > 0:
-                rollout_cfg = replace(
-                    cfg.search_config,
-                    lookahead_pieces=cfg.rollout_lookahead,
-                    beam_width=cfg.rollout_beam_width,
-                ).normalized()
-                for index in _rollout_indices(teacher_scores, cfg.rollout_candidates, state_rng):
-                    action, evaluation = selected_pairs[index]
-                    rollout_targets[index] = rollout_clean_attack_target(
-                        game,
-                        action,
-                        evaluation,
-                        weights,
-                        rollout_cfg,
-                        horizon=cfg.rollout_horizon,
-                    )
-
-            candidates = tuple(
-                _candidate_state(
-                    game,
-                    action,
-                    cfg.neural_config,
-                    teacher_score=teacher_scores[index],
-                    target_value=rollout_targets.get(index),
-                    sampling_bucket=bucket,
-                )
-                for index, (action, _evaluation, bucket) in enumerate(selected)
-            )
-            yield NeuralRankingSample(
-                seed=seed,
-                piece_index=game.pieces_placed,
-                expert_index=primary_index,
-                expert_indices=acceptable,
-                candidates=candidates,
-            )
-            apply_search_action(game, selected_pairs[primary_index][0])
+def _resolved_workers(requested: int, games: int) -> int:
+    value = int(requested)
+    if value > 0:
+        return min(max(1, games), value)
+    available = max(1, (os.cpu_count() or 1) - 1)
+    return min(max(1, games), available)
 
 
 def write_neural_ranking_dataset(
@@ -428,6 +516,7 @@ def write_neural_ranking_dataset(
     *,
     progress: Callable[[int, int], None] | None = None,
     progress_every: int = 500,
+    workers: int = 1,
 ) -> dict[str, object]:
     cfg = config.normalized()
     target = Path(path)
@@ -436,14 +525,28 @@ def write_neural_ranking_dataset(
     samples = 0
     candidates = 0
     rollout_targets = 0
+    resolved_workers = _resolved_workers(workers, cfg.games)
+
+    def write_sample(stream, sample: NeuralRankingSample) -> None:
+        nonlocal samples, candidates, rollout_targets
+        stream.write(json.dumps(sample.to_dict(), separators=(",", ":")) + "\n")
+        samples += 1
+        candidates += len(sample.candidates)
+        rollout_targets += sum(candidate.target_value is not None for candidate in sample.candidates)
+        if progress is not None and samples % max(1, int(progress_every)) == 0:
+            progress(samples, candidates)
+
     with temporary.open("w", encoding="utf-8") as stream:
-        for sample in generate_neural_ranking_samples(cfg, weights):
-            stream.write(json.dumps(sample.to_dict(), separators=(",", ":")) + "\n")
-            samples += 1
-            candidates += len(sample.candidates)
-            rollout_targets += sum(candidate.target_value is not None for candidate in sample.candidates)
-            if progress is not None and samples % max(1, int(progress_every)) == 0:
-                progress(samples, candidates)
+        if resolved_workers <= 1:
+            for sample in generate_neural_ranking_samples(cfg, weights):
+                write_sample(stream, sample)
+        else:
+            tasks = tuple((cfg, weights, game_index) for game_index in range(cfg.games))
+            with ProcessPoolExecutor(max_workers=resolved_workers) as executor:
+                for game_samples in executor.map(_generate_game_task, tasks, chunksize=1):
+                    for sample in game_samples:
+                        write_sample(stream, sample)
+
     temporary.replace(target)
     result = {
         "format": NEURAL_DATASET_FORMAT,
@@ -451,6 +554,7 @@ def write_neural_ranking_dataset(
         "samples": samples,
         "candidates": candidates,
         "rolloutTargets": rollout_targets,
+        "workers": resolved_workers,
         "config": {
             "games": cfg.games,
             "maxPieces": cfg.max_pieces,
@@ -466,6 +570,7 @@ def write_neural_ranking_dataset(
             "teacherLookahead": cfg.teacher_lookahead,
             "teacherBeamWidth": cfg.teacher_beam_width,
             "teacherAcceptableMargin": cfg.teacher_acceptable_margin,
+            "teacherScoreCandidates": cfg.teacher_score_candidates,
             "rolloutHorizon": cfg.rollout_horizon,
             "rolloutCandidates": cfg.rollout_candidates,
             "rolloutLookahead": cfg.rollout_lookahead,
