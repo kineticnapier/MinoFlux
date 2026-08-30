@@ -60,7 +60,12 @@ def collides_row_masks(
     *,
     width: int = BOARD_WIDTH,
 ) -> bool:
-    """Collision test against compact occupancy rows without cell tuples."""
+    """Collision test against compact occupancy rows without cell tuples.
+
+    SRS anchors can be negative even when every occupied mino is on-board (for
+    example a vertical I at x=-2). Shift row masks right for those anchors rather
+    than attempting an invalid negative left shift.
+    """
 
     rotation %= 4
     min_x, max_x, _min_y, _max_y = SHAPE_BOUNDS[piece][rotation]
@@ -71,7 +76,10 @@ def collides_row_masks(
         row_y = y + dy
         if row_y >= height:
             return True
-        if row_y >= 0 and rows[row_y] & (relative_mask << x):
+        if row_y < 0:
+            continue
+        shifted_mask = relative_mask << x if x >= 0 else relative_mask >> (-x)
+        if rows[row_y] & shifted_mask:
             return True
     return False
 
