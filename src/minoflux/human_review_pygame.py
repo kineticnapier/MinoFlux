@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+from collections import deque
 import json
 from pathlib import Path
-import random
+import time
 from typing import Mapping, Sequence
 
 from minoflux_ai.human_review import append_human_label, load_review_queue, review_key
+from minoflux_engine import Game, HIDDEN_ROWS
 
-from .game import COLORS, Palette, _draw_piece_preview
+from .game import (
+    COLORS,
+    Palette,
+    _draw_piece_preview,
+    _key_codes,
+    _move_horizontal,
+    _soft_drop,
+)
+from .handling import HandlingController
+from .settings import load_settings
 
 
 def _row_strings(section: Mapping[str, object]) -> list[str]:
@@ -28,59 +39,88 @@ def _row_strings(section: Mapping[str, object]) -> list[str]:
     return ["." * 10 for _ in range(20)]
 
 
-def _candidate_order(record: Mapping[str, object]) -> tuple[int, ...]:
+def _restore_game(record: Mapping[str, object]) -> Game:
+    source = record.get("source")
+    if not isinstance(source, Mapping):
+        raise ValueError("Review position has no source state")
+
+    game = Game(int(record.get("seed", 0)))
+    visible = _row_strings(source)
+    game.board = [[None] * game.width for _ in range(HIDDEN_ROWS)]
+    for row in visible[-game.visible_height :]:
+        game.board.append([None if cell == "." else cell for cell in row[: game.width]])
+    while len(game.board) < game.height:
+        game.board.insert(0, [None] * game.width)
+    if len(game.board) > game.height:
+        game.board = game.board[-game.height :]
+
+    game.current = str(source.get("current", game.current))
+    hold = source.get("hold")
+    game.hold_piece = None if hold in (None, "", "-") else str(hold)
+    next_pieces = source.get("next", ())
+    if isinstance(next_pieces, Sequence) and not isinstance(next_pieces, (str, bytes)):
+        game.queue = deque(str(piece) for piece in next_pieces)
+        game._fill_queue(7)
+    game.x, game.y, game.rotation = 3, 1, 0
+    game.hold_used = False
+    game.last_action = None
+    game._clear_rotation_metadata()
+    game._reset_lock_state()
+    game.score = 0
+    game.lines = 0
+    game.attack = 0
+    game.combo = int(source.get("combo", -1))
+    game.back_to_back = bool(source.get("b2b", False))
+    game.b2b_chain = int(source.get("b2bChain", 0))
+    game.surge_charge = int(source.get("surgeCharge", 0))
+    game.pieces_placed = int(record.get("pieceIndex", 0))
+    game.paused = False
+    game.last_lock = None
+    game.game_over = game._collides(game.current, game.x, game.y, game.rotation)
+    return game
+
+
+def _find_candidate_index(
+    record: Mapping[str, object],
+    *,
+    use_hold: bool,
+    piece: str,
+    x: int,
+    y: int,
+    rotation: int,
+    result_game: Game | None = None,
+) -> int | None:
     candidates = record.get("candidates")
     if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)):
-        return ()
-    order = list(range(len(candidates)))
-    seed = int(record.get("seed", 0))
-    piece_index = int(record.get("pieceIndex", 0))
-    random.Random((seed << 17) ^ piece_index ^ 0x4D494E4F).shuffle(order)
-    return tuple(order)
+        return None
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, Mapping):
+            continue
+        move = candidate.get("move")
+        if not isinstance(move, Mapping):
+            continue
+        if (
+            bool(move.get("hold")) == bool(use_hold)
+            and str(move.get("piece")) == piece
+            and int(move.get("x", 0)) == int(x)
+            and int(move.get("y", 0)) == int(y)
+            and int(move.get("rotation", 0)) % 4 == int(rotation) % 4
+        ):
+            return index
 
-
-def _draw_board(
-    pygame,
-    screen,
-    rows: Sequence[str],
-    origin: tuple[int, int],
-    cell: int,
-    palette: Palette,
-    *,
-    label: str,
-    font,
-) -> None:
-    board_x, board_y = origin
-    screen.blit(font.render(label, True, palette.text), (board_x, board_y - 34))
-    pygame.draw.rect(
-        screen,
-        palette.panel,
-        (board_x - 5, board_y - 5, 10 * cell + 10, 20 * cell + 10),
-        border_radius=6,
-    )
-    visible = list(rows)[-20:]
-    if len(visible) < 20:
-        visible = ["." * 10] * (20 - len(visible)) + visible
-    for y, row in enumerate(visible):
-        for x in range(10):
-            rect = pygame.Rect(board_x + x * cell, board_y + y * cell, cell, cell)
-            pygame.draw.rect(screen, palette.grid, rect, 1)
-            piece = row[x] if x < len(row) else "."
-            if piece != ".":
-                color = COLORS.get(piece, palette.muted)
-                pygame.draw.rect(screen, color, rect.inflate(-3, -3), border_radius=3)
-
-
-def _move_text(candidate: Mapping[str, object]) -> str:
-    move = candidate.get("move")
-    if not isinstance(move, Mapping):
-        return "unknown move"
-    prefix = "HOLD -> " if bool(move.get("hold")) else ""
-    return (
-        f"{prefix}{move.get('piece', '?')}  "
-        f"x={int(move.get('x', 0))} y={int(move.get('y', 0))} "
-        f"r={int(move.get('rotation', 0))}"
-    )
+    if result_game is None:
+        return None
+    result_rows = [
+        "".join(cell if cell is not None else "." for cell in row)
+        for row in result_game.board[HIDDEN_ROWS:]
+    ]
+    matching: list[int] = []
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, Mapping):
+            continue
+        if _row_strings(candidate) == result_rows:
+            matching.append(index)
+    return matching[0] if len(matching) == 1 else None
 
 
 def _reviewed_keys(path: Path) -> set[tuple[int, int]]:
@@ -95,6 +135,102 @@ def _reviewed_keys(path: Path) -> set[tuple[int, int]]:
             if isinstance(value, Mapping):
                 keys.add(review_key(value))
     return keys
+
+
+def _draw_review(
+    pygame,
+    screen,
+    game: Game,
+    record: Mapping[str, object],
+    sample_index: int,
+    total: int,
+    message: str,
+    settings,
+) -> None:
+    palette = Palette()
+    cell = 30
+    board_x, board_y = 215, 55
+    font = pygame.font.Font(None, 30)
+    small = pygame.font.Font(None, 21)
+    screen.fill(palette.background)
+
+    pygame.draw.rect(
+        screen,
+        palette.panel,
+        (board_x - 5, board_y - 5, game.width * cell + 10, game.visible_height * cell + 10),
+        border_radius=6,
+    )
+    for y in range(game.visible_height):
+        for x in range(game.width):
+            rect = pygame.Rect(board_x + x * cell, board_y + y * cell, cell, cell)
+            pygame.draw.rect(screen, palette.grid, rect, 1)
+            piece = game.board[y + HIDDEN_ROWS][x]
+            if piece:
+                pygame.draw.rect(
+                    screen,
+                    COLORS.get(piece, palette.muted),
+                    rect.inflate(-3, -3),
+                    border_radius=3,
+                )
+
+    if not game.game_over:
+        ghost_y = game.ghost_y()
+        for x, y in game.cells(y=ghost_y):
+            visible_y = y - HIDDEN_ROWS
+            if visible_y >= 0:
+                pygame.draw.rect(
+                    screen,
+                    palette.ghost,
+                    (board_x + x * cell + 5, board_y + visible_y * cell + 5, cell - 10, cell - 10),
+                    2,
+                    border_radius=3,
+                )
+        for x, y in game.cells():
+            visible_y = y - HIDDEN_ROWS
+            if visible_y >= 0:
+                pygame.draw.rect(
+                    screen,
+                    COLORS.get(game.current, palette.muted),
+                    (board_x + x * cell + 2, board_y + visible_y * cell + 2, cell - 4, cell - 4),
+                    border_radius=3,
+                )
+
+    screen.blit(font.render("HOLD", True, palette.text), (28, 55))
+    _draw_piece_preview(pygame, screen, game.hold_piece, (42, 95), 24)
+    screen.blit(font.render("NEXT", True, palette.text), (550, 55))
+    for index, piece in enumerate(list(game.queue)[:5]):
+        _draw_piece_preview(pygame, screen, piece, (565, 95 + index * 82), 20)
+
+    source = record.get("source")
+    source_map = source if isinstance(source, Mapping) else {}
+    reasons = record.get("reasons", ())
+    reason_text = ", ".join(str(value) for value in reasons) if isinstance(reasons, Sequence) else ""
+    info = [
+        f"Review {sample_index + 1}/{total}",
+        f"Seed {record.get('seed')}",
+        f"Piece {record.get('pieceIndex')}",
+        f"Flag {reason_text}",
+        f"Combo {source_map.get('combo', 0)}",
+        f"B2B {'ON' if source_map.get('b2b') else 'OFF'}",
+        f"DAS {settings.das_ms}",
+        f"ARR {settings.arr_ms}",
+        f"SDS {settings.soft_drop_ms}",
+    ]
+    for index, line in enumerate(info):
+        screen.blit(small.render(line, True, palette.text), (18, 210 + index * 25))
+
+    screen.blit(
+        small.render("Play exactly ONE piece with your normal controls.", True, palette.selected),
+        (18, 520),
+    )
+    screen.blit(
+        small.render("Hard drop = submit teacher move", True, palette.selected),
+        (18, 545),
+    )
+    screen.blit(small.render("R/restart = reset position", True, palette.muted), (18, 580))
+    screen.blit(small.render("N = skip   Backspace = previous   Esc = quit", True, palette.muted), (18, 605))
+    if message:
+        screen.blit(small.render(message, True, palette.selected), (18, 650))
 
 
 def launch_human_review_app(queue_path: str | Path, output_path: str | Path) -> int:
@@ -114,190 +250,146 @@ def launch_human_review_app(queue_path: str | Path, output_path: str | Path) -> 
         return 0
 
     pygame.init()
-    width, height = 1180, 720
-    screen = pygame.display.set_mode((width, height))
+    screen = pygame.display.set_mode((760, 700))
     pygame.display.set_caption("MinoFlux Neural Human Review")
     clock = pygame.time.Clock()
-    palette = Palette()
-    title_font = pygame.font.Font(None, 34)
-    font = pygame.font.Font(None, 26)
-    small = pygame.font.Font(None, 21)
+    settings = load_settings()
+    key_codes = _key_codes(pygame, settings)
+    handling = HandlingController()
 
     sample_index = 0
-    candidate_cursor = 0
+    game = _restore_game(pending[sample_index])
+    used_hold = False
     message = ""
     running = True
 
-    prev_rect = pygame.Rect(500, 640, 135, 42)
-    choose_rect = pygame.Rect(645, 640, 170, 42)
-    next_rect = pygame.Rect(825, 640, 135, 42)
-    skip_rect = pygame.Rect(970, 640, 135, 42)
+    def reset_position() -> None:
+        nonlocal game, used_hold, message
+        game = _restore_game(pending[sample_index])
+        used_hold = False
+        handling.clear()
+        message = "Position reset."
 
-    def current_state() -> tuple[dict[str, object], tuple[int, ...], int, Mapping[str, object]]:
-        nonlocal candidate_cursor
-        record = pending[sample_index]
-        order = _candidate_order(record)
-        if not order:
-            raise ValueError("Review position has no candidates")
-        candidate_cursor %= len(order)
-        candidates = record.get("candidates")
-        assert isinstance(candidates, Sequence)
-        original_index = order[candidate_cursor]
-        candidate = candidates[original_index]
-        if not isinstance(candidate, Mapping):
-            raise ValueError("Review candidate must be an object")
-        return record, order, original_index, candidate
-
-    def advance_sample(delta: int = 1) -> None:
-        nonlocal sample_index, candidate_cursor
+    def move_sample(delta: int) -> None:
+        nonlocal sample_index, game, used_hold, message
         sample_index = max(0, min(len(pending), sample_index + delta))
-        candidate_cursor = 0
-
-    def choose_current() -> None:
-        nonlocal message
-        if sample_index >= len(pending):
-            return
-        record, _, original_index, _ = current_state()
-        added = append_human_label(output, record, original_index)
-        message = "Saved human label." if added else "Already labeled; kept existing label."
-        advance_sample(1)
+        used_hold = False
+        handling.clear()
+        if sample_index < len(pending):
+            game = _restore_game(pending[sample_index])
+        message = ""
 
     while running:
+        now = time.monotonic()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            elif event.type == pygame.KEYDOWN:
+                continue
+            if event.type == pygame.WINDOWFOCUSLOST:
+                handling.clear()
+                continue
+            if event.type == pygame.KEYDOWN:
+                if getattr(event, "repeat", False):
+                    continue
                 if event.key == pygame.K_ESCAPE:
                     running = False
-                elif sample_index < len(pending):
-                    record, order, _, _ = current_state()
-                    del record
-                    if event.key in (pygame.K_LEFT, pygame.K_a):
-                        candidate_cursor = (candidate_cursor - 1) % len(order)
-                    elif event.key in (pygame.K_RIGHT, pygame.K_d):
-                        candidate_cursor = (candidate_cursor + 1) % len(order)
-                    elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                        choose_current()
-                    elif event.key in (pygame.K_n, pygame.K_DOWN):
-                        message = "Skipped position."
-                        advance_sample(1)
-                    elif event.key in (pygame.K_BACKSPACE, pygame.K_UP):
-                        message = ""
-                        advance_sample(-1)
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    continue
                 if sample_index >= len(pending):
                     continue
-                _, order, _, _ = current_state()
-                if prev_rect.collidepoint(event.pos):
-                    candidate_cursor = (candidate_cursor - 1) % len(order)
-                elif next_rect.collidepoint(event.pos):
-                    candidate_cursor = (candidate_cursor + 1) % len(order)
-                elif choose_rect.collidepoint(event.pos):
-                    choose_current()
-                elif skip_rect.collidepoint(event.pos):
-                    message = "Skipped position."
-                    advance_sample(1)
+                if event.key == pygame.K_n:
+                    move_sample(1)
+                    continue
+                if event.key == pygame.K_BACKSPACE:
+                    move_sample(-1)
+                    continue
+                if event.key == pygame.K_r:
+                    reset_position()
+                    continue
 
-        screen.fill(palette.background)
-        screen.blit(title_font.render("MinoFlux Human Review", True, palette.text), (34, 18))
+                action = key_codes.get(event.key)
+                if action == "restart":
+                    reset_position()
+                elif action == "left":
+                    game.move_left()
+                    handling.press_horizontal(-1, now, settings.das_ms)
+                elif action == "right":
+                    game.move_right()
+                    handling.press_horizontal(1, now, settings.das_ms)
+                elif action == "soft_drop":
+                    game.soft_drop()
+                    handling.press_soft_drop(now, settings.soft_drop_ms)
+                elif action == "rotate_cw":
+                    game.rotate_cw()
+                elif action == "rotate_ccw":
+                    game.rotate_ccw()
+                elif action == "rotate_180":
+                    game.rotate_180()
+                elif action == "hold":
+                    if game.hold():
+                        used_hold = True
+                elif action == "hard_drop":
+                    record = pending[sample_index]
+                    piece = game.current
+                    x = game.x
+                    y = game.ghost_y()
+                    rotation = game.rotation
+                    game.hard_drop()
+                    candidate_index = _find_candidate_index(
+                        record,
+                        use_hold=used_hold,
+                        piece=piece,
+                        x=x,
+                        y=y,
+                        rotation=rotation,
+                        result_game=game,
+                    )
+                    if candidate_index is None:
+                        message = "Placement is outside this review candidate set; reset and retry."
+                        game = _restore_game(record)
+                        used_hold = False
+                        handling.clear()
+                    else:
+                        added = append_human_label(output, record, candidate_index)
+                        message = "Saved teacher move." if added else "Already labeled; existing label kept."
+                        move_sample(1)
 
-        if sample_index >= len(pending):
-            done = title_font.render(
-                f"Review complete - {len(pending)} positions handled",
-                True,
-                palette.selected,
+            elif event.type == pygame.KEYUP and sample_index < len(pending):
+                action = key_codes.get(event.key)
+                if action == "left":
+                    handling.release_horizontal(-1, now, settings.das_ms)
+                elif action == "right":
+                    handling.release_horizontal(1, now, settings.das_ms)
+                elif action == "soft_drop":
+                    handling.release_soft_drop()
+
+        if sample_index < len(pending):
+            direction, horizontal_batch = handling.poll_horizontal(now, settings.arr_ms)
+            if direction:
+                _move_horizontal(game, direction, horizontal_batch)
+            _soft_drop(game, handling.poll_soft_drop(now, settings.soft_drop_ms))
+            _draw_review(
+                pygame,
+                screen,
+                game,
+                pending[sample_index],
+                sample_index,
+                len(pending),
+                message,
+                settings,
             )
-            screen.blit(done, done.get_rect(center=(width // 2, height // 2 - 20)))
-            screen.blit(
-                font.render(f"Labels: {output}", True, palette.text),
-                (220, height // 2 + 28),
-            )
-            screen.blit(
-                small.render("Esc: close", True, palette.muted),
-                (width // 2 - 40, height // 2 + 72),
-            )
-            pygame.display.flip()
-            clock.tick(60)
-            continue
-
-        record, order, _, candidate = current_state()
-        source = record.get("source")
-        if not isinstance(source, Mapping):
-            raise ValueError("Review position has no source state")
-
-        screen.blit(
-            small.render(
-                f"Position {sample_index + 1}/{len(pending)}   seed {record.get('seed')}   piece {record.get('pieceIndex')}",
-                True,
-                palette.muted,
-            ),
-            (36, 54),
-        )
-        reasons = record.get("reasons", ())
-        reason_text = ", ".join(str(value) for value in reasons) if isinstance(reasons, Sequence) else ""
-        screen.blit(small.render(f"Flagged: {reason_text}", True, palette.muted), (36, 76))
-
-        _draw_board(
-            pygame,
-            screen,
-            _row_strings(source),
-            (54, 116),
-            27,
-            palette,
-            label="CURRENT",
-            font=font,
-        )
-        _draw_board(
-            pygame,
-            screen,
-            _row_strings(candidate),
-            (772, 116),
-            27,
-            palette,
-            label=f"CANDIDATE {candidate_cursor + 1}/{len(order)}",
-            font=font,
-        )
-
-        info_x = 372
-        screen.blit(font.render("STATE", True, palette.text), (info_x, 118))
-        state_lines = [
-            f"Current  {source.get('current', '-')}",
-            f"Hold     {source.get('hold') or '-'}",
-            f"Combo    {source.get('combo', 0)}",
-            f"B2B      {'ON' if source.get('b2b') else 'OFF'}",
-            f"B2B chain {source.get('b2bChain', 0)}",
-        ]
-        for index, line in enumerate(state_lines):
-            screen.blit(small.render(line, True, palette.text), (info_x, 154 + index * 25))
-
-        next_pieces = source.get("next", ())
-        screen.blit(font.render("NEXT", True, palette.text), (info_x, 300))
-        if isinstance(next_pieces, Sequence):
-            for index, piece in enumerate(next_pieces[:5]):
-                piece_name = str(piece)
-                _draw_piece_preview(pygame, screen, piece_name, (info_x + 8, 334 + index * 48), 15)
-
-        screen.blit(font.render("YOUR CHOICE", True, palette.text), (info_x, 585))
-        screen.blit(small.render(_move_text(candidate), True, palette.selected), (info_x, 614))
-
-        for rect, text in (
-            (prev_rect, "< Candidate"),
-            (choose_rect, "CHOOSE (Enter)"),
-            (next_rect, "Candidate >"),
-            (skip_rect, "Skip (N)"),
-        ):
-            pygame.draw.rect(screen, palette.panel, rect, border_radius=7)
-            pygame.draw.rect(screen, palette.grid, rect, 1, border_radius=7)
-            rendered = small.render(text, True, palette.text)
-            screen.blit(rendered, rendered.get_rect(center=rect.center))
-
-        if message:
-            screen.blit(small.render(message, True, palette.selected), (36, 684))
-        controls = "Left/Right or A/D: candidate   Enter/Space: teach   N/Down: skip   Up/Backspace: previous   Esc: quit"
-        screen.blit(small.render(controls, True, palette.muted), (36, 660))
+        else:
+            palette = Palette()
+            screen.fill(palette.background)
+            font = pygame.font.Font(None, 34)
+            small = pygame.font.Font(None, 23)
+            done = font.render(f"Review complete - {len(pending)} positions", True, palette.selected)
+            screen.blit(done, done.get_rect(center=(380, 320)))
+            labels = small.render(f"Labels: {output}", True, palette.text)
+            screen.blit(labels, labels.get_rect(center=(380, 365)))
+            screen.blit(small.render("Esc to close", True, palette.muted), (330, 410))
 
         pygame.display.flip()
-        clock.tick(60)
+        clock.tick(120)
 
     pygame.quit()
     return 0
