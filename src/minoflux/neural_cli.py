@@ -6,9 +6,10 @@ from pathlib import Path
 import sys
 import time
 
-from minoflux_ai import DEFAULT_WEIGHTS, SearchConfig, apply_search_action, choose_search_action, load_weights
+from minoflux_ai import DEFAULT_WEIGHTS, SearchConfig, apply_search_action, load_weights
 from minoflux_ai.human_review import HumanReviewConfig, collect_neural_review_queue
 from minoflux_ai.neural import NeuralValueEvaluator
+from minoflux_ai.search import choose_search_actions_batch
 from minoflux.human_review_pygame import launch_human_review_app
 from minoflux_ai.neural_dataset import NeuralDatasetConfig, write_neural_ranking_dataset
 from minoflux_ai.neural_train import NeuralTrainConfig, train_neural_value_model
@@ -94,82 +95,112 @@ def _evaluate(args: argparse.Namespace) -> int:
     evaluator = NeuralValueEvaluator.from_checkpoint(args.model, device=args.device)
     weights = _weights(args.heuristic_model)
     config = _search_config(args)
+    games = [
+        Game(args.seed_base + game_index * args.seed_step)
+        for game_index in range(args.games)
+    ]
+    done: set[int] = set()
     total_pieces = 0
     total_attack = 0
     topouts = 0
     completed = 0
-    game_bar = None
-    tqdm = None
+    progress_bar = None
     if not args.no_progress:
         try:
-            from tqdm import tqdm as tqdm_impl
+            from tqdm import tqdm
         except ImportError as error:
             raise SystemExit(
                 "tqdm is required for neural evaluation progress. Install it with `uv pip install tqdm` "
                 "or pass --no-progress."
             ) from error
-        tqdm = tqdm_impl
-        game_bar = tqdm(total=args.games, desc="Evaluate games", unit="game")
+        progress_bar = tqdm(
+            total=args.games * args.max_pieces,
+            desc="Evaluate pieces",
+            unit="piece",
+        )
 
+    def finish(index: int) -> None:
+        nonlocal topouts, completed
+        if index in done:
+            return
+        game = games[index]
+        done.add(index)
+        topouts += int(game.game_over)
+        completed += int(not game.game_over and game.pieces_placed >= args.max_pieces)
+        if progress_bar is not None and game.pieces_placed < args.max_pieces:
+            progress_bar.total -= args.max_pieces - game.pieces_placed
+            progress_bar.refresh()
+
+    batch_size = max(1, int(args.game_batch_size))
     started = time.perf_counter()
     try:
-        for game_index in range(args.games):
-            seed = args.seed_base + game_index * args.seed_step
-            game = Game(seed)
-            piece_bar = (
-                tqdm(
-                    total=args.max_pieces,
-                    desc=f"seed {seed}",
-                    unit="piece",
-                    leave=False,
-                )
-                if tqdm is not None
-                else None
-            )
-            try:
-                while not game.game_over and game.pieces_placed < args.max_pieces:
-                    choice = choose_search_action(
-                        game,
-                        weights,
-                        config,
-                        scorer=evaluator,
-                    )
-                    if choice is None:
-                        break
-                    before = game.pieces_placed
-                    apply_search_action(game, choice.action)
-                    if piece_bar is not None:
-                        piece_bar.update(max(0, game.pieces_placed - before))
-                        if game.pieces_placed % 10 == 0 or game.game_over:
-                            piece_bar.set_postfix(
-                                attack=game.attack,
-                                app=f"{game.attack / max(1, game.pieces_placed):.3f}",
-                            )
-            finally:
-                if piece_bar is not None:
-                    piece_bar.close()
+        while len(done) < len(games):
+            active = [
+                index
+                for index, game in enumerate(games)
+                if index not in done
+                and not game.game_over
+                and game.pieces_placed < args.max_pieces
+            ]
+            for index in range(len(games)):
+                if index not in done and index not in active:
+                    finish(index)
+            if not active:
+                break
 
-            total_pieces += game.pieces_placed
-            total_attack += game.attack
-            topouts += int(game.game_over)
-            completed += int(not game.game_over and game.pieces_placed >= args.max_pieces)
-            if game_bar is not None:
-                game_bar.update(1)
-                game_bar.set_postfix(
-                    pieces=total_pieces,
+            for start in range(0, len(active), batch_size):
+                indices = active[start : start + batch_size]
+                batch_games = tuple(games[index] for index in indices)
+                choices = choose_search_actions_batch(
+                    batch_games,
+                    weights,
+                    config,
+                    scorer=evaluator,
+                )
+                for game_index, choice in zip(indices, choices):
+                    game = games[game_index]
+                    if choice is None:
+                        finish(game_index)
+                        continue
+                    before_attack = game.attack
+                    before_pieces = game.pieces_placed
+                    apply_search_action(game, choice.action)
+                    gained_pieces = max(0, game.pieces_placed - before_pieces)
+                    total_pieces += gained_pieces
+                    total_attack += game.attack - before_attack
+                    if progress_bar is not None:
+                        progress_bar.update(gained_pieces)
+                    if game.game_over or game.pieces_placed >= args.max_pieces:
+                        finish(game_index)
+
+            if progress_bar is not None:
+                elapsed = max(time.perf_counter() - started, 1e-9)
+                progress_bar.set_postfix(
+                    pps=f"{total_pieces / elapsed:.1f}",
                     app=f"{total_attack / max(1, total_pieces):.3f}",
+                    active=len(games) - len(done),
                     topouts=topouts,
                 )
     finally:
-        if game_bar is not None:
-            game_bar.close()
+        if progress_bar is not None:
+            progress_bar.close()
 
+    # Recompute totals from final game states as a correctness backstop for any
+    # early-stop path where no placement was applied in the last batch.
+    total_pieces = sum(game.pieces_placed for game in games)
+    total_attack = sum(game.attack for game in games)
+    topouts = sum(int(game.game_over) for game in games)
+    completed = sum(
+        int(not game.game_over and game.pieces_placed >= args.max_pieces)
+        for game in games
+    )
     elapsed = time.perf_counter() - started
     result = {
         "model": args.model,
         "device": evaluator.device,
         "games": args.games,
         "maxPieces": args.max_pieces,
+        "gameBatchSize": batch_size,
         "pieces": total_pieces,
         "attack": total_attack,
         "attackPerPiece": total_attack / max(1, total_pieces),
@@ -263,6 +294,12 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--max-pieces", type=int, default=500)
     evaluate.add_argument("--seed-base", type=int, default=4000001)
     evaluate.add_argument("--seed-step", type=int, default=97)
+    evaluate.add_argument(
+        "--game-batch-size",
+        type=int,
+        default=8,
+        help="Games advanced together per neural GPU batch; use 1 for legacy per-game batching",
+    )
     evaluate.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
     _add_search_args(evaluate)
     evaluate.set_defaults(func=_evaluate)
