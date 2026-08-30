@@ -56,6 +56,19 @@ def _generate(args: argparse.Namespace) -> int:
             seed_base=args.seed_base,
             seed_step=args.seed_step,
             max_candidates=args.max_candidates,
+            sampling_mode=args.sampling_mode,
+            hard_candidates=args.hard_candidates,
+            medium_candidates=args.medium_candidates,
+            random_candidates=args.random_candidates,
+            bad_candidates=args.bad_candidates,
+            random_seed=args.sampling_seed,
+            teacher_lookahead=args.teacher_lookahead,
+            teacher_beam_width=args.teacher_beam,
+            teacher_acceptable_margin=args.teacher_acceptable_margin,
+            rollout_horizon=args.rollout_horizon,
+            rollout_candidates=args.rollout_candidates,
+            rollout_lookahead=args.rollout_lookahead,
+            rollout_beam_width=args.rollout_beam,
             search_config=_search_config(args),
         ),
         weights,
@@ -81,6 +94,8 @@ def _train(args: argparse.Namespace) -> int:
             validation_fraction=args.validation_fraction,
             margin=args.margin,
             human_weight=args.human_weight,
+            teacher_weight=args.teacher_weight,
+            rollout_weight=args.rollout_weight,
             seed=args.seed,
             device=args.device,
         ),
@@ -247,6 +262,10 @@ def _review(args: argparse.Namespace) -> int:
                 danger_height=args.danger_height,
                 danger_holes=args.danger_holes,
                 topout_tail=args.topout_tail,
+                random_sample_rate=args.random_sample_rate,
+                random_seed=args.review_random_seed,
+                teacher_lookahead=args.teacher_lookahead,
+                teacher_beam_width=args.teacher_beam,
                 search_config=_search_config(args),
                 neural_config=evaluator.config,
             ),
@@ -282,26 +301,58 @@ def _add_inference_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_generate_args(parser: argparse.ArgumentParser, *, strong: bool) -> None:
+    parser.add_argument(
+        "--output",
+        default=(
+            "data/neural/strong-ranking.jsonl"
+            if strong
+            else "data/neural/champion-ranking.jsonl"
+        ),
+    )
+    parser.add_argument("--model", default=None, help="Heuristic model JSON; defaults to Champion")
+    parser.add_argument("--games", type=int, default=8 if strong else 40)
+    parser.add_argument("--max-pieces", type=int, default=300 if strong else 500)
+    parser.add_argument("--seed-base", type=int, default=3_500_001 if strong else 3_000_001)
+    parser.add_argument("--seed-step", type=int, default=31)
+    parser.add_argument("--max-candidates", type=int, default=24, help="0 keeps every legal root candidate")
+    parser.add_argument("--sampling-mode", choices=("diverse", "hard"), default="diverse")
+    parser.add_argument("--hard-candidates", type=int, default=8)
+    parser.add_argument("--medium-candidates", type=int, default=5)
+    parser.add_argument("--random-candidates", type=int, default=5)
+    parser.add_argument("--bad-candidates", type=int, default=5)
+    parser.add_argument("--sampling-seed", type=int, default=24680)
+    parser.add_argument("--teacher-lookahead", type=int, default=1 if strong else 0)
+    parser.add_argument("--teacher-beam", type=int, default=4)
+    parser.add_argument("--teacher-acceptable-margin", type=float, default=0.0)
+    parser.add_argument("--rollout-horizon", type=int, default=12 if strong else 0)
+    parser.add_argument("--rollout-candidates", type=int, default=4 if strong else 0)
+    parser.add_argument("--rollout-lookahead", type=int, default=1)
+    parser.add_argument("--rollout-beam", type=int, default=4)
+    parser.add_argument("--progress-every", type=int, default=100 if strong else 500)
+    _add_search_args(parser)
+    parser.set_defaults(func=_generate)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MinoFlux neural value learning tools")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    generate = subparsers.add_parser("generate", help="Generate Champion imitation ranking data")
-    generate.add_argument("--output", default="data/neural/champion-ranking.jsonl")
-    generate.add_argument("--model", default=None, help="Heuristic model JSON; defaults to Champion")
-    generate.add_argument("--games", type=int, default=40)
-    generate.add_argument("--max-pieces", type=int, default=500)
-    generate.add_argument("--seed-base", type=int, default=3000001)
-    generate.add_argument("--seed-step", type=int, default=31)
-    generate.add_argument("--max-candidates", type=int, default=24, help="0 keeps every legal root candidate")
-    generate.add_argument("--progress-every", type=int, default=500)
-    _add_search_args(generate)
-    generate.set_defaults(func=_generate)
+    generate = subparsers.add_parser("generate", help="Generate imitation ranking data with diverse negatives")
+    _add_generate_args(generate, strong=False)
+
+    generate_strong = subparsers.add_parser(
+        "generate-strong",
+        help="Generate diverse lookahead-distilled data with clean-attack rollouts",
+    )
+    _add_generate_args(generate_strong, strong=True)
 
     train = subparsers.add_parser("train", help="Train a neural value network from ranking data")
     train.add_argument("--dataset", default="data/neural/champion-ranking.jsonl")
     train.add_argument("--human-dataset", default=None, help="Optional human-reviewed ranking JSONL")
     train.add_argument("--human-weight", type=float, default=5.0, help="Loss multiplier for human labels")
+    train.add_argument("--teacher-weight", type=float, default=0.25, help="Auxiliary pairwise weight for teacherScore")
+    train.add_argument("--rollout-weight", type=float, default=0.50, help="Auxiliary pairwise weight for targetValue")
     train.add_argument("--output", default="data/models/neural-value.pt")
     train.add_argument("--resume", default=None, help="Optional neural checkpoint to continue from")
     train.add_argument("--epochs", type=int, default=8)
@@ -335,10 +386,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     review = subparsers.add_parser(
         "review",
-        help="Collect uncertain NN positions with tqdm and label them in the Pygame reviewer",
+        help="Collect DAgger positions with tqdm and label them in the Pygame reviewer",
     )
     review.add_argument("--model", default="data/models/neural-value.pt")
-    review.add_argument("--heuristic-model", default=None, help="Champion model used only for disagreement sampling")
+    review.add_argument("--heuristic-model", default=None, help="Heuristic teacher model")
     review.add_argument("--queue", default="data/neural/review-queue.jsonl")
     review.add_argument("--output", default="data/neural/human-ranking.jsonl")
     review.add_argument("--device", default="auto")
@@ -346,7 +397,7 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--max-pieces", type=int, default=500)
     review.add_argument("--seed-base", type=int, default=5000001)
     review.add_argument("--seed-step", type=int, default=97)
-    review.add_argument("--max-samples", type=int, default=160)
+    review.add_argument("--max-samples", type=int, default=320)
     review.add_argument(
         "--max-candidates",
         type=int,
@@ -357,6 +408,10 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--danger-height", type=int, default=12)
     review.add_argument("--danger-holes", type=int, default=4)
     review.add_argument("--topout-tail", type=int, default=30)
+    review.add_argument("--random-sample-rate", type=float, default=0.03)
+    review.add_argument("--review-random-seed", type=int, default=13579)
+    review.add_argument("--teacher-lookahead", type=int, default=1)
+    review.add_argument("--teacher-beam", type=int, default=4)
     review.add_argument("--regenerate", action="store_true", help="Replace an existing review queue")
     review.add_argument("--collect-only", action="store_true", help="Build the queue without launching Pygame")
     review.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
@@ -367,13 +422,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run_in_utf8_mode_if_needed(raw_argv: list[str]) -> int | None:
-    """Relaunch torch.compile commands in UTF-8 mode on non-UTF-8 Windows.
-
-    PyTorch Inductor ships UTF-8 Python/kernel templates. Japanese Windows often
-    starts Python with cp932 as the locale encoding, and some Inductor versions
-    open those templates without an explicit encoding. That can fail during
-    torch.compile import with UnicodeDecodeError before compilation starts.
-    """
+    """Relaunch torch.compile commands in UTF-8 mode on non-UTF-8 Windows."""
 
     if (
         sys.platform != "win32"
