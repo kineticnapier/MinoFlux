@@ -16,10 +16,10 @@ from .neural_dataset import (
     NeuralRankingSample,
     _action_key,
     _candidate_state,
-    _rollout_indices,
     _select_diverse_candidates,
+    _supervision_indices,
 )
-from .neural_supervision import rollout_clean_attack_target, teacher_scores_for_actions
+from .neural_supervision import rollout_clean_attack_target, teacher_score_action
 from .search import apply_search_action, choose_search_action, rank_search_actions
 
 
@@ -128,34 +128,67 @@ def write_neural_dagger_dataset(
                         (action, evaluation)
                         for action, evaluation, _bucket in selected
                     )
-                    teacher_scores = teacher_scores_for_actions(
-                        game,
-                        selected_pairs,
-                        weights,
-                        cfg.search_config,
-                        lookahead_pieces=cfg.teacher_lookahead,
-                        beam_width=cfg.teacher_beam_width,
-                    )
-                    if teacher_scores:
-                        best_teacher = max(teacher_scores)
-                        primary_index = max(
-                            range(len(teacher_scores)),
-                            key=lambda index: teacher_scores[index],
-                        )
-                        acceptable = tuple(
+                    if selected_pairs:
+                        teacher_key = _action_key(teacher.action)
+                        primary_index = next(
                             index
-                            for index, score in enumerate(teacher_scores)
-                            if best_teacher - score <= cfg.teacher_acceptable_margin + 1e-12
+                            for index, (action, _evaluation) in enumerate(selected_pairs)
+                            if _action_key(action) == teacher_key
                         )
-                        if primary_index not in acceptable:
-                            acceptable = tuple(sorted((*acceptable, primary_index)))
+                        immediate_scores = tuple(
+                            float(evaluation.score)
+                            for _action, evaluation in selected_pairs
+                        )
+
+                        teacher_scores: dict[int, float] = {}
+                        if cfg.teacher_lookahead == 0:
+                            teacher_scores = {
+                                index: score
+                                for index, score in enumerate(immediate_scores)
+                            }
+                        else:
+                            for index in _supervision_indices(
+                                immediate_scores,
+                                cfg.teacher_score_candidates,
+                                state_rng,
+                                required_index=primary_index,
+                            ):
+                                action, evaluation = selected_pairs[index]
+                                teacher_scores[index] = teacher_score_action(
+                                    game,
+                                    action,
+                                    evaluation,
+                                    weights,
+                                    cfg.search_config,
+                                    lookahead_pieces=cfg.teacher_lookahead,
+                                    beam_width=cfg.teacher_beam_width,
+                                )
+
+                        acceptable = (primary_index,)
+                        if cfg.teacher_acceptable_margin > 0.0:
+                            primary_score = teacher_scores.get(primary_index)
+                            if primary_score is not None:
+                                acceptable = tuple(
+                                    sorted(
+                                        index
+                                        for index, score in teacher_scores.items()
+                                        if primary_score - score <= cfg.teacher_acceptable_margin + 1e-12
+                                    )
+                                )
+                                if primary_index not in acceptable:
+                                    acceptable = tuple(sorted((*acceptable, primary_index)))
 
                         targets: dict[int, float] = {}
                         if cfg.rollout_horizon > 0 and cfg.rollout_candidates > 0:
-                            for index in _rollout_indices(
-                                teacher_scores,
+                            rollout_scores = tuple(
+                                teacher_scores.get(index, immediate_scores[index])
+                                for index in range(len(selected_pairs))
+                            )
+                            for index in _supervision_indices(
+                                rollout_scores,
                                 cfg.rollout_candidates,
                                 state_rng,
+                                required_index=primary_index,
                             ):
                                 action, evaluation = selected_pairs[index]
                                 targets[index] = rollout_clean_attack_target(
@@ -172,7 +205,7 @@ def write_neural_dagger_dataset(
                                 game,
                                 action,
                                 cfg.neural_config,
-                                teacher_score=teacher_scores[index],
+                                teacher_score=teacher_scores.get(index),
                                 target_value=targets.get(index),
                                 sampling_bucket=bucket,
                             )
