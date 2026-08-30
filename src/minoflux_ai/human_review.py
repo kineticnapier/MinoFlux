@@ -23,7 +23,9 @@ class HumanReviewConfig:
     seed_base: int = 5_000_001
     seed_step: int = 97
     max_samples: int = 160
-    max_candidates: int = 6
+    # 0 keeps every legal placement. Human review defaults to the full action set so
+    # a human can teach a move that both the NN and Champion rank poorly.
+    max_candidates: int = 0
     uncertainty_margin: float = 0.08
     danger_height: int = 12
     danger_holes: int = 4
@@ -40,13 +42,14 @@ class HumanReviewConfig:
     neural_config: NeuralValueConfig = NeuralValueConfig()
 
     def normalized(self) -> "HumanReviewConfig":
+        raw_max_candidates = int(self.max_candidates)
         return HumanReviewConfig(
             games=max(1, int(self.games)),
             max_pieces=max(1, int(self.max_pieces)),
             seed_base=int(self.seed_base),
             seed_step=max(1, int(self.seed_step)),
             max_samples=max(1, int(self.max_samples)),
-            max_candidates=min(12, max(2, int(self.max_candidates))),
+            max_candidates=0 if raw_max_candidates <= 0 else min(128, max(2, raw_max_candidates)),
             uncertainty_margin=max(0.0, float(self.uncertainty_margin)),
             danger_height=max(1, int(self.danger_height)),
             danger_holes=max(0, int(self.danger_holes)),
@@ -114,6 +117,8 @@ def _select_candidates(
     champion_action: SearchAction,
     max_candidates: int,
 ) -> list[tuple[SearchAction, object]]:
+    if max_candidates <= 0 or len(neural_ranked) <= max_candidates:
+        return list(neural_ranked)
     selected = list(neural_ranked[:max_candidates])
     champion_key = _action_key(champion_action)
     if any(_action_key(action) == champion_key for action, _ in selected):
@@ -123,10 +128,7 @@ def _select_candidates(
         None,
     )
     if champion_item is not None:
-        if len(selected) >= max_candidates:
-            selected[-1] = champion_item
-        else:
-            selected.append(champion_item)
+        selected[-1] = champion_item
     return selected
 
 
