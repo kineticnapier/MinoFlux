@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path
+import random
 from typing import Mapping, Sequence
 
 from minoflux_engine import Game, HIDDEN_ROWS
@@ -11,7 +12,14 @@ from minoflux_engine import Game, HIDDEN_ROWS
 from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights
 from .neural import NeuralState, NeuralValueConfig, NeuralValueEvaluator, encode_game_state
 from .neural_dataset import NEURAL_DATASET_FORMAT, pack_board_rows
-from .search import SearchAction, SearchConfig, apply_search_action, clone_game, rank_search_actions
+from .search import (
+    SearchAction,
+    SearchConfig,
+    apply_search_action,
+    choose_search_action,
+    clone_game,
+    rank_search_actions,
+)
 
 NEURAL_REVIEW_QUEUE_FORMAT = "minoflux_neural_review_queue_v1"
 
@@ -22,14 +30,18 @@ class HumanReviewConfig:
     max_pieces: int = 500
     seed_base: int = 5_000_001
     seed_step: int = 97
-    max_samples: int = 160
+    max_samples: int = 320
     # 0 keeps every legal placement. Human review defaults to the full action set so
-    # a human can teach a move that both the NN and Champion rank poorly.
+    # a human can teach a move that both the NN and heuristic teacher rank poorly.
     max_candidates: int = 0
     uncertainty_margin: float = 0.08
     danger_height: int = 12
     danger_holes: int = 4
     topout_tail: int = 30
+    random_sample_rate: float = 0.03
+    random_seed: int = 13_579
+    teacher_lookahead: int = 1
+    teacher_beam_width: int = 4
     search_config: SearchConfig = SearchConfig(
         allow_hold=True,
         lookahead_pieces=0,
@@ -54,9 +66,21 @@ class HumanReviewConfig:
             danger_height=max(1, int(self.danger_height)),
             danger_holes=max(0, int(self.danger_holes)),
             topout_tail=max(0, int(self.topout_tail)),
+            random_sample_rate=min(1.0, max(0.0, float(self.random_sample_rate))),
+            random_seed=int(self.random_seed),
+            teacher_lookahead=min(3, max(0, int(self.teacher_lookahead))),
+            teacher_beam_width=min(128, max(1, int(self.teacher_beam_width))),
             search_config=self.search_config.normalized(),
             neural_config=self.neural_config.normalized(),
         )
+
+
+def _teacher_search_config(config: HumanReviewConfig) -> SearchConfig:
+    return replace(
+        config.search_config,
+        lookahead_pieces=config.teacher_lookahead,
+        beam_width=config.teacher_beam_width,
+    ).normalized()
 
 
 def _action_key(action: SearchAction) -> tuple[object, ...]:
@@ -123,21 +147,21 @@ def _candidate_state(
 
 def _select_candidates(
     neural_ranked: Sequence[tuple[SearchAction, object]],
-    champion_action: SearchAction,
+    teacher_action: SearchAction,
     max_candidates: int,
 ) -> list[tuple[SearchAction, object]]:
     if max_candidates <= 0 or len(neural_ranked) <= max_candidates:
         return list(neural_ranked)
     selected = list(neural_ranked[:max_candidates])
-    champion_key = _action_key(champion_action)
-    if any(_action_key(action) == champion_key for action, _ in selected):
+    teacher_key = _action_key(teacher_action)
+    if any(_action_key(action) == teacher_key for action, _ in selected):
         return selected
-    champion_item = next(
-        ((action, evaluation) for action, evaluation in neural_ranked if _action_key(action) == champion_key),
+    teacher_item = next(
+        ((action, evaluation) for action, evaluation in neural_ranked if _action_key(action) == teacher_key),
         None,
     )
-    if champion_item is not None:
-        selected[-1] = champion_item
+    if teacher_item is not None:
+        selected[-1] = teacher_item
     return selected
 
 
@@ -159,24 +183,19 @@ def build_review_record(
     )
     if not neural_ranked:
         return None
-    champion_ranked = rank_search_actions(
-        game,
-        weights,
-        cfg.search_config,
-        limit=1,
-    )
-    if not champion_ranked:
+    teacher = choose_search_action(game, weights, _teacher_search_config(cfg))
+    if teacher is None:
         return None
 
-    champion_action = champion_ranked[0][0]
+    teacher_action = teacher.action
     neural_action = neural_ranked[0][0]
     margin = float("inf")
     if len(neural_ranked) > 1:
         margin = float(neural_ranked[0][1].score - neural_ranked[1][1].score)
 
     detected = list(reasons or ())
-    if _action_key(neural_action) != _action_key(champion_action):
-        detected.append("nn_champion_disagree")
+    if _action_key(neural_action) != _action_key(teacher_action):
+        detected.append("nn_teacher_disagree")
     if margin <= cfg.uncertainty_margin:
         detected.append("low_margin")
     top_features = neural_ranked[0][1].features.board
@@ -187,7 +206,7 @@ def build_review_record(
     if not detected:
         return None
 
-    selected = _select_candidates(neural_ranked, champion_action, cfg.max_candidates)
+    selected = _select_candidates(neural_ranked, teacher_action, cfg.max_candidates)
     return {
         "format": NEURAL_REVIEW_QUEUE_FORMAT,
         "seed": int(game.seed),
@@ -200,7 +219,9 @@ def build_review_record(
             for action, evaluation in selected
         ],
         "nnChoice": 0,
-        "championMove": _move_dict(champion_action),
+        "teacherMove": _move_dict(teacher_action),
+        # Keep the old field name for queued-data/tool compatibility.
+        "championMove": _move_dict(teacher_action),
     }
 
 
@@ -226,6 +247,8 @@ def collect_neural_review_queue(
     records: list[dict[str, object]] = []
     seen: set[tuple[int, int]] = set()
     topouts = 0
+    rng = random.Random(cfg.random_seed)
+    teacher_cfg = _teacher_search_config(cfg)
 
     def add_record(game: Game, reasons: Sequence[str] | None = None) -> None:
         if len(records) >= cfg.max_samples:
@@ -272,8 +295,8 @@ def collect_neural_review_queue(
                 )
                 if not neural_ranked:
                     break
-                champion_ranked = rank_search_actions(game, weights, cfg.search_config, limit=1)
-                if not champion_ranked:
+                teacher = choose_search_action(game, weights, teacher_cfg)
+                if teacher is None:
                     break
                 neural_action, neural_eval = neural_ranked[0]
                 margin = (
@@ -282,8 +305,8 @@ def collect_neural_review_queue(
                     else neural_eval.score - neural_ranked[1][1].score
                 )
                 reasons: list[str] = []
-                if _action_key(neural_action) != _action_key(champion_ranked[0][0]):
-                    reasons.append("nn_champion_disagree")
+                if _action_key(neural_action) != _action_key(teacher.action):
+                    reasons.append("nn_teacher_disagree")
                 if margin <= cfg.uncertainty_margin:
                     reasons.append("low_margin")
                 board = neural_eval.features.board
@@ -291,8 +314,11 @@ def collect_neural_review_queue(
                     reasons.append("high_stack")
                 if cfg.danger_holes > 0 and board.holes >= cfg.danger_holes:
                     reasons.append("holes")
+                if cfg.random_sample_rate > 0.0 and rng.random() < cfg.random_sample_rate:
+                    reasons.append("random_control")
                 if reasons:
                     add_record(game, reasons)
+                # DAgger distribution: continue on the learner's own trajectory.
                 apply_search_action(game, neural_action)
                 piece_progress.update(1)
                 piece_progress.set_postfix(
@@ -351,7 +377,11 @@ def load_review_queue(path: str | Path) -> list[dict[str, object]]:
     return records
 
 
-def human_label_record(record: Mapping[str, object], selected_index: int) -> dict[str, object]:
+def human_label_record(
+    record: Mapping[str, object],
+    selected_index: int,
+    acceptable_indices: Sequence[int] = (),
+) -> dict[str, object]:
     if record.get("format") != NEURAL_REVIEW_QUEUE_FORMAT:
         raise ValueError("Not a neural review queue record")
     candidates = record.get("candidates")
@@ -360,6 +390,13 @@ def human_label_record(record: Mapping[str, object], selected_index: int) -> dic
     index = int(selected_index)
     if index < 0 or index >= len(candidates):
         raise ValueError("Selected candidate is out of range")
+    positives = {index}
+    for value in acceptable_indices:
+        candidate_index = int(value)
+        if candidate_index < 0 or candidate_index >= len(candidates):
+            raise ValueError("Acceptable candidate is out of range")
+        positives.add(candidate_index)
+
     cleaned: list[dict[str, object]] = []
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
@@ -379,6 +416,7 @@ def human_label_record(record: Mapping[str, object], selected_index: int) -> dic
         "seed": int(record.get("seed", 0)),
         "pieceIndex": int(record.get("pieceIndex", 0)),
         "expertIndex": index,
+        "expertIndices": sorted(positives),
         "candidates": cleaned,
         "source": "human_review",
         "reviewReasons": list(record.get("reasons", ())),
@@ -393,6 +431,7 @@ def append_human_label(
     output_path: str | Path,
     record: Mapping[str, object],
     selected_index: int,
+    acceptable_indices: Sequence[int] = (),
 ) -> bool:
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -405,7 +444,7 @@ def append_human_label(
                 existing = json.loads(line)
                 if isinstance(existing, Mapping) and review_key(existing) == key:
                     return False
-    labeled = human_label_record(record, selected_index)
+    labeled = human_label_record(record, selected_index, acceptable_indices)
     with target.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(labeled, separators=(",", ":")) + "\n")
     return True
