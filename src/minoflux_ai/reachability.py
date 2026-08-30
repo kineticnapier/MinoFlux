@@ -127,21 +127,39 @@ def reachable_placements(
     if start_state < 0 or collides(game.x, game.y, game.rotation):
         return ()
 
-    # Precompute every hard-drop destination once. This replaces repeated
-    # downward scans from each BFS node with one compact O(state-space) pass.
+    # Cache hard-drop destinations only for states that are actually queried.
+    # Each vertical chain is filled in one pass, so later nodes reuse the result.
     landing = [_NO_LANDING] * packed_count
-    for rotation in range(4):
-        for x in range(x_min, x_max + 1):
-            for y in range(game.height - 1, y_min - 1, -1):
-                state_id = pack(x, y, rotation)
-                if state_id < 0 or collides(x, y, rotation):
-                    continue
-                if collides(x, y + 1, rotation):
-                    landing[state_id] = y
-                else:
-                    below = pack(x, y + 1, rotation)
-                    if below >= 0:
-                        landing[state_id] = landing[below]
+
+    def landing_y_for(x: int, y: int, rotation: int) -> int:
+        state_id = pack(x, y, rotation)
+        if state_id < 0:
+            return _NO_LANDING
+        cached = landing[state_id]
+        if cached != _NO_LANDING:
+            return cached
+
+        trail: list[int] = []
+        current_y = y
+        result = _NO_LANDING
+        while True:
+            current_id = pack(x, current_y, rotation)
+            if current_id < 0:
+                break
+            cached = landing[current_id]
+            if cached != _NO_LANDING:
+                result = cached
+                break
+            trail.append(current_id)
+            if collides(x, current_y + 1, rotation):
+                result = current_y
+                break
+            current_y += 1
+
+        if result != _NO_LANDING:
+            for cached_id in trail:
+                landing[cached_id] = result
+        return result
 
     # Parallel primitive arrays avoid allocating a dataclass and tuple hash key
     # for every reachable geometry.
@@ -299,10 +317,7 @@ def reachable_placements(
         x = xs[node_index]
         y = ys[node_index]
         rotation = rotations[node_index]
-        state_id = pack(x, y, rotation)
-        if state_id < 0:
-            return
-        landing_y = landing[state_id]
+        landing_y = landing_y_for(x, y, rotation)
         if landing_y == _NO_LANDING:
             return
         key = _geometry_key(piece, x, landing_y, rotation, game.width)
@@ -352,8 +367,11 @@ def reachable_placements(
     else:
         # For pure evaluation, every non-rotation hard-drop geometry is already
         # represented by its reachable grounded state. Skip all higher duplicates.
-        for state_id, node_index in enumerate(state_nodes):
-            if node_index != _NO_STATE and landing[state_id] == ys[node_index]:
+        for node_index in state_nodes:
+            if node_index == _NO_STATE:
+                continue
+            y = ys[node_index]
+            if landing_y_for(xs[node_index], y, rotations[node_index]) == y:
                 emit(node_index)
 
     # A hard drop does not clear the preceding rotation metadata, so rotation-ending
