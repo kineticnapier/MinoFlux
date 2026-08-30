@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 
 from minoflux_ai.bitboard import board_row_masks, collides_row_masks
-from minoflux_ai.features import extract_board_features, extract_board_features_from_masks
+from minoflux_ai.features import BoardFeatures, extract_board_features_from_masks
 from minoflux_ai.reachability import reachable_placements
 from minoflux_engine import Game
 
@@ -22,6 +22,106 @@ def _placement_signature(placement):
     )
 
 
+def _legacy_occupied_or_wall(board, x: int, y: int) -> bool:
+    height = len(board)
+    width = len(board[0]) if board else 0
+    return x < 0 or x >= width or y < 0 or y >= height or board[y][x] is not None
+
+
+def _legacy_empty(board, x: int, y: int) -> bool:
+    height = len(board)
+    width = len(board[0]) if board else 0
+    return 0 <= x < width and 0 <= y < height and board[y][x] is None
+
+
+def _legacy_t_spin_slots(board, start_y: int) -> int:
+    height = len(board)
+    width = len(board[0])
+    orientations = (
+        ((0, -1), (-1, 0), (0, 0), (1, 0)),
+        ((0, -1), (0, 0), (1, 0), (0, 1)),
+        ((-1, 0), (0, 0), (1, 0), (0, 1)),
+        ((0, -1), (-1, 0), (0, 0), (0, 1)),
+    )
+    slots = 0
+    for pivot_y in range(max(0, start_y), height):
+        for pivot_x in range(width):
+            if board[pivot_y][pivot_x] is not None:
+                continue
+            corners = (
+                _legacy_occupied_or_wall(board, pivot_x - 1, pivot_y - 1),
+                _legacy_occupied_or_wall(board, pivot_x + 1, pivot_y - 1),
+                _legacy_occupied_or_wall(board, pivot_x - 1, pivot_y + 1),
+                _legacy_occupied_or_wall(board, pivot_x + 1, pivot_y + 1),
+            )
+            if sum(corners) < 3:
+                continue
+            if any(
+                all(_legacy_empty(board, pivot_x + dx, pivot_y + dy) for dx, dy in cells)
+                for cells in orientations
+            ):
+                slots += 1
+    return slots
+
+
+def _legacy_features(board) -> BoardFeatures:
+    height = len(board)
+    width = len(board[0])
+    heights: list[int] = []
+    for x in range(width):
+        top = height
+        for y, row in enumerate(board):
+            if row[x] is not None:
+                top = y
+                break
+        heights.append(height - top)
+
+    holes = 0
+    hole_depth = 0
+    occupied_cells = 0
+    for x in range(width):
+        seen_block = False
+        blocks_above = 0
+        for y in range(height):
+            occupied = board[y][x] is not None
+            if occupied:
+                occupied_cells += 1
+                seen_block = True
+                blocks_above += 1
+            elif seen_block:
+                holes += 1
+                hole_depth += blocks_above
+
+    bumpiness = sum(abs(left - right) for left, right in zip(heights, heights[1:]))
+    wells = 0
+    for x in range(width):
+        depth = 0
+        for y in range(height):
+            if board[y][x] is not None:
+                depth = 0
+                continue
+            left_filled = x == 0 or board[y][x - 1] is not None
+            right_filled = x == width - 1 or board[y][x + 1] is not None
+            if left_filled and right_filled:
+                depth += 1
+                wells += depth
+            else:
+                depth = 0
+
+    max_height = max(heights, default=0)
+    slot_start_y = height if max_height == 0 else max(0, height - max_height - 1)
+    return BoardFeatures(
+        aggregate_height=sum(heights),
+        max_height=max_height,
+        holes=holes,
+        hole_depth=hole_depth,
+        bumpiness=bumpiness,
+        wells=wells,
+        t_spin_slots=_legacy_t_spin_slots(board, slot_start_y),
+        occupied_cells=occupied_cells,
+    )
+
+
 def test_negative_srs_anchor_bitboard_collision() -> None:
     rows = (0,) * 24
     # Vertical I has all occupied cells at dx=2, so x=-2 is a legal anchor.
@@ -31,14 +131,14 @@ def test_negative_srs_anchor_bitboard_collision() -> None:
     assert collides_row_masks(tuple(blocked), "I", -2, 1, 1)
 
 
-def test_mask_feature_extractor_matches_board_api() -> None:
+def test_mask_feature_extractor_matches_legacy_reference() -> None:
     rng = random.Random(712367)
     for _ in range(30):
         board = [
             ["G" if rng.random() < 0.28 else None for _x in range(10)]
             for _y in range(24)
         ]
-        expected = extract_board_features(board)
+        expected = _legacy_features(board)
         actual = extract_board_features_from_masks(
             board_row_masks(board),
             width=10,
