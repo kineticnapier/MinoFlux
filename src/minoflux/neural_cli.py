@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 import sys
 
 from minoflux_ai import DEFAULT_WEIGHTS, SearchConfig, apply_search_action, choose_search_action, load_weights
+from minoflux_ai.human_review import HumanReviewConfig, collect_neural_review_queue
 from minoflux_ai.neural import NeuralValueEvaluator
+from minoflux.human_review_web import launch_human_review_app
 from minoflux_ai.neural_dataset import NeuralDatasetConfig, write_neural_ranking_dataset
 from minoflux_ai.neural_train import NeuralTrainConfig, train_neural_value_model
 from minoflux_engine import Game
@@ -25,6 +28,10 @@ def _search_config(args: argparse.Namespace) -> SearchConfig:
 
 def _weights(path: str | None):
     return DEFAULT_WEIGHTS if path is None else load_weights(path)
+
+
+def _champion_weights(path: str | None):
+    return load_weights(path or "data/models/champion-cem.json")
 
 
 def _generate(args: argparse.Namespace) -> int:
@@ -70,9 +77,11 @@ def _train(args: argparse.Namespace) -> int:
             weight_decay=args.weight_decay,
             validation_fraction=args.validation_fraction,
             margin=args.margin,
+            human_weight=args.human_weight,
             seed=args.seed,
             device=args.device,
         ),
+        human_dataset_path=args.human_dataset,
         resume_from=args.resume,
         progress=progress,
     )
@@ -121,6 +130,36 @@ def _evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _review(args: argparse.Namespace) -> int:
+    queue_path = Path(args.queue)
+    if args.regenerate or not queue_path.is_file():
+        evaluator = NeuralValueEvaluator.from_checkpoint(args.model, device=args.device)
+        result = collect_neural_review_queue(
+            queue_path,
+            evaluator,
+            _champion_weights(args.heuristic_model),
+            HumanReviewConfig(
+                games=args.games,
+                max_pieces=args.max_pieces,
+                seed_base=args.seed_base,
+                seed_step=args.seed_step,
+                max_samples=args.max_samples,
+                max_candidates=args.max_candidates,
+                uncertainty_margin=args.uncertainty_margin,
+                danger_height=args.danger_height,
+                danger_holes=args.danger_holes,
+                topout_tail=args.topout_tail,
+                search_config=_search_config(args),
+                neural_config=evaluator.config,
+            ),
+        )
+        print(json.dumps(result, indent=2))
+    if args.collect_only:
+        return 0
+    launch_human_review_app(queue_path, args.output, port=args.port)
+    return 0
+
+
 def _add_search_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-hold", action="store_true")
     parser.add_argument("--lookahead", type=int, default=0)
@@ -149,6 +188,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     train = subparsers.add_parser("train", help="Train a neural value network from ranking data")
     train.add_argument("--dataset", default="data/neural/champion-ranking.jsonl")
+    train.add_argument("--human-dataset", default=None, help="Optional human-reviewed ranking JSONL")
+    train.add_argument("--human-weight", type=float, default=5.0, help="Loss multiplier for human labels")
     train.add_argument("--output", default="data/models/neural-value.pt")
     train.add_argument("--resume", default=None, help="Optional neural checkpoint to continue from")
     train.add_argument("--epochs", type=int, default=8)
@@ -171,6 +212,31 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--seed-step", type=int, default=97)
     _add_search_args(evaluate)
     evaluate.set_defaults(func=_evaluate)
+
+    review = subparsers.add_parser(
+        "review",
+        help="Collect uncertain NN positions and label them in a local browser UI",
+    )
+    review.add_argument("--model", default="data/models/neural-value.pt")
+    review.add_argument("--heuristic-model", default=None, help="Champion model used only for disagreement sampling")
+    review.add_argument("--queue", default="data/neural/review-queue.jsonl")
+    review.add_argument("--output", default="data/neural/human-ranking.jsonl")
+    review.add_argument("--device", default="auto")
+    review.add_argument("--games", type=int, default=8)
+    review.add_argument("--max-pieces", type=int, default=500)
+    review.add_argument("--seed-base", type=int, default=5000001)
+    review.add_argument("--seed-step", type=int, default=97)
+    review.add_argument("--max-samples", type=int, default=160)
+    review.add_argument("--max-candidates", type=int, default=6)
+    review.add_argument("--uncertainty-margin", type=float, default=0.08)
+    review.add_argument("--danger-height", type=int, default=12)
+    review.add_argument("--danger-holes", type=int, default=4)
+    review.add_argument("--topout-tail", type=int, default=30)
+    review.add_argument("--regenerate", action="store_true", help="Replace an existing review queue")
+    review.add_argument("--collect-only", action="store_true", help="Build the queue without launching the browser UI")
+    review.add_argument("--port", type=int, default=7861)
+    _add_search_args(review)
+    review.set_defaults(func=_review)
     return parser
 
 
