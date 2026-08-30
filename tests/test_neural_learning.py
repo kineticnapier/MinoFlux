@@ -82,6 +82,21 @@ class NeuralDatasetTests(unittest.TestCase):
         targets = [candidate.target_value for candidate in sample.candidates]
         self.assertEqual(sum(value is not None for value in targets), 2)
 
+    def test_deep_teacher_scores_only_requested_subset_and_keeps_expert(self) -> None:
+        sample = next(iter(generate_neural_ranking_samples(
+            NeuralDatasetConfig(
+                games=1,
+                max_pieces=1,
+                max_candidates=8,
+                teacher_lookahead=1,
+                teacher_beam_width=2,
+                teacher_score_candidates=3,
+            )
+        )))
+        scored = [candidate.teacher_score is not None for candidate in sample.candidates]
+        self.assertEqual(sum(scored), 3)
+        self.assertTrue(scored[sample.expert_index])
+
     def test_dataset_writer_produces_jsonl_and_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "tiny.jsonl"
@@ -93,7 +108,24 @@ class NeuralDatasetTests(unittest.TestCase):
             record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(record["format"], NEURAL_DATASET_FORMAT)
             self.assertIn("expertIndices", record)
+            self.assertEqual(result["workers"], 1)
             self.assertTrue(path.with_suffix(".jsonl.meta.json").exists())
+
+    def test_parallel_writer_matches_single_worker_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            serial = Path(directory) / "serial.jsonl"
+            parallel = Path(directory) / "parallel.jsonl"
+            config = NeuralDatasetConfig(
+                games=2,
+                max_pieces=1,
+                max_candidates=4,
+                teacher_lookahead=0,
+                rollout_horizon=0,
+            )
+            write_neural_ranking_dataset(serial, config, workers=1)
+            result = write_neural_ranking_dataset(parallel, config, workers=2)
+            self.assertEqual(serial.read_text(encoding="utf-8"), parallel.read_text(encoding="utf-8"))
+            self.assertEqual(result["workers"], 2)
 
 
 @unittest.skipUnless(importlib.util.find_spec("torch") is not None, "PyTorch optional dependency not installed")
