@@ -8,7 +8,7 @@ import sys
 from minoflux_ai import DEFAULT_WEIGHTS, SearchConfig, apply_search_action, choose_search_action, load_weights
 from minoflux_ai.human_review import HumanReviewConfig, collect_neural_review_queue
 from minoflux_ai.neural import NeuralValueEvaluator
-from minoflux.human_review_web import launch_human_review_app
+from minoflux.human_review_pygame import launch_human_review_app
 from minoflux_ai.neural_dataset import NeuralDatasetConfig, write_neural_ranking_dataset
 from minoflux_ai.neural_train import NeuralTrainConfig, train_neural_value_model
 from minoflux_engine import Game
@@ -152,12 +152,12 @@ def _review(args: argparse.Namespace) -> int:
                 search_config=_search_config(args),
                 neural_config=evaluator.config,
             ),
+            show_progress=not args.no_progress,
         )
         print(json.dumps(result, indent=2))
     if args.collect_only:
         return 0
-    launch_human_review_app(queue_path, args.output, port=args.port)
-    return 0
+    return launch_human_review_app(queue_path, args.output)
 
 
 def _add_search_args(parser: argparse.ArgumentParser) -> None:
@@ -215,7 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     review = subparsers.add_parser(
         "review",
-        help="Collect uncertain NN positions and label them in a local browser UI",
+        help="Collect uncertain NN positions with tqdm and label them in the Pygame reviewer",
     )
     review.add_argument("--model", default="data/models/neural-value.pt")
     review.add_argument("--heuristic-model", default=None, help="Champion model used only for disagreement sampling")
@@ -238,8 +238,8 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--danger-holes", type=int, default=4)
     review.add_argument("--topout-tail", type=int, default=30)
     review.add_argument("--regenerate", action="store_true", help="Replace an existing review queue")
-    review.add_argument("--collect-only", action="store_true", help="Build the queue without launching the browser UI")
-    review.add_argument("--port", type=int, default=7861)
+    review.add_argument("--collect-only", action="store_true", help="Build the queue without launching Pygame")
+    review.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
     _add_search_args(review)
     review.set_defaults(func=_review)
     return parser
