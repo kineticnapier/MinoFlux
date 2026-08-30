@@ -227,7 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--seed-base", type=int, default=5000001)
     review.add_argument("--seed-step", type=int, default=97)
     review.add_argument("--max-samples", type=int, default=160)
-    review.add_argument("--max-candidates", type=int, default=6)
+    review.add_argument(
+        "--max-candidates",
+        type=int,
+        default=0,
+        help="Maximum placements shown per position; 0 shows every legal placement",
+    )
     review.add_argument("--uncertainty-margin", type=float, default=0.08)
     review.add_argument("--danger-height", type=int, default=12)
     review.add_argument("--danger-holes", type=int, default=4)
