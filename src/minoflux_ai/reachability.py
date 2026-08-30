@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
 
 from minoflux_engine import Game, Placement
 from minoflux_engine.pieces import SHAPES, kick_tests
-from minoflux_engine.spin import classify_t_spin
+
+from .bitboard import (
+    board_row_masks,
+    classify_t_spin_row_masks,
+    collides_row_masks,
+    placement_cells,
+)
 
 MOVE_LEFT = "left"
 MOVE_RIGHT = "right"
@@ -15,161 +20,71 @@ ROTATE_CCW = "ccw"
 ROTATE_180 = "180"
 HARD_DROP = "hard_drop"
 
-
-@dataclass(slots=True)
-class _Node:
-    x: int
-    y: int
-    rotation: int
-    parent: int | None
-    command: str | None
-    depth: int
-    last_move_was_rotation: bool = False
-    kick_index: int | None = None
-    rotation_from: int | None = None
-    rotation_to: int | None = None
-
-    def geometry_key(self) -> tuple[int, int, int]:
-        return self.x, self.y, self.rotation
+_CMD_NONE = -1
+_CMD_LEFT = 0
+_CMD_RIGHT = 1
+_CMD_DOWN = 2
+_CMD_CW = 3
+_CMD_CCW = 4
+_CMD_180 = 5
+_COMMAND_NAMES = (MOVE_LEFT, MOVE_RIGHT, MOVE_DOWN, ROTATE_CW, ROTATE_CCW, ROTATE_180)
+_NO_STATE = -1
+_NO_LANDING = -10_000
+_X_MARGIN = 4
+_Y_MIN = -4
 
 
-@dataclass(slots=True)
-class _Candidate:
-    x: int
-    y: int
-    rotation: int
-    cells: tuple[tuple[int, int], ...]
-    node_index: int
-    last_move_was_rotation: bool
-    kick_index: int | None
-    rotation_from: int | None
-    rotation_to: int | None
-    spin_kind: str | None
-    depth: int
-
-    def preference(self) -> tuple[int, int, int]:
-        return int(self.spin_kind is not None), int(self.spin_kind == "full"), -self.depth
+def _state_layout(game: Game) -> tuple[int, int, int, int, int]:
+    x_min = -_X_MARGIN
+    x_max = game.width + _X_MARGIN - 1
+    x_count = x_max - x_min + 1
+    y_min = _Y_MIN
+    y_count = game.height - y_min
+    state_count = x_count * y_count * 4
+    return x_min, x_max, x_count, y_min, state_count
 
 
-def _collides(game: Game, x: int, y: int, rotation: int) -> bool:
-    """Hot-path collision test without allocating ``Game.cells()`` tuples."""
-
-    board = game.board
-    width = game.width
-    height = game.height
-    for dx, dy in SHAPES[game.current][rotation % 4]:
-        cell_x, cell_y = x + dx, y + dy
-        if cell_x < 0 or cell_x >= width or cell_y >= height:
-            return True
-        if cell_y >= 0 and board[cell_y][cell_x] is not None:
-            return True
-    return False
-
-
-def _cells(game: Game, x: int, y: int, rotation: int) -> tuple[tuple[int, int], ...]:
-    return tuple(
-        (x + dx, y + dy)
-        for dx, dy in SHAPES[game.current][rotation % 4]
-    )
-
-
-def _landing_y(
-    game: Game,
-    node: _Node,
-    cache: dict[tuple[int, int, int], int],
+def _pack_state(
+    x: int,
+    y: int,
+    rotation: int,
+    *,
+    x_min: int,
+    x_max: int,
+    x_count: int,
+    y_min: int,
+    height: int,
 ) -> int:
-    key = node.geometry_key()
-    cached = cache.get(key)
-    if cached is not None:
-        return cached
-    y = node.y
-    while not _collides(game, node.x, y + 1, node.rotation):
-        y += 1
-    cache[key] = y
-    return y
+    if x < x_min or x > x_max or y < y_min or y >= height:
+        return _NO_STATE
+    return ((((y - y_min) * x_count) + (x - x_min)) << 2) | (rotation & 3)
 
 
-def _path(nodes: list[_Node], node_index: int) -> tuple[str, ...]:
-    commands: list[str] = []
-    index: int | None = node_index
-    while index is not None:
-        node = nodes[index]
-        if node.command is not None:
-            commands.append(node.command)
-        index = node.parent
-    commands.reverse()
-    commands.append(HARD_DROP)
-    return tuple(commands)
-
-
-def _emit_candidate(
-    game: Game,
-    nodes: list[_Node],
+def _path(
+    parents: list[int],
+    commands: list[int],
     node_index: int,
-    best_by_cells: dict[tuple[tuple[int, int], ...], _Candidate],
-    landing_cache: dict[tuple[int, int, int], int],
-) -> None:
-    node = nodes[node_index]
-    landing_y = _landing_y(game, node, landing_cache)
-    cells = _cells(game, node.x, landing_y, node.rotation)
-    if any(cell_y < 0 for _, cell_y in cells):
-        return
-    spin_kind = classify_t_spin(
-        game.board,
-        piece=game.current,
-        x=node.x,
-        y=landing_y,
-        rotation=node.rotation,
-        last_move_was_rotation=node.last_move_was_rotation,
-        rotation_kick_index=node.kick_index,
-    )
-    candidate = _Candidate(
-        x=node.x,
-        y=landing_y,
-        rotation=node.rotation,
-        cells=cells,
-        node_index=node_index,
-        last_move_was_rotation=node.last_move_was_rotation,
-        kick_index=node.kick_index if node.last_move_was_rotation else None,
-        rotation_from=node.rotation_from if node.last_move_was_rotation else None,
-        rotation_to=node.rotation_to if node.last_move_was_rotation else None,
-        spin_kind=spin_kind,
-        depth=node.depth,
-    )
-    key = tuple(sorted(cells))
-    previous = best_by_cells.get(key)
-    if previous is None or candidate.preference() > previous.preference():
-        best_by_cells[key] = candidate
+) -> tuple[str, ...]:
+    result: list[str] = []
+    index = node_index
+    while index >= 0:
+        command = commands[index]
+        if command != _CMD_NONE:
+            result.append(_COMMAND_NAMES[command])
+        index = parents[index]
+    result.reverse()
+    result.append(HARD_DROP)
+    return tuple(result)
 
 
-def _rotation_node(
-    game: Game,
-    node: _Node,
-    node_index: int,
-    direction: int,
-    command: str,
-) -> _Node | None:
-    if game.current == "O":
-        return None
-    target = (node.rotation + direction) % 4
-    for kick_index, (kick_x, kick_y) in enumerate(kick_tests(game.current, node.rotation, target)):
-        x, y = node.x + kick_x, node.y + kick_y
-        if y < -4:
-            continue
-        if not _collides(game, x, y, target):
-            return _Node(
-                x=x,
-                y=y,
-                rotation=target,
-                parent=node_index,
-                command=command,
-                depth=node.depth + 1,
-                last_move_was_rotation=True,
-                kick_index=kick_index,
-                rotation_from=node.rotation,
-                rotation_to=target,
-            )
-    return None
+def _geometry_key(piece: str, x: int, y: int, rotation: int, width: int) -> int:
+    key = 0
+    for dx, dy in SHAPES[piece][rotation % 4]:
+        cell_x, cell_y = x + dx, y + dy
+        if cell_y < 0:
+            return -1
+        key |= 1 << (cell_y * width + cell_x)
+    return key
 
 
 def reachable_placements(
@@ -177,92 +92,291 @@ def reachable_placements(
     *,
     allow_180: bool = False,
     max_nodes: int = 8_000,
+    include_paths: bool = True,
 ) -> tuple[Placement, ...]:
-    """Enumerate placements reachable by movement, exact SRS, and hard drop.
+    """Enumerate exact-SRS placements using packed states and bitboard collision.
 
-    Geometry is explored once per ``(x, y, rotation)`` state. A separate shortest
-    rotation-ending route is retained for each geometry so exact T-spin metadata
-    is not lost when the same state is also reachable by movement. Lock-delay
-    timing is intentionally not simulated.
+    ``include_paths=False`` is intended for neural evaluation: placement geometry
+    and T-spin metadata are preserved, but parent paths are not materialized.
+    Replay/interactive callers keep the historical path behavior by default.
     """
 
     if game.game_over or game.paused:
         return ()
-    start = _Node(game.x, game.y, game.rotation, None, None, 0)
-    if _collides(game, start.x, start.y, start.rotation):
+
+    rows = board_row_masks(game.board)
+    piece = game.current
+    x_min, x_max, x_count, y_min, packed_count = _state_layout(game)
+
+    def pack(x: int, y: int, rotation: int) -> int:
+        return _pack_state(
+            x,
+            y,
+            rotation,
+            x_min=x_min,
+            x_max=x_max,
+            x_count=x_count,
+            y_min=y_min,
+            height=game.height,
+        )
+
+    def collides(x: int, y: int, rotation: int) -> bool:
+        return collides_row_masks(rows, piece, x, y, rotation, width=game.width)
+
+    start_state = pack(game.x, game.y, game.rotation)
+    if start_state < 0 or collides(game.x, game.y, game.rotation):
         return ()
 
-    nodes: list[_Node] = [start]
+    # Precompute every hard-drop destination once. This replaces repeated
+    # downward scans from each BFS node with one compact O(state-space) pass.
+    landing = [_NO_LANDING] * packed_count
+    for rotation in range(4):
+        for x in range(x_min, x_max + 1):
+            for y in range(game.height - 1, y_min - 1, -1):
+                state_id = pack(x, y, rotation)
+                if state_id < 0 or collides(x, y, rotation):
+                    continue
+                if collides(x, y + 1, rotation):
+                    landing[state_id] = y
+                else:
+                    below = pack(x, y + 1, rotation)
+                    if below >= 0:
+                        landing[state_id] = landing[below]
+
+    # Parallel primitive arrays avoid allocating a dataclass and tuple hash key
+    # for every reachable geometry.
+    xs: list[int] = [game.x]
+    ys: list[int] = [game.y]
+    rotations: list[int] = [game.rotation & 3]
+    parents: list[int] = [-1]
+    commands: list[int] = [_CMD_NONE]
+    depths: list[int] = [0]
+    last_rotations: list[bool] = [False]
+    kick_indices: list[int] = [-1]
+    rotation_froms: list[int] = [-1]
+    rotation_tos: list[int] = [-1]
+
     frontier: deque[int] = deque([0])
-    state_nodes: dict[tuple[int, int, int], int] = {start.geometry_key(): 0}
-    rotation_nodes: dict[tuple[int, int, int], int] = {}
+    state_nodes = [_NO_STATE] * packed_count
+    rotation_nodes = [_NO_STATE] * packed_count
+    state_nodes[start_state] = 0
+    reachable_count = 1
     budget = max(1, int(max_nodes))
 
-    while frontier and len(state_nodes) <= budget:
+    def append_node(
+        x: int,
+        y: int,
+        rotation: int,
+        parent: int,
+        command: int,
+        depth: int,
+        *,
+        last_rotation: bool = False,
+        kick_index: int = -1,
+        rotation_from: int = -1,
+        rotation_to: int = -1,
+    ) -> int:
+        index = len(xs)
+        xs.append(x)
+        ys.append(y)
+        rotations.append(rotation & 3)
+        parents.append(parent)
+        commands.append(command)
+        depths.append(depth)
+        last_rotations.append(last_rotation)
+        kick_indices.append(kick_index)
+        rotation_froms.append(rotation_from)
+        rotation_tos.append(rotation_to)
+        return index
+
+    while frontier and reachable_count <= budget:
         node_index = frontier.popleft()
-        node = nodes[node_index]
+        x = xs[node_index]
+        y = ys[node_index]
+        rotation = rotations[node_index]
+        depth = depths[node_index]
 
-        for dx, command in ((-1, MOVE_LEFT), (1, MOVE_RIGHT)):
-            x = node.x + dx
-            key = (x, node.y, node.rotation)
-            if key in state_nodes or _collides(game, x, node.y, node.rotation):
+        for dx, command in ((-1, _CMD_LEFT), (1, _CMD_RIGHT)):
+            target_x = x + dx
+            state_id = pack(target_x, y, rotation)
+            if state_id < 0 or state_nodes[state_id] != _NO_STATE:
                 continue
-            successor_index = len(nodes)
-            nodes.append(_Node(x, node.y, node.rotation, node_index, command, node.depth + 1))
-            state_nodes[key] = successor_index
-            frontier.append(successor_index)
-
-        down_y = node.y + 1
-        key = (node.x, down_y, node.rotation)
-        if key not in state_nodes and not _collides(game, node.x, down_y, node.rotation):
-            successor_index = len(nodes)
-            nodes.append(_Node(node.x, down_y, node.rotation, node_index, MOVE_DOWN, node.depth + 1))
-            state_nodes[key] = successor_index
-            frontier.append(successor_index)
-
-        rotations = [
-            _rotation_node(game, node, node_index, 1, ROTATE_CW),
-            _rotation_node(game, node, node_index, -1, ROTATE_CCW),
-        ]
-        if allow_180:
-            rotations.append(_rotation_node(game, node, node_index, 2, ROTATE_180))
-        for successor in rotations:
-            if successor is None:
+            if collides(target_x, y, rotation):
                 continue
-            successor_index = len(nodes)
-            nodes.append(successor)
-            key = successor.geometry_key()
-            previous_rotation = rotation_nodes.get(key)
-            if previous_rotation is None or successor.depth < nodes[previous_rotation].depth:
-                rotation_nodes[key] = successor_index
-            if key not in state_nodes:
-                state_nodes[key] = successor_index
-                frontier.append(successor_index)
+            successor = append_node(
+                target_x,
+                y,
+                rotation,
+                node_index,
+                command,
+                depth + 1,
+            )
+            state_nodes[state_id] = successor
+            reachable_count += 1
+            frontier.append(successor)
 
-        if len(state_nodes) > budget:
+        target_y = y + 1
+        state_id = pack(x, target_y, rotation)
+        if (
+            state_id >= 0
+            and state_nodes[state_id] == _NO_STATE
+            and not collides(x, target_y, rotation)
+        ):
+            successor = append_node(
+                x,
+                target_y,
+                rotation,
+                node_index,
+                _CMD_DOWN,
+                depth + 1,
+            )
+            state_nodes[state_id] = successor
+            reachable_count += 1
+            frontier.append(successor)
+
+        if piece != "O":
+            rotation_specs = [(1, _CMD_CW), (-1, _CMD_CCW)]
+            if allow_180:
+                rotation_specs.append((2, _CMD_180))
+            for direction, command in rotation_specs:
+                target_rotation = (rotation + direction) & 3
+                rotated: tuple[int, int, int] | None = None
+                for kick_index, (kick_x, kick_y) in enumerate(
+                    kick_tests(piece, rotation, target_rotation)
+                ):
+                    target_x = x + kick_x
+                    target_y = y + kick_y
+                    if target_y < y_min:
+                        continue
+                    state_id = pack(target_x, target_y, target_rotation)
+                    if state_id < 0:
+                        continue
+                    if not collides(target_x, target_y, target_rotation):
+                        rotated = (target_x, target_y, kick_index)
+                        break
+                if rotated is None:
+                    continue
+
+                target_x, target_y, kick_index = rotated
+                state_id = pack(target_x, target_y, target_rotation)
+                previous_rotation = rotation_nodes[state_id]
+                new_depth = depth + 1
+                improves_rotation = (
+                    previous_rotation == _NO_STATE
+                    or new_depth < depths[previous_rotation]
+                )
+                adds_geometry = state_nodes[state_id] == _NO_STATE
+                if not improves_rotation and not adds_geometry:
+                    continue
+
+                successor = append_node(
+                    target_x,
+                    target_y,
+                    target_rotation,
+                    node_index,
+                    command,
+                    new_depth,
+                    last_rotation=True,
+                    kick_index=kick_index,
+                    rotation_from=rotation,
+                    rotation_to=target_rotation,
+                )
+                if improves_rotation:
+                    rotation_nodes[state_id] = successor
+                if adds_geometry:
+                    state_nodes[state_id] = successor
+                    reachable_count += 1
+                    frontier.append(successor)
+
+        if reachable_count > budget:
             break
 
-    best_by_cells: dict[tuple[tuple[int, int], ...], _Candidate] = {}
-    landing_cache: dict[tuple[int, int, int], int] = {}
-    for node_index in state_nodes.values():
-        _emit_candidate(game, nodes, node_index, best_by_cells, landing_cache)
-    for node_index in rotation_nodes.values():
-        _emit_candidate(game, nodes, node_index, best_by_cells, landing_cache)
+    # key -> (preference, x, landing_y, rotation, node, last_rotation,
+    #         kick, rotation_from, rotation_to)
+    best: dict[int, tuple[tuple[int, int, int], int, int, int, int, bool, int, int, int]] = {}
 
-    placements = [
-        Placement(
-            piece=game.current,
-            x=candidate.x,
-            y=candidate.y,
-            rotation=candidate.rotation,
-            cells=candidate.cells,
-            path=_path(nodes, candidate.node_index),
-            last_move_was_rotation=candidate.last_move_was_rotation,
-            rotation_kick_index=candidate.kick_index,
-            rotation_from=candidate.rotation_from,
-            rotation_to=candidate.rotation_to,
+    def emit(node_index: int) -> None:
+        x = xs[node_index]
+        y = ys[node_index]
+        rotation = rotations[node_index]
+        state_id = pack(x, y, rotation)
+        if state_id < 0:
+            return
+        landing_y = landing[state_id]
+        if landing_y == _NO_LANDING:
+            return
+        key = _geometry_key(piece, x, landing_y, rotation, game.width)
+        if key < 0:
+            return
+        last_rotation = last_rotations[node_index]
+        spin_kind = (
+            classify_t_spin_row_masks(
+                rows,
+                piece=piece,
+                x=x,
+                y=landing_y,
+                rotation=rotation,
+                last_move_was_rotation=True,
+                rotation_kick_index=(
+                    kick_indices[node_index] if kick_indices[node_index] >= 0 else None
+                ),
+                width=game.width,
+            )
+            if last_rotation
+            else None
         )
-        for candidate in best_by_cells.values()
-    ]
+        preference = (
+            int(spin_kind is not None),
+            int(spin_kind == "full"),
+            -depths[node_index],
+        )
+        previous = best.get(key)
+        if previous is None or preference > previous[0]:
+            best[key] = (
+                preference,
+                x,
+                landing_y,
+                rotation,
+                node_index,
+                last_rotation,
+                kick_indices[node_index] if last_rotation else -1,
+                rotation_froms[node_index] if last_rotation else -1,
+                rotation_tos[node_index] if last_rotation else -1,
+            )
+
+    for node_index in state_nodes:
+        if node_index != _NO_STATE:
+            emit(node_index)
+    for node_index in rotation_nodes:
+        if node_index != _NO_STATE:
+            emit(node_index)
+
+    placements: list[Placement] = []
+    for (
+        _preference,
+        x,
+        landing_y,
+        rotation,
+        node_index,
+        last_rotation,
+        kick_index,
+        rotation_from,
+        rotation_to,
+    ) in best.values():
+        placements.append(
+            Placement(
+                piece=piece,
+                x=x,
+                y=landing_y,
+                rotation=rotation,
+                cells=placement_cells(piece, x, landing_y, rotation),
+                path=_path(parents, commands, node_index) if include_paths else (),
+                last_move_was_rotation=last_rotation,
+                rotation_kick_index=kick_index if kick_index >= 0 else None,
+                rotation_from=rotation_from if rotation_from >= 0 else None,
+                rotation_to=rotation_to if rotation_to >= 0 else None,
+            )
+        )
+
     placements.sort(key=lambda item: (item.rotation, item.x, item.y, len(item.path)))
     return tuple(placements)
