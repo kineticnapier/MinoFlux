@@ -65,6 +65,7 @@ def _generate(args: argparse.Namespace) -> int:
             teacher_lookahead=args.teacher_lookahead,
             teacher_beam_width=args.teacher_beam,
             teacher_acceptable_margin=args.teacher_acceptable_margin,
+            teacher_score_candidates=args.teacher_score_candidates,
             rollout_horizon=args.rollout_horizon,
             rollout_candidates=args.rollout_candidates,
             rollout_lookahead=args.rollout_lookahead,
@@ -74,6 +75,7 @@ def _generate(args: argparse.Namespace) -> int:
         weights,
         progress=progress,
         progress_every=args.progress_every,
+        workers=args.workers,
     )
     print(json.dumps(result, indent=2))
     return 0
@@ -325,11 +327,28 @@ def _add_generate_args(parser: argparse.ArgumentParser, *, strong: bool) -> None
     parser.add_argument("--teacher-lookahead", type=int, default=1 if strong else 0)
     parser.add_argument("--teacher-beam", type=int, default=4)
     parser.add_argument("--teacher-acceptable-margin", type=float, default=0.0)
+    parser.add_argument(
+        "--teacher-score-candidates",
+        type=int,
+        default=8 if strong else 0,
+        help="Candidates receiving expensive deep teacherScore; 0 scores all",
+    )
     parser.add_argument("--rollout-horizon", type=int, default=12 if strong else 0)
     parser.add_argument("--rollout-candidates", type=int, default=4 if strong else 0)
-    parser.add_argument("--rollout-lookahead", type=int, default=1)
+    parser.add_argument(
+        "--rollout-lookahead",
+        type=int,
+        default=0 if strong else 1,
+        help="Lookahead used by the policy inside a long rollout; 0 avoids nested beam search",
+    )
     parser.add_argument("--rollout-beam", type=int, default=4)
     parser.add_argument("--progress-every", type=int, default=100 if strong else 500)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0 if strong else 1,
+        help="Parallel game workers; 0 uses available CPU cores",
+    )
     _add_search_args(parser)
     parser.set_defaults(func=_generate)
 
