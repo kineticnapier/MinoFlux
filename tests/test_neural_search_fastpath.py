@@ -36,7 +36,7 @@ class _SlowTieScorer:
         return (1.0,) * len(evaluations)
 
 
-def test_fast_scorer_prunes_before_expensive_heuristic_features() -> None:
+def test_fast_scorer_prunes_without_full_heuristic_features() -> None:
     import minoflux_ai.search as search_module
 
     game = Game(12345)
@@ -47,16 +47,12 @@ def test_fast_scorer_prunes_before_expensive_heuristic_features() -> None:
         srs_reachable=False,
     )
     scorer = _FastIndexScorer()
-    feature_batch_sizes: list[int] = []
-    original = search_module.rank_placements
 
-    def recording_rank(game, weights=DEFAULT_WEIGHTS, *, placements=None, limit=None):
-        materialized = tuple(placements) if placements is not None else None
-        if materialized is not None:
-            feature_batch_sizes.append(len(materialized))
-        return original(game, weights, placements=materialized, limit=limit)
-
-    with patch.object(search_module, "rank_placements", side_effect=recording_rank):
+    with patch.object(
+        search_module,
+        "rank_placements",
+        side_effect=AssertionError("neural fast path must not call rank_placements"),
+    ):
         ranked = rank_search_actions(
             game,
             DEFAULT_WEIGHTS,
@@ -69,7 +65,6 @@ def test_fast_scorer_prunes_before_expensive_heuristic_features() -> None:
     assert scorer.placement_calls == 1
     assert scorer.evaluation_calls == 0
     assert scorer.placements_seen > 1
-    assert feature_batch_sizes == [1]
 
 
 def test_fast_scorer_keeps_existing_tie_break_order() -> None:
