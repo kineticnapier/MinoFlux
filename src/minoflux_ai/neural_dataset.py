@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path
+import random
 from typing import Callable, Iterable, Sequence
 
 from minoflux_engine import Game
 
 from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights
 from .neural import NeuralState, NeuralValueConfig, encode_game_state
+from .neural_supervision import rollout_clean_attack_target, teacher_scores_for_actions
 from .search import (
     SearchAction,
     SearchConfig,
@@ -37,16 +39,45 @@ class NeuralDatasetConfig:
     seed_base: int = 3_000_001
     seed_step: int = 31
     max_candidates: int = 24
+    sampling_mode: str = "diverse"
+    hard_candidates: int = 8
+    medium_candidates: int = 5
+    random_candidates: int = 5
+    bad_candidates: int = 5
+    random_seed: int = 24_680
+    teacher_lookahead: int = 0
+    teacher_beam_width: int = 4
+    teacher_acceptable_margin: float = 0.0
+    rollout_horizon: int = 0
+    rollout_candidates: int = 0
+    rollout_lookahead: int = 1
+    rollout_beam_width: int = 4
     search_config: SearchConfig = DEFAULT_DATASET_SEARCH
     neural_config: NeuralValueConfig = NeuralValueConfig()
 
     def normalized(self) -> "NeuralDatasetConfig":
+        sampling_mode = str(self.sampling_mode or "diverse").strip().lower()
+        if sampling_mode not in {"diverse", "hard"}:
+            raise ValueError("sampling_mode must be 'diverse' or 'hard'")
         return NeuralDatasetConfig(
             games=max(1, int(self.games)),
             max_pieces=max(1, int(self.max_pieces)),
             seed_base=int(self.seed_base),
             seed_step=max(1, int(self.seed_step)),
             max_candidates=max(0, int(self.max_candidates)),
+            sampling_mode=sampling_mode,
+            hard_candidates=max(0, int(self.hard_candidates)),
+            medium_candidates=max(0, int(self.medium_candidates)),
+            random_candidates=max(0, int(self.random_candidates)),
+            bad_candidates=max(0, int(self.bad_candidates)),
+            random_seed=int(self.random_seed),
+            teacher_lookahead=min(3, max(0, int(self.teacher_lookahead))),
+            teacher_beam_width=min(128, max(1, int(self.teacher_beam_width))),
+            teacher_acceptable_margin=max(0.0, float(self.teacher_acceptable_margin)),
+            rollout_horizon=max(0, int(self.rollout_horizon)),
+            rollout_candidates=max(0, int(self.rollout_candidates)),
+            rollout_lookahead=min(3, max(0, int(self.rollout_lookahead))),
+            rollout_beam_width=min(128, max(1, int(self.rollout_beam_width))),
             search_config=self.search_config.normalized(),
             neural_config=self.neural_config.normalized(),
         )
@@ -57,13 +88,23 @@ class NeuralRankingCandidate:
     board_rows: tuple[int, ...]
     context: tuple[float, ...]
     move: tuple[object, ...]
+    teacher_score: float | None = None
+    target_value: float | None = None
+    sampling_bucket: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "rows": list(self.board_rows),
             "context": list(self.context),
             "move": list(self.move),
         }
+        if self.teacher_score is not None:
+            result["teacherScore"] = float(self.teacher_score)
+        if self.target_value is not None:
+            result["targetValue"] = float(self.target_value)
+        if self.sampling_bucket is not None:
+            result["samplingBucket"] = self.sampling_bucket
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,13 +113,16 @@ class NeuralRankingSample:
     piece_index: int
     expert_index: int
     candidates: tuple[NeuralRankingCandidate, ...]
+    expert_indices: tuple[int, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
+        positives = self.expert_indices or (self.expert_index,)
         return {
             "format": NEURAL_DATASET_FORMAT,
             "seed": self.seed,
             "pieceIndex": self.piece_index,
             "expertIndex": self.expert_index,
+            "expertIndices": list(positives),
             "candidates": [candidate.to_dict() for candidate in self.candidates],
         }
 
@@ -127,10 +171,18 @@ def _move_tuple(action: SearchAction) -> tuple[object, ...]:
     )
 
 
+def _action_key(action: SearchAction) -> tuple[object, ...]:
+    return _move_tuple(action)
+
+
 def _candidate_state(
     game: Game,
     action: SearchAction,
     neural_config: NeuralValueConfig,
+    *,
+    teacher_score: float | None = None,
+    target_value: float | None = None,
+    sampling_bucket: str | None = None,
 ) -> NeuralRankingCandidate:
     child = clone_game(game)
     apply_search_action(child, action)
@@ -139,6 +191,9 @@ def _candidate_state(
         board_rows=pack_board_rows(state.board, neural_config),
         context=state.context,
         move=_move_tuple(action),
+        teacher_score=teacher_score,
+        target_value=target_value,
+        sampling_bucket=sampling_bucket,
     )
 
 
@@ -157,6 +212,117 @@ def _keep_hard_candidates(
     return tuple(kept)
 
 
+def _sample_from_pool(
+    pool: Sequence[int],
+    count: int,
+    rng: random.Random,
+    selected: set[int],
+) -> list[int]:
+    available = [index for index in pool if index not in selected]
+    if count <= 0 or not available:
+        return []
+    if len(available) <= count:
+        return available
+    return rng.sample(available, count)
+
+
+def _select_diverse_candidates(
+    ranked: Sequence[tuple[SearchAction, object]],
+    expert_action: SearchAction,
+    config: NeuralDatasetConfig,
+    rng: random.Random,
+) -> tuple[tuple[SearchAction, object, str], ...]:
+    """Keep expert + hard, medium, random, and clearly bad negatives."""
+
+    cfg = config.normalized()
+    if cfg.sampling_mode == "hard":
+        kept = _keep_hard_candidates(ranked, expert_action, cfg.max_candidates)
+        expert_key = _action_key(expert_action)
+        return tuple(
+            (action, evaluation, "expert" if _action_key(action) == expert_key else "hard")
+            for action, evaluation in kept
+        )
+
+    if not ranked:
+        return ()
+    if cfg.max_candidates <= 0 or len(ranked) <= cfg.max_candidates:
+        expert_key = _action_key(expert_action)
+        return tuple(
+            (action, evaluation, "expert" if _action_key(action) == expert_key else "all")
+            for action, evaluation in ranked
+        )
+
+    cap = max(1, cfg.max_candidates)
+    expert_key = _action_key(expert_action)
+    expert_rank = next(
+        index for index, (action, _evaluation) in enumerate(ranked)
+        if _action_key(action) == expert_key
+    )
+    selected: set[int] = {expert_rank}
+    buckets: dict[int, str] = {expert_rank: "expert"}
+
+    n = len(ranked)
+    hard_pool = list(range(0, max(1, n // 3)))
+    medium_pool = list(range(max(1, n // 3), max(2, (2 * n) // 3)))
+    bad_pool = list(range(max(0, (2 * n) // 3), n))
+
+    def take(pool: Sequence[int], count: int, bucket: str, *, randomize: bool) -> None:
+        remaining = max(0, cap - len(selected))
+        if remaining <= 0:
+            return
+        wanted = min(max(0, int(count)), remaining)
+        if randomize:
+            indices = _sample_from_pool(pool, wanted, rng, selected)
+        else:
+            indices = [index for index in pool if index not in selected][:wanted]
+        for index in indices:
+            selected.add(index)
+            buckets[index] = bucket
+
+    take(hard_pool, cfg.hard_candidates, "hard", randomize=False)
+    take(medium_pool, cfg.medium_candidates, "medium", randomize=True)
+    take(bad_pool[::-1], cfg.bad_candidates, "bad", randomize=False)
+
+    remaining_pool = [index for index in range(n) if index not in selected]
+    take(remaining_pool, cfg.random_candidates, "random", randomize=True)
+
+    # Quotas are targets, not hard requirements. Fill an undersubscribed sample
+    # by heuristic rank so every record still uses the requested candidate cap.
+    if len(selected) < cap:
+        for index in range(n):
+            if index in selected:
+                continue
+            selected.add(index)
+            buckets[index] = "fill"
+            if len(selected) >= cap:
+                break
+
+    return tuple(
+        (ranked[index][0], ranked[index][1], buckets[index])
+        for index in sorted(selected)
+    )
+
+
+def _rollout_indices(
+    teacher_scores: Sequence[float],
+    count: int,
+    rng: random.Random,
+) -> tuple[int, ...]:
+    if count <= 0 or not teacher_scores:
+        return ()
+    count = min(len(teacher_scores), max(1, int(count)))
+    ordered = sorted(range(len(teacher_scores)), key=lambda index: teacher_scores[index], reverse=True)
+    top_count = min(count, max(1, (count + 1) // 2))
+    selected = set(ordered[:top_count])
+    if len(selected) < count and len(ordered) > 1:
+        selected.add(ordered[-1])
+    remaining = [index for index in range(len(teacher_scores)) if index not in selected]
+    need = count - len(selected)
+    if need > 0:
+        selected.update(rng.sample(remaining, min(need, len(remaining))))
+    return tuple(sorted(selected))
+
+
 def generate_neural_ranking_samples(
     config: NeuralDatasetConfig = NeuralDatasetConfig(),
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
@@ -166,7 +332,6 @@ def generate_neural_ranking_samples(
         seed = cfg.seed_base + game_index * cfg.seed_step
         game = Game(seed)
         while not game.game_over and game.pieces_placed < cfg.max_pieces:
-            # Enumerate the full root once so the dataset can keep hard alternatives.
             ranked = rank_search_actions(
                 game,
                 weights,
@@ -176,33 +341,84 @@ def generate_neural_ranking_samples(
             if not ranked:
                 break
 
-            # With no future lookahead, the best root candidate is exactly the move
-            # Champion would choose, so avoid a second identical SRS/search pass.
-            if cfg.search_config.lookahead_pieces == 0:
-                expert_action = ranked[0][0]
+            teacher_cfg = replace(
+                cfg.search_config,
+                lookahead_pieces=cfg.teacher_lookahead,
+                beam_width=cfg.teacher_beam_width,
+            ).normalized()
+            if cfg.teacher_lookahead == 0:
+                teacher_action = ranked[0][0]
             else:
-                expert = choose_search_action(game, weights, cfg.search_config)
-                if expert is None:
+                teacher = choose_search_action(game, weights, teacher_cfg)
+                if teacher is None:
                     break
-                expert_action = expert.action
+                teacher_action = teacher.action
 
-            # The label is the action Champion actually chooses. Numeric heuristic
-            # scores are deliberately not stored as neural regression targets.
-            source = _keep_hard_candidates(ranked, expert_action, cfg.max_candidates)
-            actions = [action for action, _ in source]
-            if expert_action not in actions:
-                raise AssertionError("Expert action disappeared from neural ranking candidates")
+            state_rng = random.Random(
+                cfg.random_seed
+                ^ int(seed)
+                ^ ((int(game.pieces_placed) + 1) * 0x9E3779B1)
+            )
+            selected = _select_diverse_candidates(ranked, teacher_action, cfg, state_rng)
+            selected_pairs = tuple((action, evaluation) for action, evaluation, _bucket in selected)
+            teacher_scores = teacher_scores_for_actions(
+                game,
+                selected_pairs,
+                weights,
+                cfg.search_config,
+                lookahead_pieces=cfg.teacher_lookahead,
+                beam_width=cfg.teacher_beam_width,
+            )
+            if not teacher_scores:
+                break
+
+            best_teacher = max(teacher_scores)
+            primary_index = max(range(len(teacher_scores)), key=lambda index: teacher_scores[index])
+            acceptable = tuple(
+                index
+                for index, score in enumerate(teacher_scores)
+                if best_teacher - score <= cfg.teacher_acceptable_margin + 1e-12
+            )
+            if primary_index not in acceptable:
+                acceptable = tuple(sorted((*acceptable, primary_index)))
+
+            rollout_targets: dict[int, float] = {}
+            if cfg.rollout_horizon > 0 and cfg.rollout_candidates > 0:
+                rollout_cfg = replace(
+                    cfg.search_config,
+                    lookahead_pieces=cfg.rollout_lookahead,
+                    beam_width=cfg.rollout_beam_width,
+                ).normalized()
+                for index in _rollout_indices(teacher_scores, cfg.rollout_candidates, state_rng):
+                    action, evaluation = selected_pairs[index]
+                    rollout_targets[index] = rollout_clean_attack_target(
+                        game,
+                        action,
+                        evaluation,
+                        weights,
+                        rollout_cfg,
+                        horizon=cfg.rollout_horizon,
+                    )
+
             candidates = tuple(
-                _candidate_state(game, action, cfg.neural_config)
-                for action in actions
+                _candidate_state(
+                    game,
+                    action,
+                    cfg.neural_config,
+                    teacher_score=teacher_scores[index],
+                    target_value=rollout_targets.get(index),
+                    sampling_bucket=bucket,
+                )
+                for index, (action, _evaluation, bucket) in enumerate(selected)
             )
             yield NeuralRankingSample(
                 seed=seed,
                 piece_index=game.pieces_placed,
-                expert_index=actions.index(expert_action),
+                expert_index=primary_index,
+                expert_indices=acceptable,
                 candidates=candidates,
             )
-            apply_search_action(game, expert_action)
+            apply_search_action(game, selected_pairs[primary_index][0])
 
 
 def write_neural_ranking_dataset(
@@ -219,11 +435,13 @@ def write_neural_ranking_dataset(
     temporary = target.with_suffix(target.suffix + ".tmp")
     samples = 0
     candidates = 0
+    rollout_targets = 0
     with temporary.open("w", encoding="utf-8") as stream:
         for sample in generate_neural_ranking_samples(cfg, weights):
             stream.write(json.dumps(sample.to_dict(), separators=(",", ":")) + "\n")
             samples += 1
             candidates += len(sample.candidates)
+            rollout_targets += sum(candidate.target_value is not None for candidate in sample.candidates)
             if progress is not None and samples % max(1, int(progress_every)) == 0:
                 progress(samples, candidates)
     temporary.replace(target)
@@ -232,12 +450,26 @@ def write_neural_ranking_dataset(
         "path": str(target),
         "samples": samples,
         "candidates": candidates,
+        "rolloutTargets": rollout_targets,
         "config": {
             "games": cfg.games,
             "maxPieces": cfg.max_pieces,
             "seedBase": cfg.seed_base,
             "seedStep": cfg.seed_step,
             "maxCandidates": cfg.max_candidates,
+            "samplingMode": cfg.sampling_mode,
+            "hardCandidates": cfg.hard_candidates,
+            "mediumCandidates": cfg.medium_candidates,
+            "randomCandidates": cfg.random_candidates,
+            "badCandidates": cfg.bad_candidates,
+            "randomSeed": cfg.random_seed,
+            "teacherLookahead": cfg.teacher_lookahead,
+            "teacherBeamWidth": cfg.teacher_beam_width,
+            "teacherAcceptableMargin": cfg.teacher_acceptable_margin,
+            "rolloutHorizon": cfg.rollout_horizon,
+            "rolloutCandidates": cfg.rollout_candidates,
+            "rolloutLookahead": cfg.rollout_lookahead,
+            "rolloutBeamWidth": cfg.rollout_beam_width,
             "searchConfig": cfg.search_config.to_dict(),
             "neuralConfig": asdict(cfg.neural_config),
         },
