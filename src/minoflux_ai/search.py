@@ -147,6 +147,65 @@ def _score_evaluations(
     return tuple(sorted(rescored, key=_evaluation_key, reverse=True))
 
 
+def _score_placements_before_features(
+    game: Game,
+    placements: Sequence[Placement],
+    weights: HeuristicWeights,
+    scorer: SearchScorer,
+    limit: int | None,
+) -> tuple[PlacementEvaluation, ...] | None:
+    """Use a scorer's placement-only fast path before expensive heuristic features.
+
+    Neural search only needs heuristic features for final tie-breaking and for the
+    SearchChoice metadata.  Scoring every legal move first lets us compute the
+    expensive garbage/T-spin heuristic features only for moves that can survive
+    neural pruning.  Equal neural scores at the cutoff are all retained so the
+    existing heuristic tie-break order stays exact.
+    """
+
+    score_placements = getattr(scorer, "score_placements", None)
+    if not callable(score_placements):
+        return None
+    if not placements:
+        return ()
+
+    values = tuple(float(value) for value in score_placements(game, placements))
+    if len(values) != len(placements):
+        raise ValueError(
+            f"Search scorer returned {len(values)} values for {len(placements)} placements"
+        )
+
+    count = len(placements) if limit is None else max(0, int(limit))
+    if count == 0:
+        return ()
+
+    indexed = tuple(zip(placements, values))
+    if count < len(indexed):
+        cutoff = sorted(values, reverse=True)[count - 1]
+        survivors = tuple((placement, score) for placement, score in indexed if score >= cutoff)
+    else:
+        survivors = indexed
+
+    neural_scores = {id(placement): score for placement, score in survivors}
+    evaluated = rank_placements(
+        game,
+        weights,
+        placements=(placement for placement, _score in survivors),
+        limit=None,
+    )
+    rescored = tuple(
+        PlacementEvaluation(
+            placement=evaluation.placement,
+            score=neural_scores[id(evaluation.placement)],
+            features=evaluation.features,
+        )
+        for evaluation in evaluated
+    )
+    if count < len(rescored):
+        return tuple(nlargest(count, rescored, key=_evaluation_key))
+    return tuple(sorted(rescored, key=_evaluation_key, reverse=True))
+
+
 def _candidate_key(item: tuple[SearchAction, PlacementEvaluation]) -> tuple[float, int, int, int, int, int, int, int]:
     action, evaluation = item
     features = evaluation.features
@@ -172,6 +231,37 @@ def _placements_for_game(game: Game, config: SearchConfig) -> tuple[Placement, .
     )
 
 
+def _rank_branch(
+    game: Game,
+    placements: Sequence[Placement],
+    weights: HeuristicWeights,
+    scorer: SearchScorer | None,
+    branch_limit: int | None,
+) -> tuple[PlacementEvaluation, ...]:
+    if scorer is not None:
+        fast = _score_placements_before_features(
+            game,
+            placements,
+            weights,
+            scorer,
+            branch_limit,
+        )
+        if fast is not None:
+            return fast
+
+    evaluations = rank_placements(
+        game,
+        weights,
+        placements=placements,
+        # A custom scorer must see the whole legal branch before pruning; otherwise
+        # the heuristic would silently decide which neural candidates are visible.
+        limit=branch_limit if scorer is None else None,
+    )
+    if scorer is not None:
+        evaluations = _score_evaluations(game, evaluations, scorer, branch_limit)
+    return evaluations
+
+
 def rank_search_actions(
     game: Game,
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
@@ -183,16 +273,13 @@ def rank_search_actions(
     cfg = config.normalized()
     branch_limit = None if limit is None else max(1, int(limit))
     direct_placements = _placements_for_game(game, cfg)
-    direct_evaluations = rank_placements(
+    direct_evaluations = _rank_branch(
         game,
+        direct_placements,
         weights,
-        placements=direct_placements,
-        # A custom scorer must see the whole legal branch before pruning; otherwise
-        # the heuristic would silently decide which neural candidates are visible.
-        limit=branch_limit if scorer is None else None,
+        scorer,
+        branch_limit,
     )
-    if scorer is not None:
-        direct_evaluations = _score_evaluations(game, direct_evaluations, scorer, branch_limit)
     candidates: list[tuple[SearchAction, PlacementEvaluation]] = [
         (SearchAction(False, evaluation.placement), evaluation)
         for evaluation in direct_evaluations
@@ -202,19 +289,13 @@ def rank_search_actions(
         held = clone_game(game)
         if held.hold():
             held_placements = _placements_for_game(held, cfg)
-            held_evaluations = rank_placements(
+            held_evaluations = _rank_branch(
                 held,
+                held_placements,
                 weights,
-                placements=held_placements,
-                limit=branch_limit if scorer is None else None,
+                scorer,
+                branch_limit,
             )
-            if scorer is not None:
-                held_evaluations = _score_evaluations(
-                    held,
-                    held_evaluations,
-                    scorer,
-                    branch_limit,
-                )
             candidates.extend(
                 (SearchAction(True, evaluation.placement), evaluation)
                 for evaluation in held_evaluations
