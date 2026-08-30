@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+from array import array
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from minoflux_engine import Game, Placement
 from minoflux_engine.b2b import resolve_b2b_charging
-from minoflux_engine.pieces import SHAPES
-from minoflux_engine.spin import base_attack, classify_t_spin, is_difficult_clear, t_spin_event
+from minoflux_engine.spin import base_attack, is_difficult_clear, t_spin_event
 
+from .bitboard import (
+    ROW_OCCUPANCY_BYTES,
+    board_row_masks,
+    classify_t_spin_row_masks,
+    collides_row_masks,
+    hidden_rows_occupied,
+    place_and_clear_row_masks,
+)
 from .heuristic import PlacementEvaluation
 
 NEURAL_VALUE_FORMAT = "minoflux_neural_value_v1"
@@ -17,6 +26,23 @@ NEURAL_BOARD_WIDTH = 10
 NEURAL_QUEUE_LENGTH = 5
 PIECES = ("I", "O", "T", "S", "Z", "J", "L")
 _PIECE_INDEX = {piece: index for index, piece in enumerate(PIECES)}
+_ZERO_PIECE = (0.0,) * len(PIECES)
+_ZERO_HOLD = (0.0,) * (len(PIECES) + 1)
+_PIECE_ONE_HOT = {
+    piece: tuple(1.0 if index == piece_index else 0.0 for index in range(len(PIECES)))
+    for piece, piece_index in _PIECE_INDEX.items()
+}
+_HOLD_ONE_HOT = {
+    piece: tuple(
+        1.0 if index == piece_index else 0.0
+        for index in range(len(PIECES) + 1)
+    )
+    for piece, piece_index in _PIECE_INDEX.items()
+}
+_HOLD_ONE_HOT[None] = tuple(
+    1.0 if index == len(PIECES) else 0.0
+    for index in range(len(PIECES) + 1)
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +92,6 @@ class NeuralValueConfig:
 
     @property
     def context_size(self) -> int:
-        # current piece + hold/none + queue + scalar game context
         return len(PIECES) + (len(PIECES) + 1) + self.queue_length * len(PIECES) + 9
 
 
@@ -76,23 +101,64 @@ class NeuralState:
     context: tuple[float, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _CompactNeuralState:
+    rows: tuple[int, ...]
+    context: tuple[float, ...]
+
+
 def _one_hot_piece(piece: str | None, *, include_none: bool = False) -> tuple[float, ...]:
-    size = len(PIECES) + int(include_none)
-    values = [0.0] * size
+    if include_none:
+        if piece is None:
+            return _HOLD_ONE_HOT[None]
+        return _HOLD_ONE_HOT.get(str(piece).upper(), _ZERO_HOLD)
     if piece is None:
-        if include_none:
-            values[-1] = 1.0
-        return tuple(values)
-    index = _PIECE_INDEX.get(str(piece).upper())
-    if index is not None:
-        values[index] = 1.0
-    elif include_none:
-        values[-1] = 1.0
-    return tuple(values)
+        return _ZERO_PIECE
+    return _PIECE_ONE_HOT.get(str(piece).upper(), _ZERO_PIECE)
 
 
 def _clip01(value: float) -> float:
     return min(1.0, max(0.0, float(value)))
+
+
+def _context_values(
+    *,
+    current: str,
+    hold_piece: str | None,
+    queue: Sequence[str | None],
+    combo: int,
+    back_to_back: bool,
+    b2b_chain: int,
+    surge_charge: int,
+    game_over: bool,
+    last_lines: int,
+    last_attack: int,
+    last_spin: bool,
+    last_perfect_clear: bool,
+    config: NeuralValueConfig,
+) -> tuple[float, ...]:
+    context: list[float] = []
+    context.extend(_one_hot_piece(current))
+    context.extend(_one_hot_piece(hold_piece, include_none=True))
+    for index in range(config.queue_length):
+        piece = queue[index] if index < len(queue) else None
+        context.extend(_one_hot_piece(piece))
+    context.extend(
+        (
+            _clip01((combo + 1) / 16.0),
+            float(bool(back_to_back)),
+            _clip01(b2b_chain / 20.0),
+            _clip01(surge_charge / 20.0),
+            float(bool(game_over)),
+            _clip01(last_lines / 4.0),
+            _clip01(last_attack / 20.0),
+            float(bool(last_spin)),
+            float(bool(last_perfect_clear)),
+        )
+    )
+    if len(context) != config.context_size:
+        raise AssertionError(f"Neural context size mismatch: {len(context)} != {config.context_size}")
+    return tuple(context)
 
 
 def _encode_components(
@@ -118,37 +184,25 @@ def _encode_components(
             f"Expected board shape {cfg.board_height}x{cfg.board_width}, "
             f"got {len(board_rows)}x{len(board_rows[0]) if board_rows else 0}"
         )
-
-    board = tuple(
-        0.0 if cell is None else 1.0
-        for row in board_rows
-        for cell in row
+    board = tuple(0.0 if cell is None else 1.0 for row in board_rows for cell in row)
+    return NeuralState(
+        board=board,
+        context=_context_values(
+            current=current,
+            hold_piece=hold_piece,
+            queue=queue,
+            combo=combo,
+            back_to_back=back_to_back,
+            b2b_chain=b2b_chain,
+            surge_charge=surge_charge,
+            game_over=game_over,
+            last_lines=last_lines,
+            last_attack=last_attack,
+            last_spin=last_spin,
+            last_perfect_clear=last_perfect_clear,
+            config=cfg,
+        ),
     )
-    next_queue = list(queue)[: cfg.queue_length]
-    while len(next_queue) < cfg.queue_length:
-        next_queue.append(None)
-
-    context: list[float] = []
-    context.extend(_one_hot_piece(current))
-    context.extend(_one_hot_piece(hold_piece, include_none=True))
-    for piece in next_queue:
-        context.extend(_one_hot_piece(piece))
-    context.extend(
-        (
-            _clip01((combo + 1) / 16.0),
-            float(bool(back_to_back)),
-            _clip01(b2b_chain / 20.0),
-            _clip01(surge_charge / 20.0),
-            float(bool(game_over)),
-            _clip01(last_lines / 4.0),
-            _clip01(last_attack / 20.0),
-            float(bool(last_spin)),
-            float(bool(last_perfect_clear)),
-        )
-    )
-    if len(context) != cfg.context_size:
-        raise AssertionError(f"Neural context size mismatch: {len(context)} != {cfg.context_size}")
-    return NeuralState(board=board, context=tuple(context))
 
 
 def encode_game_state(
@@ -174,77 +228,36 @@ def encode_game_state(
     )
 
 
-def _board_collides(
-    board: Sequence[Sequence[object | None]],
-    piece: str,
-    x: int,
-    y: int,
-    rotation: int,
-) -> bool:
-    height = len(board)
-    width = len(board[0]) if board else 0
-    for dx, dy in SHAPES[piece][rotation % 4]:
-        cell_x, cell_y = x + dx, y + dy
-        if cell_x < 0 or cell_x >= width or cell_y >= height:
-            return True
-        if cell_y >= 0 and board[cell_y][cell_x] is not None:
-            return True
-    return False
-
-
-def encode_placement_result(
+def _encode_placement_result_compact(
     game: Game,
     placement: Placement,
-    config: NeuralValueConfig = NeuralValueConfig(),
-) -> NeuralState | None:
-    """Encode a post-placement state without cloning or mutating ``game``.
-
-    Returns ``None`` only when the configured queue preview would require drawing
-    fresh bag pieces. The normal five-piece neural preview is always available
-    from a regular engine state (including the lightweight Hold search state).
-    """
-
-    cfg = config.normalized()
+    config: NeuralValueConfig,
+    *,
+    source_rows: tuple[int, ...] | None = None,
+    source_queue: tuple[str, ...] | None = None,
+) -> _CompactNeuralState | None:
     if placement.piece != game.current:
         raise ValueError(f"Placement is for {placement.piece}, current piece is {game.current}")
+    rows = source_rows if source_rows is not None else board_row_masks(game.board)
+    queue = source_queue if source_queue is not None else tuple(game.queue)
 
-    spin_kind = classify_t_spin(
-        game.board,
+    spin_kind = classify_t_spin_row_masks(
+        rows,
         piece=placement.piece,
         x=placement.x,
         y=placement.y,
         rotation=placement.rotation,
         last_move_was_rotation=placement.last_move_was_rotation,
         rotation_kick_index=placement.rotation_kick_index,
+        width=game.width,
     )
-
-    board: list[Sequence[object | None]] = list(game.board)
-    copied_rows: set[int] = set()
-    topped_out = False
-    for cell_x, cell_y in placement.cells:
-        if cell_y < 0:
-            topped_out = True
-            continue
-        if cell_y >= game.height:
-            topped_out = True
-            continue
-        if cell_y not in copied_rows:
-            board[cell_y] = list(game.board[cell_y])
-            copied_rows.add(cell_y)
-        row = board[cell_y]
-        assert isinstance(row, list)
-        row[cell_x] = placement.piece
-
-    full_rows = [index for index, row in enumerate(board) if all(cell is not None for cell in row)]
-    lines = len(full_rows)
-    if full_rows:
-        full_set = set(full_rows)
-        board = [[None] * game.width for _ in full_rows] + [
-            row for index, row in enumerate(board) if index not in full_set
-        ]
-
+    after_rows, lines, topped_out = place_and_clear_row_masks(
+        rows,
+        placement,
+        width=game.width,
+    )
     spin = t_spin_event(spin_kind, lines)
-    perfect_clear = all(cell is None for row in board for cell in row)
+    perfect_clear = not any(after_rows)
     difficult = is_difficult_clear(lines, spin)
     b2b = resolve_b2b_charging(
         active=game.back_to_back,
@@ -253,7 +266,6 @@ def encode_placement_result(
         lines=lines,
         perfect_clear=perfect_clear and lines > 0,
     )
-
     combo = game.combo + 1 if lines else -1
     sent = base_attack(lines, spin) + b2b.attack_bonus
     if lines and combo > 0:
@@ -262,27 +274,26 @@ def encode_placement_result(
         sent += 10
     total_sent = sent + b2b.released
 
-    hidden_occupied = any(
-        cell is not None
-        for row in board[: game.hidden_rows]
-        for cell in row
-    )
-    locked_out = topped_out or hidden_occupied
-    source_queue = tuple(game.queue)
-
+    locked_out = topped_out or hidden_rows_occupied(after_rows, game.hidden_rows)
     if locked_out:
         current = game.current
-        next_queue: Sequence[str | None] = source_queue
+        next_queue: Sequence[str | None] = queue
         game_over = True
     else:
-        if len(source_queue) < cfg.queue_length + 1:
+        if len(queue) < config.queue_length + 1:
             return None
-        current = source_queue[0]
-        next_queue = source_queue[1:]
-        game_over = _board_collides(board, current, 3, 1, 0)
+        current = queue[0]
+        next_queue = queue[1:]
+        game_over = collides_row_masks(
+            after_rows,
+            current,
+            3,
+            1,
+            0,
+            width=game.width,
+        )
 
-    return _encode_components(
-        board,
+    context = _context_values(
         current=current,
         hold_piece=game.hold_piece,
         queue=next_queue,
@@ -295,8 +306,28 @@ def encode_placement_result(
         last_attack=total_sent,
         last_spin=spin is not None,
         last_perfect_clear=perfect_clear,
-        config=cfg,
+        config=config,
     )
+    return _CompactNeuralState(rows=after_rows, context=context)
+
+
+def encode_placement_result(
+    game: Game,
+    placement: Placement,
+    config: NeuralValueConfig = NeuralValueConfig(),
+) -> NeuralState | None:
+    """Encode a post-placement state without cloning or mutating ``game``."""
+
+    cfg = config.normalized()
+    compact = _encode_placement_result_compact(game, placement, cfg)
+    if compact is None:
+        return None
+    board = tuple(
+        float(bool(mask & (1 << x)))
+        for mask in compact.rows
+        for x in range(cfg.board_width)
+    )
+    return NeuralState(board=board, context=compact.context)
 
 
 def _require_torch() -> tuple[Any, Any]:
@@ -351,6 +382,19 @@ def _resolve_device(torch: Any, device: str | None) -> str:
     return requested
 
 
+def _resolve_precision(device: str, precision: str | None) -> str:
+    requested = "float32" if precision is None else str(precision).strip().lower()
+    aliases = {"fp32": "float32", "fp16": "float16", "bf16": "bfloat16"}
+    requested = aliases.get(requested, requested)
+    if requested == "auto":
+        return "float16" if device.startswith("cuda") else "float32"
+    if requested not in {"float32", "float16", "bfloat16"}:
+        raise ValueError("precision must be float32, float16, bfloat16, or auto")
+    if requested == "float16" and not device.startswith("cuda"):
+        raise ValueError("float16 neural inference currently requires CUDA")
+    return requested
+
+
 class NeuralValueEvaluator:
     """Batched leaf evaluator that can replace heuristic placement scores in search."""
 
@@ -360,13 +404,23 @@ class NeuralValueEvaluator:
         config: NeuralValueConfig = NeuralValueConfig(),
         *,
         device: str | None = "auto",
+        precision: str | None = "float32",
+        compile_model: bool = False,
     ) -> None:
         torch, _ = _require_torch()
         self._torch = torch
         self.config = config.normalized()
         self.device = _resolve_device(torch, device)
+        self.precision = _resolve_precision(self.device, precision)
         self.model = model.to(self.device)
         self.model.eval()
+        self.compiled = False
+        if compile_model:
+            compile_fn = getattr(torch, "compile", None)
+            if not callable(compile_fn):
+                raise RuntimeError("This PyTorch build does not provide torch.compile")
+            self.model = compile_fn(self.model, mode="reduce-overhead")
+            self.compiled = True
 
     @classmethod
     def from_checkpoint(
@@ -374,6 +428,8 @@ class NeuralValueEvaluator:
         path: str | Path,
         *,
         device: str | None = "auto",
+        precision: str | None = "float32",
+        compile_model: bool = False,
     ) -> "NeuralValueEvaluator":
         torch, _ = _require_torch()
         target_device = _resolve_device(torch, device)
@@ -390,30 +446,66 @@ class NeuralValueEvaluator:
         config = NeuralValueConfig.from_mapping(raw_config)
         model = build_neural_value_model(config)
         model.load_state_dict(state_dict)
-        return cls(model, config, device=target_device)
+        return cls(
+            model,
+            config,
+            device=target_device,
+            precision=precision,
+            compile_model=compile_model,
+        )
+
+    def _autocast_context(self):
+        if self.precision == "float32":
+            return nullcontext()
+        dtype = (
+            self._torch.float16
+            if self.precision == "float16"
+            else self._torch.bfloat16
+        )
+        return self._torch.autocast(
+            device_type=self.device.split(":", 1)[0],
+            dtype=dtype,
+        )
 
     def _score_states(self, states: Sequence[NeuralState]) -> tuple[float, ...]:
         if not states:
             return ()
         torch = self._torch
-        flat_boards = [value for state in states for value in state.board]
-        flat_contexts = [value for state in states for value in state.context]
-        boards = torch.tensor(
-            flat_boards,
-            dtype=torch.float32,
-            device=self.device,
-        ).reshape(
-            len(states),
-            1,
-            self.config.board_height,
-            self.config.board_width,
+        board_values = array("f")
+        context_values = array("f")
+        for state in states:
+            board_values.extend(state.board)
+            context_values.extend(state.context)
+        boards = torch.frombuffer(board_values, dtype=torch.float32).reshape(
+            len(states), 1, self.config.board_height, self.config.board_width
+        ).to(self.device)
+        contexts = torch.frombuffer(context_values, dtype=torch.float32).reshape(
+            len(states), self.config.context_size
+        ).to(self.device)
+        with torch.inference_mode(), self._autocast_context():
+            values = self.model(boards, contexts).reshape(-1)
+        return tuple(float(value) for value in values.detach().cpu().tolist())
+
+    def _score_compact_states(self, states: Sequence[_CompactNeuralState]) -> tuple[float, ...]:
+        if not states:
+            return ()
+        torch = self._torch
+        board_bytes = bytearray()
+        context_values = array("f")
+        for state in states:
+            for mask in state.rows:
+                board_bytes.extend(ROW_OCCUPANCY_BYTES[mask])
+            context_values.extend(state.context)
+
+        board_cpu = torch.frombuffer(board_bytes, dtype=torch.uint8).reshape(
+            len(states), 1, self.config.board_height, self.config.board_width
         )
-        contexts = torch.tensor(
-            flat_contexts,
-            dtype=torch.float32,
-            device=self.device,
-        ).reshape(len(states), self.config.context_size)
-        with torch.inference_mode():
+        context_cpu = torch.frombuffer(context_values, dtype=torch.float32).reshape(
+            len(states), self.config.context_size
+        )
+        boards = board_cpu.to(device=self.device, dtype=torch.float32)
+        contexts = context_cpu.to(device=self.device)
+        with torch.inference_mode(), self._autocast_context():
             values = self.model(boards, contexts).reshape(-1)
         return tuple(float(value) for value in values.detach().cpu().tolist())
 
@@ -421,25 +513,35 @@ class NeuralValueEvaluator:
         self,
         groups: Sequence[tuple[Game, Sequence[Placement]]],
     ) -> tuple[tuple[float, ...], ...]:
-        """Score several game/placement groups in one GPU forward pass."""
+        """Score several game/placement groups in one compact GPU forward pass."""
 
-        states: list[NeuralState] = []
+        states: list[_CompactNeuralState] = []
         sizes: list[int] = []
         for game, placements in groups:
             sizes.append(len(placements))
+            source_rows = board_row_masks(game.board)
+            source_queue = tuple(game.queue)
             for placement in placements:
-                encoded = encode_placement_result(game, placement, self.config)
+                encoded = _encode_placement_result_compact(
+                    game,
+                    placement,
+                    self.config,
+                    source_rows=source_rows,
+                    source_queue=source_queue,
+                )
                 if encoded is None:
-                    # Rare fallback for non-default queue preview lengths that need
-                    # a fresh bag draw. Normal five-piece inference never hits this.
                     from .search import clone_game
 
                     child = clone_game(game)
                     child.place(placement)
-                    encoded = encode_game_state(child, self.config)
+                    state = encode_game_state(child, self.config)
+                    encoded = _CompactNeuralState(
+                        rows=board_row_masks(child.board),
+                        context=state.context,
+                    )
                 states.append(encoded)
 
-        values = self._score_states(states)
+        values = self._score_compact_states(states)
         output: list[tuple[float, ...]] = []
         offset = 0
         for size in sizes:
