@@ -24,6 +24,7 @@ minoflux-game = "minoflux.game:main"
 minoflux-lab = "minoflux.lab:main"
 minoflux-neural = "minoflux.neural_cli:main"
 minoflux-neural-dagger = "minoflux.neural_dagger_cli:main"
+minoflux-neural-mix = "minoflux.neural_mix_cli:main"
 minoflux-replay = "minoflux.replay:main"
 minoflux-versus = "minoflux.versus_ai:main"
 
