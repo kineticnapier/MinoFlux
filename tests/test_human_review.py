@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from minoflux.human_review_pygame import _candidate_order
+from minoflux.human_review_pygame import _find_candidate_index, _restore_game
 from minoflux.neural_cli import build_parser
 from minoflux_ai import DEFAULT_WEIGHTS, SearchConfig
 from minoflux_ai.human_review import (
@@ -39,6 +39,17 @@ def _queue_record() -> dict[str, object]:
         "seed": 123,
         "pieceIndex": 17,
         "reasons": ["low_margin"],
+        "source": {
+            "rows": [0] * 24,
+            "displayRows": ["." * 10] * 20,
+            "current": "T",
+            "hold": None,
+            "next": ["I", "O", "S", "Z", "J"],
+            "combo": -1,
+            "b2b": False,
+            "b2bChain": 0,
+            "surgeCharge": 0,
+        },
         "candidates": [candidate, other],
     }
 
@@ -94,12 +105,38 @@ class HumanReviewTests(unittest.TestCase):
         for candidate in record["candidates"]:
             self.assertEqual(len(candidate["displayRows"]), 20)
 
-    def test_pygame_candidate_order_is_deterministic_per_position(self) -> None:
+    def test_pygame_reviewer_restores_playable_position(self) -> None:
+        game = _restore_game(_queue_record())
+        self.assertEqual(game.current, "T")
+        self.assertIsNone(game.hold_piece)
+        self.assertEqual(list(game.queue)[:5], ["I", "O", "S", "Z", "J"])
+        self.assertEqual(game.pieces_placed, 17)
+        self.assertFalse(game.game_over)
+
+    def test_manual_placement_maps_back_to_training_candidate(self) -> None:
         record = _queue_record()
-        first = _candidate_order(record)
-        second = _candidate_order(record)
-        self.assertEqual(first, second)
-        self.assertEqual(sorted(first), [0, 1])
+        self.assertEqual(
+            _find_candidate_index(
+                record,
+                use_hold=False,
+                piece="T",
+                x=3,
+                y=20,
+                rotation=0,
+            ),
+            0,
+        )
+        self.assertEqual(
+            _find_candidate_index(
+                record,
+                use_hold=True,
+                piece="I",
+                x=4,
+                y=19,
+                rotation=1,
+            ),
+            1,
+        )
 
     def test_review_cli_defaults_to_tqdm_and_all_legal_candidates(self) -> None:
         args = build_parser().parse_args(["review", "--collect-only"])
