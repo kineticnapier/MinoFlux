@@ -4,7 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from minoflux_engine import Game, Placement
-from minoflux_engine.pieces import kick_tests
+from minoflux_engine.pieces import SHAPES, kick_tests
 from minoflux_engine.spin import classify_t_spin
 
 MOVE_LEFT = "left"
@@ -51,10 +51,41 @@ class _Candidate:
         return int(self.spin_kind is not None), int(self.spin_kind == "full"), -self.depth
 
 
-def _landing_y(game: Game, node: _Node) -> int:
+def _collides(game: Game, x: int, y: int, rotation: int) -> bool:
+    """Hot-path collision test without allocating ``Game.cells()`` tuples."""
+
+    board = game.board
+    width = game.width
+    height = game.height
+    for dx, dy in SHAPES[game.current][rotation % 4]:
+        cell_x, cell_y = x + dx, y + dy
+        if cell_x < 0 or cell_x >= width or cell_y >= height:
+            return True
+        if cell_y >= 0 and board[cell_y][cell_x] is not None:
+            return True
+    return False
+
+
+def _cells(game: Game, x: int, y: int, rotation: int) -> tuple[tuple[int, int], ...]:
+    return tuple(
+        (x + dx, y + dy)
+        for dx, dy in SHAPES[game.current][rotation % 4]
+    )
+
+
+def _landing_y(
+    game: Game,
+    node: _Node,
+    cache: dict[tuple[int, int, int], int],
+) -> int:
+    key = node.geometry_key()
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
     y = node.y
-    while not game._collides(game.current, node.x, y + 1, node.rotation):
+    while not _collides(game, node.x, y + 1, node.rotation):
         y += 1
+    cache[key] = y
     return y
 
 
@@ -76,10 +107,11 @@ def _emit_candidate(
     nodes: list[_Node],
     node_index: int,
     best_by_cells: dict[tuple[tuple[int, int], ...], _Candidate],
+    landing_cache: dict[tuple[int, int, int], int],
 ) -> None:
     node = nodes[node_index]
-    landing_y = _landing_y(game, node)
-    cells = game.cells(game.current, node.x, landing_y, node.rotation)
+    landing_y = _landing_y(game, node, landing_cache)
+    cells = _cells(game, node.x, landing_y, node.rotation)
     if any(cell_y < 0 for _, cell_y in cells):
         return
     spin_kind = classify_t_spin(
@@ -124,7 +156,7 @@ def _rotation_node(
         x, y = node.x + kick_x, node.y + kick_y
         if y < -4:
             continue
-        if not game._collides(game.current, x, y, target):
+        if not _collides(game, x, y, target):
             return _Node(
                 x=x,
                 y=y,
@@ -157,7 +189,7 @@ def reachable_placements(
     if game.game_over or game.paused:
         return ()
     start = _Node(game.x, game.y, game.rotation, None, None, 0)
-    if game._collides(game.current, start.x, start.y, start.rotation):
+    if _collides(game, start.x, start.y, start.rotation):
         return ()
 
     nodes: list[_Node] = [start]
@@ -172,20 +204,19 @@ def reachable_placements(
 
         for dx, command in ((-1, MOVE_LEFT), (1, MOVE_RIGHT)):
             x = node.x + dx
-            successor = _Node(x, node.y, node.rotation, node_index, command, node.depth + 1)
-            key = successor.geometry_key()
-            if key not in state_nodes and not game._collides(game.current, x, node.y, node.rotation):
-                successor_index = len(nodes)
-                nodes.append(successor)
-                state_nodes[key] = successor_index
-                frontier.append(successor_index)
+            key = (x, node.y, node.rotation)
+            if key in state_nodes or _collides(game, x, node.y, node.rotation):
+                continue
+            successor_index = len(nodes)
+            nodes.append(_Node(x, node.y, node.rotation, node_index, command, node.depth + 1))
+            state_nodes[key] = successor_index
+            frontier.append(successor_index)
 
         down_y = node.y + 1
-        successor = _Node(node.x, down_y, node.rotation, node_index, MOVE_DOWN, node.depth + 1)
-        key = successor.geometry_key()
-        if key not in state_nodes and not game._collides(game.current, node.x, down_y, node.rotation):
+        key = (node.x, down_y, node.rotation)
+        if key not in state_nodes and not _collides(game, node.x, down_y, node.rotation):
             successor_index = len(nodes)
-            nodes.append(successor)
+            nodes.append(_Node(node.x, down_y, node.rotation, node_index, MOVE_DOWN, node.depth + 1))
             state_nodes[key] = successor_index
             frontier.append(successor_index)
 
@@ -212,10 +243,11 @@ def reachable_placements(
             break
 
     best_by_cells: dict[tuple[tuple[int, int], ...], _Candidate] = {}
+    landing_cache: dict[tuple[int, int, int], int] = {}
     for node_index in state_nodes.values():
-        _emit_candidate(game, nodes, node_index, best_by_cells)
+        _emit_candidate(game, nodes, node_index, best_by_cells, landing_cache)
     for node_index in rotation_nodes.values():
-        _emit_candidate(game, nodes, node_index, best_by_cells)
+        _emit_candidate(game, nodes, node_index, best_by_cells, landing_cache)
 
     placements = [
         Placement(
