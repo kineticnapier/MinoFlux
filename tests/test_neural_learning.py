@@ -44,10 +44,43 @@ class NeuralDatasetTests(unittest.TestCase):
         for sample in samples:
             self.assertGreaterEqual(sample.expert_index, 0)
             self.assertLess(sample.expert_index, len(sample.candidates))
+            self.assertIn(sample.expert_index, sample.expert_indices)
             self.assertLessEqual(len(sample.candidates), 4)
             for candidate in sample.candidates:
                 self.assertEqual(len(candidate.board_rows), 24)
                 self.assertEqual(len(candidate.context), NeuralValueConfig().context_size)
+                self.assertIsNotNone(candidate.teacher_score)
+
+    def test_diverse_sampler_keeps_multiple_negative_buckets(self) -> None:
+        sample = next(iter(generate_neural_ranking_samples(
+            NeuralDatasetConfig(
+                games=1,
+                max_pieces=1,
+                max_candidates=8,
+                hard_candidates=2,
+                medium_candidates=2,
+                random_candidates=1,
+                bad_candidates=2,
+            )
+        )))
+        buckets = {candidate.sampling_bucket for candidate in sample.candidates}
+        self.assertIn("expert", buckets)
+        self.assertGreaterEqual(len(buckets), 3)
+
+    def test_rollout_targets_are_sparse_and_counted(self) -> None:
+        sample = next(iter(generate_neural_ranking_samples(
+            NeuralDatasetConfig(
+                games=1,
+                max_pieces=1,
+                max_candidates=5,
+                rollout_horizon=2,
+                rollout_candidates=2,
+                rollout_lookahead=0,
+                rollout_beam_width=1,
+            )
+        )))
+        targets = [candidate.target_value for candidate in sample.candidates]
+        self.assertEqual(sum(value is not None for value in targets), 2)
 
     def test_dataset_writer_produces_jsonl_and_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -59,6 +92,7 @@ class NeuralDatasetTests(unittest.TestCase):
             self.assertGreater(result["samples"], 0)
             record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(record["format"], NEURAL_DATASET_FORMAT)
+            self.assertIn("expertIndices", record)
             self.assertTrue(path.with_suffix(".jsonl.meta.json").exists())
 
 
@@ -86,6 +120,32 @@ class NeuralTrainingTests(unittest.TestCase):
             self.assertEqual(result.checkpoint_path, str(checkpoint))
             evaluator = NeuralValueEvaluator.from_checkpoint(checkpoint, device="cpu")
             self.assertEqual(evaluator.device, "cpu")
+
+    def test_legacy_single_expert_records_still_train(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory) / "legacy.jsonl"
+            checkpoint = Path(directory) / "legacy.pt"
+            write_neural_ranking_dataset(
+                dataset,
+                NeuralDatasetConfig(games=2, max_pieces=1, max_candidates=3),
+            )
+            records = [json.loads(line) for line in dataset.read_text(encoding="utf-8").splitlines()]
+            for record in records:
+                record.pop("expertIndices", None)
+                for candidate in record["candidates"]:
+                    candidate.pop("teacherScore", None)
+                    candidate.pop("targetValue", None)
+            dataset.write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n",
+                encoding="utf-8",
+            )
+            result = train_neural_value_model(
+                dataset,
+                checkpoint,
+                NeuralTrainConfig(epochs=1, batch_size=2, validation_fraction=0.5, device="cpu"),
+            )
+            self.assertTrue(checkpoint.exists())
+            self.assertGreater(result.train.samples, 0)
 
 
 if __name__ == "__main__":
