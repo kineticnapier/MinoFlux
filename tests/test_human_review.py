@@ -86,11 +86,12 @@ class HumanReviewTests(unittest.TestCase):
         self.assertGreaterEqual(len(record["candidates"]), 2)
         self.assertLessEqual(len(record["candidates"]), 4)
 
-    def test_review_cli_is_available_without_ui_dependency(self) -> None:
+    def test_review_cli_defaults_to_all_legal_candidates(self) -> None:
         args = build_parser().parse_args(["review", "--collect-only"])
         self.assertEqual(args.command, "review")
         self.assertTrue(args.collect_only)
-        self.assertEqual(args.max_candidates, 6)
+        self.assertEqual(args.max_candidates, 0)
+        self.assertEqual(HumanReviewConfig().normalized().max_candidates, 0)
 
 
 if __name__ == "__main__":
