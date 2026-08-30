@@ -146,6 +146,7 @@ def _draw_review(
     total: int,
     message: str,
     settings,
+    acceptable_count: int,
 ) -> None:
     palette = Palette()
     cell = 30
@@ -212,25 +213,30 @@ def _draw_review(
         f"Flag {reason_text}",
         f"Combo {source_map.get('combo', 0)}",
         f"B2B {'ON' if source_map.get('b2b') else 'OFF'}",
+        f"Also-good marked {acceptable_count}",
         f"DAS {settings.das_ms}",
         f"ARR {settings.arr_ms}",
         f"SDS {settings.soft_drop_ms}",
     ]
     for index, line in enumerate(info):
-        screen.blit(small.render(line, True, palette.text), (18, 210 + index * 25))
+        screen.blit(small.render(line, True, palette.text), (18, 205 + index * 23))
 
     screen.blit(
         small.render("Play exactly ONE piece with your normal controls.", True, palette.selected),
-        (18, 520),
+        (18, 510),
     )
     screen.blit(
-        small.render("Hard drop = submit teacher move", True, palette.selected),
-        (18, 545),
+        small.render("Hard drop = save primary teacher move", True, palette.selected),
+        (18, 535),
     )
-    screen.blit(small.render("R/restart = reset position", True, palette.muted), (18, 580))
-    screen.blit(small.render("N = skip   Backspace = previous   Esc = quit", True, palette.muted), (18, 605))
+    screen.blit(
+        small.render("Shift + Hard drop = mark this move as ALSO acceptable", True, palette.selected),
+        (18, 560),
+    )
+    screen.blit(small.render("R/restart = reset position", True, palette.muted), (18, 595))
+    screen.blit(small.render("N = skip   Backspace = previous   Esc = quit", True, palette.muted), (18, 620))
     if message:
-        screen.blit(small.render(message, True, palette.selected), (18, 650))
+        screen.blit(small.render(message, True, palette.selected), (18, 660))
 
 
 def launch_human_review_app(queue_path: str | Path, output_path: str | Path) -> int:
@@ -260,20 +266,24 @@ def launch_human_review_app(queue_path: str | Path, output_path: str | Path) -> 
     sample_index = 0
     game = _restore_game(pending[sample_index])
     used_hold = False
+    acceptable_indices: set[int] = set()
     message = ""
     running = True
 
-    def reset_position() -> None:
+    def reset_position(*, clear_marks: bool = False) -> None:
         nonlocal game, used_hold, message
         game = _restore_game(pending[sample_index])
         used_hold = False
         handling.clear()
+        if clear_marks:
+            acceptable_indices.clear()
         message = "Position reset."
 
     def move_sample(delta: int) -> None:
         nonlocal sample_index, game, used_hold, message
         sample_index = max(0, min(len(pending), sample_index + delta))
         used_hold = False
+        acceptable_indices.clear()
         handling.clear()
         if sample_index < len(pending):
             game = _restore_game(pending[sample_index])
@@ -303,12 +313,12 @@ def launch_human_review_app(queue_path: str | Path, output_path: str | Path) -> 
                     move_sample(-1)
                     continue
                 if event.key == pygame.K_r:
-                    reset_position()
+                    reset_position(clear_marks=True)
                     continue
 
                 action = key_codes.get(event.key)
                 if action == "restart":
-                    reset_position()
+                    reset_position(clear_marks=True)
                 elif action == "left":
                     game.move_left()
                     handling.press_horizontal(-1, now, settings.das_ms)
@@ -348,8 +358,19 @@ def launch_human_review_app(queue_path: str | Path, output_path: str | Path) -> 
                         game = _restore_game(record)
                         used_hold = False
                         handling.clear()
+                    elif event.mod & pygame.KMOD_SHIFT:
+                        acceptable_indices.add(candidate_index)
+                        game = _restore_game(record)
+                        used_hold = False
+                        handling.clear()
+                        message = f"Marked candidate {candidate_index + 1} as also acceptable."
                     else:
-                        added = append_human_label(output, record, candidate_index)
+                        added = append_human_label(
+                            output,
+                            record,
+                            candidate_index,
+                            sorted(acceptable_indices),
+                        )
                         message = "Saved teacher move." if added else "Already labeled; existing label kept."
                         move_sample(1)
 
@@ -376,6 +397,7 @@ def launch_human_review_app(queue_path: str | Path, output_path: str | Path) -> 
                 len(pending),
                 message,
                 settings,
+                len(acceptable_indices),
             )
         else:
             palette = Palette()
