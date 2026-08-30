@@ -23,6 +23,7 @@ class NeuralTrainConfig:
     weight_decay: float = 0.0001
     validation_fraction: float = 0.10
     margin: float = 0.20
+    human_weight: float = 5.0
     seed: int = 12345
     device: str = "auto"
 
@@ -34,6 +35,7 @@ class NeuralTrainConfig:
             weight_decay=max(0.0, float(self.weight_decay)),
             validation_fraction=min(0.5, max(0.0, float(self.validation_fraction))),
             margin=max(0.0, float(self.margin)),
+            human_weight=max(0.0, float(self.human_weight)),
             seed=int(self.seed),
             device=str(self.device or "auto"),
         )
@@ -57,8 +59,10 @@ class NeuralTrainResult:
     device: str
     train: NeuralTrainMetrics
     validation: NeuralTrainMetrics
+    human: NeuralTrainMetrics | None
     epoch_losses: tuple[float, ...]
     config: NeuralTrainConfig
+    human_dataset_path: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -67,6 +71,8 @@ class NeuralTrainResult:
             "device": self.device,
             "train": self.train.to_dict(),
             "validation": self.validation.to_dict(),
+            "human": None if self.human is None else self.human.to_dict(),
+            "humanDatasetPath": self.human_dataset_path,
             "epochLosses": list(self.epoch_losses),
             "config": asdict(self.config),
         }
@@ -286,6 +292,7 @@ def train_neural_value_model(
     checkpoint_path: str | Path,
     config: NeuralTrainConfig = NeuralTrainConfig(),
     *,
+    human_dataset_path: str | Path | None = None,
     resume_from: str | Path | None = None,
     progress: Callable[[int, float], None] | None = None,
 ) -> NeuralTrainResult:
@@ -303,6 +310,13 @@ def train_neural_value_model(
     if not train_records:
         raise ValueError("Training split is empty")
 
+    human_records: list[dict[str, object]] = []
+    if human_dataset_path is not None:
+        human_records = _load_jsonl(human_dataset_path)
+        for record in human_records:
+            if _infer_config(record) != neural_config:
+                raise ValueError("Human review dataset neural config does not match the base dataset")
+
     device = _resolve_device(torch, cfg.device)
     model = build_neural_value_model(neural_config).to(device)
     if resume_from is not None:
@@ -317,18 +331,29 @@ def train_neural_value_model(
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         loss_total = 0.0
-        samples = 0
-        for batch in _iter_batches(train_records, cfg.batch_size, rng):
+        weighted_samples = 0.0
+        batch_jobs: list[tuple[list[dict[str, object]], float]] = [
+            (batch, 1.0)
+            for batch in _iter_batches(train_records, cfg.batch_size, rng)
+        ]
+        if human_records and cfg.human_weight > 0.0:
+            batch_jobs.extend(
+                (batch, cfg.human_weight)
+                for batch in _iter_batches(human_records, cfg.batch_size, rng)
+            )
+        rng.shuffle(batch_jobs)
+        for batch, source_weight in batch_jobs:
             boards, contexts, groups = _prepare_batch(batch, neural_config, torch, device)
             optimizer.zero_grad(set_to_none=True)
             values = model(boards, contexts)
-            loss, _, _, _ = _loss_and_ranks(values, groups, torch, F, cfg.margin)
+            raw_loss, _, _, _ = _loss_and_ranks(values, groups, torch, F, cfg.margin)
+            loss = raw_loss * source_weight
             loss.backward()
             optimizer.step()
-            count = len(groups)
-            loss_total += float(loss.detach().cpu().item()) * count
-            samples += count
-        epoch_loss = loss_total / max(1, samples)
+            contribution = len(groups) * source_weight
+            loss_total += float(raw_loss.detach().cpu().item()) * contribution
+            weighted_samples += contribution
+        epoch_loss = loss_total / max(1.0, weighted_samples)
         epoch_losses.append(epoch_loss)
         if progress is not None:
             progress(epoch, epoch_loss)
@@ -353,16 +378,33 @@ def train_neural_value_model(
         cfg.margin,
         cfg.batch_size,
     )
+    human_metrics = (
+        _evaluate(
+            model,
+            human_records,
+            neural_config,
+            torch,
+            F,
+            device,
+            cfg.margin,
+            cfg.batch_size,
+        )
+        if human_records
+        else None
+    )
     saved = save_neural_value_checkpoint(
         checkpoint_path,
         model,
         neural_config,
         metadata={
             "dataset": str(dataset_path),
+            "humanDataset": None if human_dataset_path is None else str(human_dataset_path),
+            "humanWeight": cfg.human_weight,
             "resumeFrom": None if resume_from is None else str(resume_from),
             "trainConfig": asdict(cfg),
             "trainMetrics": train_metrics.to_dict(),
             "validationMetrics": validation_metrics.to_dict(),
+            "humanMetrics": None if human_metrics is None else human_metrics.to_dict(),
             "epochLosses": epoch_losses,
         },
     )
@@ -371,6 +413,8 @@ def train_neural_value_model(
         device=device,
         train=train_metrics,
         validation=validation_metrics,
+        human=human_metrics,
         epoch_losses=tuple(epoch_losses),
         config=cfg,
+        human_dataset_path=None if human_dataset_path is None else str(human_dataset_path),
     )
