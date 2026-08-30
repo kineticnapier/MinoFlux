@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import subprocess
 import sys
 import time
 
@@ -365,8 +366,44 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _run_in_utf8_mode_if_needed(raw_argv: list[str]) -> int | None:
+    """Relaunch torch.compile commands in UTF-8 mode on non-UTF-8 Windows.
+
+    PyTorch Inductor ships UTF-8 Python/kernel templates. Japanese Windows often
+    starts Python with cp932 as the locale encoding, and some Inductor versions
+    open those templates without an explicit encoding. That can fail during
+    torch.compile import with UnicodeDecodeError before compilation starts.
+    """
+
+    if (
+        sys.platform != "win32"
+        or sys.flags.utf8_mode
+        or "--torch-compile" not in raw_argv
+    ):
+        return None
+
+    command = [
+        sys.executable,
+        "-X",
+        "utf8",
+        "-m",
+        "minoflux.neural_cli",
+        *raw_argv,
+    ]
+    print(
+        "torch.compile requires UTF-8 mode on this Windows locale; relaunching automatically...",
+        file=sys.stderr,
+        flush=True,
+    )
+    return int(subprocess.run(command, check=False).returncode)
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    relaunched = _run_in_utf8_mode_if_needed(raw_argv)
+    if relaunched is not None:
+        return relaunched
+    args = build_parser().parse_args(raw_argv)
     return int(args.func(args))
 
 
