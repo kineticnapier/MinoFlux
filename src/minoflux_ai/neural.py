@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from minoflux_engine import Game
+from minoflux_engine import Game, Placement
 
 from .heuristic import PlacementEvaluation
 
@@ -230,21 +230,21 @@ class NeuralValueEvaluator:
         model.load_state_dict(state_dict)
         return cls(model, config, device=target_device)
 
-    def score_many(
+    def score_placements(
         self,
         game: Game,
-        evaluations: Sequence[PlacementEvaluation],
+        placements: Sequence[Placement],
     ) -> tuple[float, ...]:
-        if not evaluations:
+        if not placements:
             return ()
         # Import here so simply importing minoflux_ai does not make torch a core dependency.
         torch, _ = _require_torch()
         from .search import clone_game
 
         states: list[NeuralState] = []
-        for evaluation in evaluations:
+        for placement in placements:
             child = clone_game(game)
-            child.place(evaluation.placement)
+            child.place(placement)
             states.append(encode_game_state(child, self.config))
 
         boards = torch.tensor(
@@ -265,6 +265,16 @@ class NeuralValueEvaluator:
         with torch.inference_mode():
             values = self.model(boards, contexts).reshape(-1)
         return tuple(float(value) for value in values.detach().cpu().tolist())
+
+    def score_many(
+        self,
+        game: Game,
+        evaluations: Sequence[PlacementEvaluation],
+    ) -> tuple[float, ...]:
+        return self.score_placements(
+            game,
+            tuple(evaluation.placement for evaluation in evaluations),
+        )
 
 
 def save_neural_value_checkpoint(
