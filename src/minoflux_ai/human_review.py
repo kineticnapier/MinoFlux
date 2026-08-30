@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from minoflux_engine import Game
+from minoflux_engine import Game, HIDDEN_ROWS
 
 from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights
 from .neural import NeuralState, NeuralValueConfig, NeuralValueEvaluator, encode_game_state
@@ -81,10 +81,18 @@ def _move_dict(action: SearchAction) -> dict[str, object]:
     }
 
 
+def _display_rows(game: Game) -> list[str]:
+    rows: list[str] = []
+    for row in game.board[HIDDEN_ROWS:]:
+        rows.append("".join(cell if cell is not None else "." for cell in row))
+    return rows
+
+
 def _source_state(game: Game, config: NeuralValueConfig) -> dict[str, object]:
     state = encode_game_state(game, config)
     return {
         "rows": list(pack_board_rows(state.board, config)),
+        "displayRows": _display_rows(game),
         "current": game.current,
         "hold": game.hold_piece,
         "next": list(game.queue)[: config.queue_length],
@@ -106,6 +114,7 @@ def _candidate_state(
     state: NeuralState = encode_game_state(child, config)
     return {
         "rows": list(pack_board_rows(state.board, config)),
+        "displayRows": _display_rows(child),
         "context": list(state.context),
         "move": _move_dict(action),
         "nnValue": float(neural_value),
@@ -200,7 +209,16 @@ def collect_neural_review_queue(
     evaluator: NeuralValueEvaluator,
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
     config: HumanReviewConfig = HumanReviewConfig(),
+    *,
+    show_progress: bool = True,
 ) -> dict[str, object]:
+    try:
+        from tqdm import tqdm
+    except ImportError as error:
+        raise RuntimeError(
+            "tqdm is required for neural review collection. Install the review extra or tqdm."
+        ) from error
+
     cfg = config.normalized()
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -220,44 +238,72 @@ def collect_neural_review_queue(
             records.append(record)
             seen.add(key)
 
-    for game_index in range(cfg.games):
+    game_progress = tqdm(
+        range(cfg.games),
+        desc="Review games",
+        unit="game",
+        disable=not show_progress,
+        dynamic_ncols=True,
+    )
+    for game_index in game_progress:
         if len(records) >= cfg.max_samples:
             break
         seed = cfg.seed_base + game_index * cfg.seed_step
         game = Game(seed)
         tail: deque[Game] = deque(maxlen=cfg.topout_tail)
-        while not game.game_over and game.pieces_placed < cfg.max_pieces:
-            if cfg.topout_tail:
-                tail.append(clone_game(game))
-            neural_ranked = rank_search_actions(
-                game,
-                weights,
-                cfg.search_config,
-                limit=2,
-                scorer=evaluator,
-            )
-            if not neural_ranked:
-                break
-            champion_ranked = rank_search_actions(game, weights, cfg.search_config, limit=1)
-            if not champion_ranked:
-                break
-            neural_action, neural_eval = neural_ranked[0]
-            margin = float("inf") if len(neural_ranked) < 2 else neural_eval.score - neural_ranked[1][1].score
-            reasons: list[str] = []
-            if _action_key(neural_action) != _action_key(champion_ranked[0][0]):
-                reasons.append("nn_champion_disagree")
-            if margin <= cfg.uncertainty_margin:
-                reasons.append("low_margin")
-            board = neural_eval.features.board
-            if board.max_height >= cfg.danger_height:
-                reasons.append("high_stack")
-            if cfg.danger_holes > 0 and board.holes >= cfg.danger_holes:
-                reasons.append("holes")
-            if reasons:
-                add_record(game, reasons)
-            apply_search_action(game, neural_action)
-            if len(records) >= cfg.max_samples:
-                break
+        piece_progress = tqdm(
+            total=cfg.max_pieces,
+            desc=f"seed {seed}",
+            unit="piece",
+            leave=False,
+            disable=not show_progress,
+            dynamic_ncols=True,
+        )
+        try:
+            while not game.game_over and game.pieces_placed < cfg.max_pieces:
+                if cfg.topout_tail:
+                    tail.append(clone_game(game))
+                neural_ranked = rank_search_actions(
+                    game,
+                    weights,
+                    cfg.search_config,
+                    limit=2,
+                    scorer=evaluator,
+                )
+                if not neural_ranked:
+                    break
+                champion_ranked = rank_search_actions(game, weights, cfg.search_config, limit=1)
+                if not champion_ranked:
+                    break
+                neural_action, neural_eval = neural_ranked[0]
+                margin = (
+                    float("inf")
+                    if len(neural_ranked) < 2
+                    else neural_eval.score - neural_ranked[1][1].score
+                )
+                reasons: list[str] = []
+                if _action_key(neural_action) != _action_key(champion_ranked[0][0]):
+                    reasons.append("nn_champion_disagree")
+                if margin <= cfg.uncertainty_margin:
+                    reasons.append("low_margin")
+                board = neural_eval.features.board
+                if board.max_height >= cfg.danger_height:
+                    reasons.append("high_stack")
+                if cfg.danger_holes > 0 and board.holes >= cfg.danger_holes:
+                    reasons.append("holes")
+                if reasons:
+                    add_record(game, reasons)
+                apply_search_action(game, neural_action)
+                piece_progress.update(1)
+                piece_progress.set_postfix(
+                    samples=len(records),
+                    topouts=topouts,
+                    refresh=False,
+                )
+                if len(records) >= cfg.max_samples:
+                    break
+        finally:
+            piece_progress.close()
 
         if game.game_over:
             topouts += 1
@@ -265,6 +311,8 @@ def collect_neural_review_queue(
                 if len(records) >= cfg.max_samples:
                     break
                 add_record(tail_game, ("topout_tail",))
+        game_progress.set_postfix(samples=len(records), topouts=topouts, refresh=True)
+    game_progress.close()
 
     with temporary.open("w", encoding="utf-8") as stream:
         for record in records:
