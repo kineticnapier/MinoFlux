@@ -96,9 +96,8 @@ def reachable_placements(
 ) -> tuple[Placement, ...]:
     """Enumerate exact-SRS placements using packed states and bitboard collision.
 
-    ``include_paths=False`` is intended for neural evaluation: placement geometry
-    and T-spin metadata are preserved, but parent paths are not materialized.
-    Replay/interactive callers keep the historical path behavior by default.
+    ``include_paths=False`` skips materializing command paths while preserving the
+    exact historical placement representative and rotation metadata.
     """
 
     if game.game_over or game.paused:
@@ -359,23 +358,15 @@ def reachable_placements(
                 rotation_tos[node_index] if last_rotation else -1,
             )
 
-    if include_paths:
-        # Preserve historical shortest-hard-drop routes for replay/UI callers.
-        for node_index in state_nodes:
-            if node_index != _NO_STATE:
-                emit(node_index)
-    else:
-        # For pure evaluation, every non-rotation hard-drop geometry is already
-        # represented by its reachable grounded state. Skip all higher duplicates.
-        for node_index in state_nodes:
-            if node_index == _NO_STATE:
-                continue
-            y = ys[node_index]
-            if landing_y_for(xs[node_index], y, rotations[node_index]) == y:
-                emit(node_index)
+    # Keep every reachable source in representative selection. Even for a non-T
+    # piece, a shorter hard-drop source can beat a grounded rotation-ending source
+    # for the same cells, which affects the exact placement metadata/tie order.
+    for node_index in state_nodes:
+        if node_index != _NO_STATE:
+            emit(node_index)
 
     # A hard drop does not clear the preceding rotation metadata, so rotation-ending
-    # nodes must still be considered even when they are above the landing position.
+    # nodes must also be considered even when geometry was already reached normally.
     for node_index in rotation_nodes:
         if node_index != _NO_STATE:
             emit(node_index)
