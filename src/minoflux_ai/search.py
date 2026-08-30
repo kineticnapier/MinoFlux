@@ -25,6 +25,40 @@ def clone_game(game: Game) -> Game:
     return cloned
 
 
+def _held_search_game(game: Game) -> Game | None:
+    """Create the read-only Hold branch without copying board/RNG state.
+
+    Root move generation and leaf scoring never mutate this branch. When Hold is
+    empty, six queued pieces remain after taking the held-in current piece; that
+    is enough for all heuristic context and the default five-piece neural preview.
+    """
+
+    if game.hold_used or game.game_over or game.paused:
+        return None
+    held = copy(game)
+    held.board = game.board
+    held.queue = deque(game.queue)
+    outgoing = game.current
+    incoming = game.hold_piece
+    held.hold_piece = outgoing
+    if incoming is None:
+        if not held.queue:
+            return None
+        incoming = held.queue.popleft()
+    held.current = incoming
+    held.x, held.y, held.rotation = 3, 1, 0
+    held.hold_used = True
+    held.last_action = "hold"
+    held.last_move_was_rotation = False
+    held.last_rotation_kick_index = None
+    held.last_rotation_from = None
+    held.last_rotation_to = None
+    held.lock_elapsed_ms = 0.0
+    held.lock_resets = 0
+    held.game_over = held._collides(held.current, held.x, held.y, held.rotation)
+    return None if held.game_over else held
+
+
 @dataclass(frozen=True, slots=True)
 class SearchConfig:
     allow_hold: bool = True
@@ -153,23 +187,30 @@ def _score_placements_before_features(
     weights: HeuristicWeights,
     scorer: SearchScorer,
     limit: int | None,
+    *,
+    precomputed_values: Sequence[float] | None = None,
 ) -> tuple[PlacementEvaluation, ...] | None:
     """Use a scorer's placement-only fast path before expensive heuristic features.
 
     Neural search only needs heuristic features for final tie-breaking and for the
-    SearchChoice metadata.  Scoring every legal move first lets us compute the
-    expensive garbage/T-spin heuristic features only for moves that can survive
-    neural pruning.  Equal neural scores at the cutoff are all retained so the
-    existing heuristic tie-break order stays exact.
+    SearchChoice metadata. Equal neural scores at the cutoff are all retained so
+    the existing heuristic tie-break order stays exact.
     """
 
     score_placements = getattr(scorer, "score_placements", None)
-    if not callable(score_placements):
+    if not callable(score_placements) and precomputed_values is None:
         return None
     if not placements:
         return ()
 
-    values = tuple(float(value) for value in score_placements(game, placements))
+    values = tuple(
+        float(value)
+        for value in (
+            precomputed_values
+            if precomputed_values is not None
+            else score_placements(game, placements)
+        )
+    )
     if len(values) != len(placements):
         raise ValueError(
             f"Search scorer returned {len(values)} values for {len(placements)} placements"
@@ -181,7 +222,7 @@ def _score_placements_before_features(
 
     indexed = tuple(zip(placements, values))
     if count < len(indexed):
-        cutoff = sorted(values, reverse=True)[count - 1]
+        cutoff = nlargest(count, values)[-1]
         survivors = tuple((placement, score) for placement, score in indexed if score >= cutoff)
     else:
         survivors = indexed
@@ -237,6 +278,8 @@ def _rank_branch(
     weights: HeuristicWeights,
     scorer: SearchScorer | None,
     branch_limit: int | None,
+    *,
+    precomputed_values: Sequence[float] | None = None,
 ) -> tuple[PlacementEvaluation, ...]:
     if scorer is not None:
         fast = _score_placements_before_features(
@@ -245,6 +288,7 @@ def _rank_branch(
             weights,
             scorer,
             branch_limit,
+            precomputed_values=precomputed_values,
         )
         if fast is not None:
             return fast
@@ -262,6 +306,20 @@ def _rank_branch(
     return evaluations
 
 
+def _branch_groups(
+    game: Game,
+    cfg: SearchConfig,
+) -> tuple[
+    tuple[Placement, ...],
+    Game | None,
+    tuple[Placement, ...],
+]:
+    direct = _placements_for_game(game, cfg)
+    held = _held_search_game(game) if cfg.allow_hold else None
+    held_placements = _placements_for_game(held, cfg) if held is not None else ()
+    return direct, held, held_placements
+
+
 def rank_search_actions(
     game: Game,
     weights: HeuristicWeights = DEFAULT_WEIGHTS,
@@ -272,34 +330,49 @@ def rank_search_actions(
 ) -> tuple[tuple[SearchAction, PlacementEvaluation], ...]:
     cfg = config.normalized()
     branch_limit = None if limit is None else max(1, int(limit))
-    direct_placements = _placements_for_game(game, cfg)
+    direct_placements, held, held_placements = _branch_groups(game, cfg)
+
+    direct_values: Sequence[float] | None = None
+    held_values: Sequence[float] | None = None
+    score_groups = getattr(scorer, "score_placement_groups", None) if scorer is not None else None
+    score_placements = getattr(scorer, "score_placements", None) if scorer is not None else None
+    if callable(score_groups) and callable(score_placements):
+        groups: list[tuple[Game, Sequence[Placement]]] = [(game, direct_placements)]
+        if held is not None:
+            groups.append((held, held_placements))
+        grouped_values = score_groups(tuple(groups))
+        if len(grouped_values) != len(groups):
+            raise ValueError("Search scorer returned the wrong number of placement groups")
+        direct_values = grouped_values[0]
+        if held is not None:
+            held_values = grouped_values[1]
+
     direct_evaluations = _rank_branch(
         game,
         direct_placements,
         weights,
         scorer,
         branch_limit,
+        precomputed_values=direct_values,
     )
     candidates: list[tuple[SearchAction, PlacementEvaluation]] = [
         (SearchAction(False, evaluation.placement), evaluation)
         for evaluation in direct_evaluations
     ]
 
-    if cfg.allow_hold and not game.hold_used and not game.game_over:
-        held = clone_game(game)
-        if held.hold():
-            held_placements = _placements_for_game(held, cfg)
-            held_evaluations = _rank_branch(
-                held,
-                held_placements,
-                weights,
-                scorer,
-                branch_limit,
-            )
-            candidates.extend(
-                (SearchAction(True, evaluation.placement), evaluation)
-                for evaluation in held_evaluations
-            )
+    if held is not None:
+        held_evaluations = _rank_branch(
+            held,
+            held_placements,
+            weights,
+            scorer,
+            branch_limit,
+            precomputed_values=held_values,
+        )
+        candidates.extend(
+            (SearchAction(True, evaluation.placement), evaluation)
+            for evaluation in held_evaluations
+        )
 
     if limit is not None:
         count = max(0, int(limit))
@@ -410,3 +483,87 @@ def choose_search_action(
         immediate=best.first_evaluation,
         path=best.path,
     )
+
+
+def choose_search_actions_batch(
+    games: Sequence[Game],
+    weights: HeuristicWeights = DEFAULT_WEIGHTS,
+    config: SearchConfig = DEFAULT_SEARCH_CONFIG,
+    *,
+    scorer: SearchScorer | None = None,
+) -> tuple[SearchChoice | None, ...]:
+    """Choose root actions for multiple games with one neural GPU batch.
+
+    The accelerated path is intentionally limited to lookahead=0. Other search
+    configurations retain the normal per-game implementation.
+    """
+
+    cfg = config.normalized()
+    score_groups = getattr(scorer, "score_placement_groups", None) if scorer is not None else None
+    score_placements = getattr(scorer, "score_placements", None) if scorer is not None else None
+    if cfg.lookahead_pieces != 0 or not callable(score_groups) or not callable(score_placements):
+        return tuple(
+            choose_search_action(game, weights, cfg, scorer=scorer)
+            for game in games
+        )
+
+    prepared: list[tuple[tuple[Placement, ...], Game | None, tuple[Placement, ...]]] = []
+    groups: list[tuple[Game, Sequence[Placement]]] = []
+    group_keys: list[tuple[int, bool]] = []
+    for index, game in enumerate(games):
+        if game.game_over:
+            prepared.append(((), None, ()))
+            continue
+        direct, held, held_placements = _branch_groups(game, cfg)
+        prepared.append((direct, held, held_placements))
+        if direct:
+            groups.append((game, direct))
+            group_keys.append((index, False))
+        if held is not None and held_placements:
+            groups.append((held, held_placements))
+            group_keys.append((index, True))
+
+    grouped_values = score_groups(tuple(groups)) if groups else ()
+    if len(grouped_values) != len(groups):
+        raise ValueError("Search scorer returned the wrong number of placement groups")
+    values_by_key = {
+        key: values
+        for key, values in zip(group_keys, grouped_values)
+    }
+
+    choices: list[SearchChoice | None] = []
+    for index, game in enumerate(games):
+        direct, held, held_placements = prepared[index]
+        candidates: list[tuple[SearchAction, PlacementEvaluation]] = []
+        if direct:
+            evaluations = _rank_branch(
+                game,
+                direct,
+                weights,
+                scorer,
+                1,
+                precomputed_values=values_by_key.get((index, False)),
+            )
+            candidates.extend(
+                (SearchAction(False, evaluation.placement), evaluation)
+                for evaluation in evaluations
+            )
+        if held is not None and held_placements:
+            evaluations = _rank_branch(
+                held,
+                held_placements,
+                weights,
+                scorer,
+                1,
+                precomputed_values=values_by_key.get((index, True)),
+            )
+            candidates.extend(
+                (SearchAction(True, evaluation.placement), evaluation)
+                for evaluation in evaluations
+            )
+        if not candidates:
+            choices.append(None)
+            continue
+        action, evaluation = max(candidates, key=_candidate_key)
+        choices.append(SearchChoice(action, evaluation.score, evaluation, (action,)))
+    return tuple(choices)
