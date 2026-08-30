@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import time
 
 from minoflux_ai import DEFAULT_WEIGHTS, SearchConfig, apply_search_action, choose_search_action, load_weights
 from minoflux_ai.human_review import HumanReviewConfig, collect_neural_review_queue
@@ -97,23 +98,73 @@ def _evaluate(args: argparse.Namespace) -> int:
     total_attack = 0
     topouts = 0
     completed = 0
-    for game_index in range(args.games):
-        seed = args.seed_base + game_index * args.seed_step
-        game = Game(seed)
-        while not game.game_over and game.pieces_placed < args.max_pieces:
-            choice = choose_search_action(
-                game,
-                weights,
-                config,
-                scorer=evaluator,
+    game_bar = None
+    tqdm = None
+    if not args.no_progress:
+        try:
+            from tqdm import tqdm as tqdm_impl
+        except ImportError as error:
+            raise SystemExit(
+                "tqdm is required for neural evaluation progress. Install it with `uv pip install tqdm` "
+                "or pass --no-progress."
+            ) from error
+        tqdm = tqdm_impl
+        game_bar = tqdm(total=args.games, desc="Evaluate games", unit="game")
+
+    started = time.perf_counter()
+    try:
+        for game_index in range(args.games):
+            seed = args.seed_base + game_index * args.seed_step
+            game = Game(seed)
+            piece_bar = (
+                tqdm(
+                    total=args.max_pieces,
+                    desc=f"seed {seed}",
+                    unit="piece",
+                    leave=False,
+                )
+                if tqdm is not None
+                else None
             )
-            if choice is None:
-                break
-            apply_search_action(game, choice.action)
-        total_pieces += game.pieces_placed
-        total_attack += game.attack
-        topouts += int(game.game_over)
-        completed += int(not game.game_over and game.pieces_placed >= args.max_pieces)
+            try:
+                while not game.game_over and game.pieces_placed < args.max_pieces:
+                    choice = choose_search_action(
+                        game,
+                        weights,
+                        config,
+                        scorer=evaluator,
+                    )
+                    if choice is None:
+                        break
+                    before = game.pieces_placed
+                    apply_search_action(game, choice.action)
+                    if piece_bar is not None:
+                        piece_bar.update(max(0, game.pieces_placed - before))
+                        if game.pieces_placed % 10 == 0 or game.game_over:
+                            piece_bar.set_postfix(
+                                attack=game.attack,
+                                app=f"{game.attack / max(1, game.pieces_placed):.3f}",
+                            )
+            finally:
+                if piece_bar is not None:
+                    piece_bar.close()
+
+            total_pieces += game.pieces_placed
+            total_attack += game.attack
+            topouts += int(game.game_over)
+            completed += int(not game.game_over and game.pieces_placed >= args.max_pieces)
+            if game_bar is not None:
+                game_bar.update(1)
+                game_bar.set_postfix(
+                    pieces=total_pieces,
+                    app=f"{total_attack / max(1, total_pieces):.3f}",
+                    topouts=topouts,
+                )
+    finally:
+        if game_bar is not None:
+            game_bar.close()
+
+    elapsed = time.perf_counter() - started
     result = {
         "model": args.model,
         "device": evaluator.device,
@@ -124,6 +175,8 @@ def _evaluate(args: argparse.Namespace) -> int:
         "attackPerPiece": total_attack / max(1, total_pieces),
         "topouts": topouts,
         "completed": completed,
+        "elapsedSeconds": elapsed,
+        "piecesPerSecond": total_pieces / max(elapsed, 1e-9),
         "searchConfig": config.to_dict(),
     }
     print(json.dumps(result, indent=2))
@@ -210,6 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--max-pieces", type=int, default=500)
     evaluate.add_argument("--seed-base", type=int, default=4000001)
     evaluate.add_argument("--seed-step", type=int, default=97)
+    evaluate.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
     _add_search_args(evaluate)
     evaluate.set_defaults(func=_evaluate)
 
