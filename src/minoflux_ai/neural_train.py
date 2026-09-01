@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+from array import array
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import random
+import time
 from typing import Any, Callable, Mapping, Sequence
 
+from .bitboard import ROW_OCCUPANCY_BYTES
 from .neural import (
     NEURAL_VALUE_FORMAT,
     NeuralValueConfig,
     build_neural_value_model,
     save_neural_value_checkpoint,
 )
-from .neural_dataset import NEURAL_DATASET_FORMAT, unpack_board_rows
+from .neural_dataset import NEURAL_DATASET_FORMAT
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,12 +70,20 @@ class NeuralTrainResult:
     epoch_losses: tuple[float, ...]
     config: NeuralTrainConfig
     human_dataset_path: str | None = None
+    cache_device: str = "cpu"
+    elapsed_seconds: float = 0.0
+    cache_seconds: float = 0.0
+    epoch_seconds: tuple[float, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
             "format": NEURAL_VALUE_FORMAT,
             "checkpointPath": self.checkpoint_path,
             "device": self.device,
+            "cacheDevice": self.cache_device,
+            "elapsedSeconds": self.elapsed_seconds,
+            "cacheSeconds": self.cache_seconds,
+            "epochSeconds": list(self.epoch_seconds),
             "train": self.train.to_dict(),
             "validation": self.validation.to_dict(),
             "human": None if self.human is None else self.human.to_dict(),
@@ -87,8 +98,17 @@ class _PreparedGroup:
     start: int
     end: int
     expert_indices: tuple[int, ...]
-    teacher_scores: tuple[float | None, ...]
-    target_values: tuple[float | None, ...]
+    negative_indices: tuple[int, ...]
+    teacher_pairs: tuple[tuple[int, int], ...]
+    rollout_pairs: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _DatasetCache:
+    boards: Any
+    contexts: Any
+    groups: tuple[_PreparedGroup, ...]
+    device: str
 
 
 def _require_torch() -> tuple[Any, Any]:
@@ -183,81 +203,8 @@ def _optional_number(candidate: Mapping[str, object], key: str) -> float | None:
     return float(value)
 
 
-def _candidate_arrays(
-    record: Mapping[str, object],
-    cfg: NeuralValueConfig,
-) -> tuple[
-    list[tuple[float, ...]],
-    list[list[float]],
-    tuple[int, ...],
-    tuple[float | None, ...],
-    tuple[float | None, ...],
-]:
-    raw = record.get("candidates")
-    if not isinstance(raw, Sequence) or not raw:
-        raise ValueError("Sample has no candidates")
-    boards: list[tuple[float, ...]] = []
-    contexts: list[list[float]] = []
-    teacher_scores: list[float | None] = []
-    target_values: list[float | None] = []
-    for candidate in raw:
-        if not isinstance(candidate, Mapping):
-            raise ValueError("Candidate must be an object")
-        rows = candidate.get("rows")
-        context = candidate.get("context")
-        if not isinstance(rows, Sequence) or not isinstance(context, Sequence):
-            raise ValueError("Candidate is missing rows/context")
-        boards.append(unpack_board_rows([int(value) for value in rows], cfg))
-        contexts.append([float(value) for value in context])
-        teacher_scores.append(_optional_number(candidate, "teacherScore"))
-        target_values.append(_optional_number(candidate, "targetValue"))
-    return (
-        boards,
-        contexts,
-        _expert_indices(record, len(boards)),
-        tuple(teacher_scores),
-        tuple(target_values),
-    )
-
-
-def _prepare_batch(
-    records: Sequence[dict[str, object]],
-    cfg: NeuralValueConfig,
-    torch: Any,
-    device: str,
-) -> tuple[Any, Any, tuple[_PreparedGroup, ...]]:
-    flat_boards: list[tuple[float, ...]] = []
-    flat_contexts: list[list[float]] = []
-    groups: list[_PreparedGroup] = []
-    for record in records:
-        boards, contexts, expert_indices, teacher_scores, target_values = _candidate_arrays(record, cfg)
-        start = len(flat_boards)
-        flat_boards.extend(boards)
-        flat_contexts.extend(contexts)
-        groups.append(
-            _PreparedGroup(
-                start=start,
-                end=len(flat_boards),
-                expert_indices=expert_indices,
-                teacher_scores=teacher_scores,
-                target_values=target_values,
-            )
-        )
-    boards_tensor = torch.tensor(flat_boards, dtype=torch.float32, device=device).reshape(
-        len(flat_boards), 1, cfg.board_height, cfg.board_width
-    )
-    contexts_tensor = torch.tensor(flat_contexts, dtype=torch.float32, device=device)
-    return boards_tensor, contexts_tensor, tuple(groups)
-
-
-def _pairwise_order_loss(
-    group: Any,
-    labels: Sequence[float | None],
-    torch: Any,
-    F: Any,
-    margin: float,
-) -> Any:
-    losses = []
+def _ordered_pairs(labels: Sequence[float | None]) -> tuple[tuple[int, int], ...]:
+    pairs: list[tuple[int, int]] = []
     for left in range(len(labels)):
         left_label = labels[left]
         if left_label is None:
@@ -269,13 +216,136 @@ def _pairwise_order_loss(
             difference = float(left_label) - float(right_label)
             if abs(difference) <= 1e-12:
                 continue
-            if difference > 0.0:
-                losses.append(F.relu(margin - (group[left] - group[right])))
-            else:
-                losses.append(F.relu(margin - (group[right] - group[left])))
-    if not losses:
+            pairs.append((left, right) if difference > 0.0 else (right, left))
+    return tuple(pairs)
+
+
+def _build_dataset_cache(
+    records: Sequence[dict[str, object]],
+    cfg: NeuralValueConfig,
+    torch: Any,
+    device: str,
+) -> _DatasetCache:
+    if not records:
+        raise ValueError("Cannot cache an empty neural dataset")
+
+    board_bytes = bytearray()
+    context_values = array("f")
+    groups: list[_PreparedGroup] = []
+    candidate_cursor = 0
+
+    for record in records:
+        raw_candidates = record.get("candidates")
+        if not isinstance(raw_candidates, Sequence) or not raw_candidates:
+            raise ValueError("Sample has no candidates")
+        count = len(raw_candidates)
+        positives = _expert_indices(record, count)
+        positive_set = set(positives)
+        teacher_scores: list[float | None] = []
+        target_values: list[float | None] = []
+        start = candidate_cursor
+
+        for candidate in raw_candidates:
+            if not isinstance(candidate, Mapping):
+                raise ValueError("Candidate must be an object")
+            rows = candidate.get("rows")
+            context = candidate.get("context")
+            if not isinstance(rows, Sequence) or not isinstance(context, Sequence):
+                raise ValueError("Candidate is missing rows/context")
+            if len(rows) != cfg.board_height or len(context) != cfg.context_size:
+                raise ValueError("Candidate feature shape does not match neural config")
+            for value in rows:
+                mask = int(value)
+                if mask < 0 or mask >= len(ROW_OCCUPANCY_BYTES):
+                    raise ValueError(f"Packed board row mask is out of range: {mask}")
+                board_bytes.extend(ROW_OCCUPANCY_BYTES[mask])
+            context_values.extend(float(value) for value in context)
+            teacher_scores.append(_optional_number(candidate, "teacherScore"))
+            target_values.append(_optional_number(candidate, "targetValue"))
+            candidate_cursor += 1
+
+        groups.append(
+            _PreparedGroup(
+                start=start,
+                end=candidate_cursor,
+                expert_indices=positives,
+                negative_indices=tuple(index for index in range(count) if index not in positive_set),
+                teacher_pairs=_ordered_pairs(teacher_scores),
+                rollout_pairs=_ordered_pairs(target_values),
+            )
+        )
+
+    board_cpu = torch.frombuffer(board_bytes, dtype=torch.uint8).reshape(
+        candidate_cursor, 1, cfg.board_height, cfg.board_width
+    )
+    context_cpu = torch.frombuffer(context_values, dtype=torch.float32).reshape(
+        candidate_cursor, cfg.context_size
+    )
+    if device == "cpu":
+        boards = board_cpu.clone()
+        contexts = context_cpu.clone()
+    else:
+        boards = board_cpu.to(device=device)
+        contexts = context_cpu.to(device=device)
+    return _DatasetCache(
+        boards=boards,
+        contexts=contexts,
+        groups=tuple(groups),
+        device=device,
+    )
+
+
+def _prepare_cached_batch(
+    cache: _DatasetCache,
+    sample_indices: Sequence[int],
+    torch: Any,
+) -> tuple[Any, Any, tuple[_PreparedGroup, ...]]:
+    flat_indices: list[int] = []
+    local_groups: list[_PreparedGroup] = []
+    cursor = 0
+    for sample_index in sample_indices:
+        prepared = cache.groups[int(sample_index)]
+        count = prepared.end - prepared.start
+        flat_indices.extend(range(prepared.start, prepared.end))
+        local_groups.append(
+            _PreparedGroup(
+                start=cursor,
+                end=cursor + count,
+                expert_indices=prepared.expert_indices,
+                negative_indices=prepared.negative_indices,
+                teacher_pairs=prepared.teacher_pairs,
+                rollout_pairs=prepared.rollout_pairs,
+            )
+        )
+        cursor += count
+
+    index = torch.tensor(flat_indices, dtype=torch.long, device=cache.device)
+    boards = cache.boards.index_select(0, index).to(dtype=torch.float32)
+    contexts = cache.contexts.index_select(0, index)
+    return boards, contexts, tuple(local_groups)
+
+
+def _pairwise_order_loss(
+    group: Any,
+    pairs: Sequence[tuple[int, int]],
+    torch: Any,
+    F: Any,
+    margin: float,
+) -> Any:
+    if not pairs:
         return group.sum() * 0.0
-    return torch.stack(losses).mean()
+    winners = torch.tensor(
+        [winner for winner, _loser in pairs],
+        dtype=torch.long,
+        device=group.device,
+    )
+    losers = torch.tensor(
+        [loser for _winner, loser in pairs],
+        dtype=torch.long,
+        device=group.device,
+    )
+    differences = group.index_select(0, winners) - group.index_select(0, losers)
+    return F.relu(margin - differences).mean()
 
 
 def _loss_and_ranks(
@@ -286,21 +356,25 @@ def _loss_and_ranks(
     margin: float,
     teacher_weight: float,
     rollout_weight: float,
+    *,
+    collect_metrics: bool = True,
 ) -> tuple[Any, int, int, float]:
     losses = []
     top1 = 0
     top3 = 0
     rank_total = 0.0
+    metric_values = values.detach().cpu().tolist() if collect_metrics else None
+
     for prepared in groups:
         group = values[prepared.start : prepared.end]
         positive_indices = prepared.expert_indices
-        negative_indices = [
-            index for index in range(group.numel()) if index not in positive_indices
+        positives = group[
+            torch.tensor(positive_indices, dtype=torch.long, device=group.device)
         ]
-        positives = torch.stack([group[index] for index in positive_indices])
-        if negative_indices:
-            negatives = torch.stack([group[index] for index in negative_indices])
-            # Every explicitly acceptable move should outrank every known negative.
+        if prepared.negative_indices:
+            negatives = group[
+                torch.tensor(prepared.negative_indices, dtype=torch.long, device=group.device)
+            ]
             ranking_loss = F.relu(
                 margin - (positives[:, None] - negatives[None, :])
             ).mean()
@@ -308,10 +382,10 @@ def _loss_and_ranks(
             ranking_loss = group.sum() * 0.0
 
         teacher_loss = _pairwise_order_loss(
-            group, prepared.teacher_scores, torch, F, margin
+            group, prepared.teacher_pairs, torch, F, margin
         )
         rollout_loss = _pairwise_order_loss(
-            group, prepared.target_values, torch, F, margin
+            group, prepared.rollout_pairs, torch, F, margin
         )
         losses.append(
             ranking_loss
@@ -319,43 +393,40 @@ def _loss_and_ranks(
             + float(rollout_weight) * rollout_loss
         )
 
-        best_positive = max(float(group[index].detach().cpu().item()) for index in positive_indices)
-        rank = 1 + sum(
-            float(value.detach().cpu().item()) > best_positive
-            for value in group
-        )
-        top1 += int(rank == 1)
-        top3 += int(rank <= 3)
-        rank_total += rank
+        if metric_values is not None:
+            group_values = metric_values[prepared.start : prepared.end]
+            best_positive = max(float(group_values[index]) for index in positive_indices)
+            rank = 1 + sum(float(value) > best_positive for value in group_values)
+            top1 += int(rank == 1)
+            top3 += int(rank <= 3)
+            rank_total += rank
 
     loss = values.sum() * 0.0 if not losses else torch.stack(losses).mean()
     return loss, top1, top3, rank_total
 
 
-def _iter_batches(
-    records: Sequence[dict[str, object]],
+def _iter_index_batches(
+    count: int,
     batch_size: int,
     rng: random.Random | None = None,
-) -> list[list[dict[str, object]]]:
-    ordered = list(records)
+) -> list[list[int]]:
+    ordered = list(range(count))
     if rng is not None:
         rng.shuffle(ordered)
     return [ordered[start : start + batch_size] for start in range(0, len(ordered), batch_size)]
 
 
-def _evaluate(
+def _evaluate_cached(
     model: Any,
-    records: Sequence[dict[str, object]],
-    cfg: NeuralValueConfig,
+    cache: _DatasetCache | None,
     torch: Any,
     F: Any,
-    device: str,
     margin: float,
     batch_size: int,
     teacher_weight: float,
     rollout_weight: float,
 ) -> NeuralTrainMetrics:
-    if not records:
+    if cache is None or not cache.groups:
         return NeuralTrainMetrics(0, 0.0, 0.0, 0.0, 0.0)
     loss_total = 0.0
     top1 = 0
@@ -364,8 +435,8 @@ def _evaluate(
     samples = 0
     model.eval()
     with torch.inference_mode():
-        for batch in _iter_batches(records, batch_size):
-            boards, contexts, groups = _prepare_batch(batch, cfg, torch, device)
+        for indices in _iter_index_batches(len(cache.groups), batch_size):
+            boards, contexts, groups = _prepare_cached_batch(cache, indices, torch)
             values = model(boards, contexts)
             loss, batch_top1, batch_top3, batch_rank_total = _loss_and_ranks(
                 values,
@@ -375,6 +446,7 @@ def _evaluate(
                 margin,
                 teacher_weight,
                 rollout_weight,
+                collect_metrics=True,
             )
             count = len(groups)
             loss_total += float(loss.detach().cpu().item()) * count
@@ -413,6 +485,7 @@ def train_neural_value_model(
     resume_from: str | Path | None = None,
     progress: Callable[[int, float], None] | None = None,
 ) -> NeuralTrainResult:
+    started = time.perf_counter()
     cfg = config.normalized()
     torch, F = _require_torch()
     torch.manual_seed(cfg.seed)
@@ -438,29 +511,49 @@ def train_neural_value_model(
     model = build_neural_value_model(neural_config).to(device)
     if resume_from is not None:
         _load_resume(model, resume_from, neural_config, torch, device)
+
+    cache_started = time.perf_counter()
+    train_cache = _build_dataset_cache(train_records, neural_config, torch, device)
+    validation_cache = (
+        _build_dataset_cache(validation_records, neural_config, torch, device)
+        if validation_records
+        else None
+    )
+    human_cache = (
+        _build_dataset_cache(human_records, neural_config, torch, device)
+        if human_records
+        else None
+    )
+    cache_seconds = time.perf_counter() - cache_started
+
+    del records, train_records, validation_records, human_records
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=cfg.learning_rate,
         weight_decay=cfg.weight_decay,
     )
     epoch_losses: list[float] = []
+    epoch_seconds: list[float] = []
 
     for epoch in range(1, cfg.epochs + 1):
+        epoch_started = time.perf_counter()
         model.train()
-        loss_total = 0.0
+        loss_parts: list[Any] = []
         weighted_samples = 0.0
-        batch_jobs: list[tuple[list[dict[str, object]], float]] = [
-            (batch, 1.0)
-            for batch in _iter_batches(train_records, cfg.batch_size, rng)
+        batch_jobs: list[tuple[_DatasetCache, list[int], float]] = [
+            (train_cache, batch, 1.0)
+            for batch in _iter_index_batches(len(train_cache.groups), cfg.batch_size, rng)
         ]
-        if human_records and cfg.human_weight > 0.0:
+        if human_cache is not None and cfg.human_weight > 0.0:
             batch_jobs.extend(
-                (batch, cfg.human_weight)
-                for batch in _iter_batches(human_records, cfg.batch_size, rng)
+                (human_cache, batch, cfg.human_weight)
+                for batch in _iter_index_batches(len(human_cache.groups), cfg.batch_size, rng)
             )
         rng.shuffle(batch_jobs)
-        for batch, source_weight in batch_jobs:
-            boards, contexts, groups = _prepare_batch(batch, neural_config, torch, device)
+
+        for cache, indices, source_weight in batch_jobs:
+            boards, contexts, groups = _prepare_cached_batch(cache, indices, torch)
             optimizer.zero_grad(set_to_none=True)
             values = model(boards, contexts)
             raw_loss, _, _, _ = _loss_and_ranks(
@@ -471,58 +564,60 @@ def train_neural_value_model(
                 cfg.margin,
                 cfg.teacher_weight,
                 cfg.rollout_weight,
+                collect_metrics=False,
             )
             loss = raw_loss * source_weight
             loss.backward()
             optimizer.step()
             contribution = len(groups) * source_weight
-            loss_total += float(raw_loss.detach().cpu().item()) * contribution
+            loss_parts.append(raw_loss.detach() * contribution)
             weighted_samples += contribution
+
+        if loss_parts:
+            loss_total = float(torch.stack(loss_parts).sum().cpu().item())
+        else:
+            loss_total = 0.0
         epoch_loss = loss_total / max(1.0, weighted_samples)
         epoch_losses.append(epoch_loss)
+        epoch_seconds.append(time.perf_counter() - epoch_started)
         if progress is not None:
             progress(epoch, epoch_loss)
 
-    train_metrics = _evaluate(
+    train_metrics = _evaluate_cached(
         model,
-        train_records,
-        neural_config,
+        train_cache,
         torch,
         F,
-        device,
         cfg.margin,
         cfg.batch_size,
         cfg.teacher_weight,
         cfg.rollout_weight,
     )
-    validation_metrics = _evaluate(
+    validation_metrics = _evaluate_cached(
         model,
-        validation_records,
-        neural_config,
+        validation_cache,
         torch,
         F,
-        device,
         cfg.margin,
         cfg.batch_size,
         cfg.teacher_weight,
         cfg.rollout_weight,
     )
     human_metrics = (
-        _evaluate(
+        _evaluate_cached(
             model,
-            human_records,
-            neural_config,
+            human_cache,
             torch,
             F,
-            device,
             cfg.margin,
             cfg.batch_size,
             cfg.teacher_weight,
             cfg.rollout_weight,
         )
-        if human_records
+        if human_cache is not None
         else None
     )
+    elapsed_seconds = time.perf_counter() - started
     saved = save_neural_value_checkpoint(
         checkpoint_path,
         model,
@@ -539,6 +634,10 @@ def train_neural_value_model(
             "validationMetrics": validation_metrics.to_dict(),
             "humanMetrics": None if human_metrics is None else human_metrics.to_dict(),
             "epochLosses": epoch_losses,
+            "cacheDevice": device,
+            "cacheSeconds": cache_seconds,
+            "epochSeconds": epoch_seconds,
+            "elapsedSeconds": elapsed_seconds,
         },
     )
     return NeuralTrainResult(
@@ -550,4 +649,8 @@ def train_neural_value_model(
         epoch_losses=tuple(epoch_losses),
         config=cfg,
         human_dataset_path=None if human_dataset_path is None else str(human_dataset_path),
+        cache_device=device,
+        elapsed_seconds=elapsed_seconds,
+        cache_seconds=cache_seconds,
+        epoch_seconds=tuple(epoch_seconds),
     )
