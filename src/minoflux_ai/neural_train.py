@@ -281,12 +281,11 @@ def _build_dataset_cache(
     context_cpu = torch.frombuffer(context_values, dtype=torch.float32).reshape(
         candidate_cursor, cfg.context_size
     )
-    if device == "cpu":
-        boards = board_cpu.clone()
-        contexts = context_cpu.clone()
-    else:
-        boards = board_cpu.to(device=device)
-        contexts = context_cpu.to(device=device)
+
+    # The full 22.9k-sample training set is small enough that float32 boards use
+    # only tens of MB. Convert once here instead of converting every batch.
+    boards = board_cpu.to(device=device, dtype=torch.float32)
+    contexts = context_cpu.clone() if device == "cpu" else context_cpu.to(device=device)
     return _DatasetCache(
         boards=boards,
         contexts=contexts,
@@ -320,7 +319,7 @@ def _prepare_cached_batch(
         cursor += count
 
     index = torch.tensor(flat_indices, dtype=torch.long, device=cache.device)
-    boards = cache.boards.index_select(0, index).to(dtype=torch.float32)
+    boards = cache.boards.index_select(0, index)
     contexts = cache.contexts.index_select(0, index)
     return boards, contexts, tuple(local_groups)
 
@@ -359,6 +358,8 @@ def _loss_and_ranks(
     *,
     collect_metrics: bool = True,
 ) -> tuple[Any, int, int, float]:
+    """Reference loss path used for final metrics and regression checking."""
+
     losses = []
     top1 = 0
     top3 = 0
@@ -403,6 +404,110 @@ def _loss_and_ranks(
 
     loss = values.sum() * 0.0 if not losses else torch.stack(losses).mean()
     return loss, top1, top3, rank_total
+
+
+def _batched_pair_means(
+    values: Any,
+    groups: Sequence[_PreparedGroup],
+    torch: Any,
+    F: Any,
+    margin: float,
+    kind: str,
+) -> Any:
+    """Return one mean margin loss per sample for one pair family.
+
+    Pair indices are assembled on the CPU once per batch, then all margin losses
+    and per-sample reductions happen in a handful of GPU tensor operations.
+    """
+
+    winners: list[int] = []
+    losers: list[int] = []
+    sample_ids: list[int] = []
+
+    for sample_id, prepared in enumerate(groups):
+        base = prepared.start
+        if kind == "ranking":
+            for winner in prepared.expert_indices:
+                for loser in prepared.negative_indices:
+                    winners.append(base + winner)
+                    losers.append(base + loser)
+                    sample_ids.append(sample_id)
+        elif kind == "teacher":
+            for winner, loser in prepared.teacher_pairs:
+                winners.append(base + winner)
+                losers.append(base + loser)
+                sample_ids.append(sample_id)
+        elif kind == "rollout":
+            for winner, loser in prepared.rollout_pairs:
+                winners.append(base + winner)
+                losers.append(base + loser)
+                sample_ids.append(sample_id)
+        else:
+            raise ValueError(f"Unknown neural pair kind: {kind}")
+
+    sample_count = len(groups)
+    if not winners:
+        return values.new_zeros(sample_count)
+
+    winner_index = torch.tensor(winners, dtype=torch.long, device=values.device)
+    loser_index = torch.tensor(losers, dtype=torch.long, device=values.device)
+    sample_index = torch.tensor(sample_ids, dtype=torch.long, device=values.device)
+    pair_losses = F.relu(
+        margin
+        - (
+            values.index_select(0, winner_index)
+            - values.index_select(0, loser_index)
+        )
+    )
+
+    sums = values.new_zeros(sample_count)
+    counts = values.new_zeros(sample_count)
+    sums.index_add_(0, sample_index, pair_losses)
+    counts.index_add_(0, sample_index, torch.ones_like(pair_losses))
+    return sums / counts.clamp_min(1.0)
+
+
+def _loss_only_vectorized(
+    values: Any,
+    groups: Sequence[_PreparedGroup],
+    torch: Any,
+    F: Any,
+    margin: float,
+    teacher_weight: float,
+    rollout_weight: float,
+) -> Any:
+    """Training-only loss path with no per-sample GPU kernels or synchronizations."""
+
+    if not groups:
+        return values.sum() * 0.0
+
+    sample_losses = _batched_pair_means(
+        values,
+        groups,
+        torch,
+        F,
+        margin,
+        "ranking",
+    )
+    if teacher_weight > 0.0:
+        sample_losses = sample_losses + float(teacher_weight) * _batched_pair_means(
+            values,
+            groups,
+            torch,
+            F,
+            margin,
+            "teacher",
+        )
+    if rollout_weight > 0.0:
+        sample_losses = sample_losses + float(rollout_weight) * _batched_pair_means(
+            values,
+            groups,
+            torch,
+            F,
+            margin,
+            "rollout",
+        )
+    return sample_losses.mean()
 
 
 def _iter_index_batches(
@@ -556,7 +661,7 @@ def train_neural_value_model(
             boards, contexts, groups = _prepare_cached_batch(cache, indices, torch)
             optimizer.zero_grad(set_to_none=True)
             values = model(boards, contexts)
-            raw_loss, _, _, _ = _loss_and_ranks(
+            raw_loss = _loss_only_vectorized(
                 values,
                 groups,
                 torch,
@@ -564,7 +669,6 @@ def train_neural_value_model(
                 cfg.margin,
                 cfg.teacher_weight,
                 cfg.rollout_weight,
-                collect_metrics=False,
             )
             loss = raw_loss * source_weight
             loss.backward()
