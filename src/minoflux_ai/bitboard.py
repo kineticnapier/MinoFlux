@@ -30,6 +30,38 @@ for _piece, _rotations in SHAPES.items():
     SHAPE_ROW_MASKS[_piece] = tuple(_piece_rows)
     SHAPE_BOUNDS[_piece] = tuple(_piece_bounds)
 
+# Reachability uses a small anchor margin around the board. Pre-shift every
+# standard-width shape row for that complete range so hot collision checks do
+# not repeatedly perform bounds arithmetic and bit shifts.
+_SHIFT_X_MIN = -4
+_SHIFT_X_MAX = BOARD_WIDTH + 3
+SHIFTED_SHAPE_ROW_MASKS: dict[
+    str,
+    tuple[tuple[tuple[tuple[int, int], ...] | None, ...], ...],
+] = {}
+for _piece, _rotations in SHAPE_ROW_MASKS.items():
+    _piece_shifted: list[tuple[tuple[tuple[int, int], ...] | None, ...]] = []
+    for _rotation, _rows in enumerate(_rotations):
+        _min_x, _max_x, _min_y, _max_y = SHAPE_BOUNDS[_piece][_rotation]
+        _anchors: list[tuple[tuple[int, int], ...] | None] = []
+        for _x in range(_SHIFT_X_MIN, _SHIFT_X_MAX + 1):
+            if _x + _min_x < 0 or _x + _max_x >= BOARD_WIDTH:
+                _anchors.append(None)
+                continue
+            _anchors.append(
+                tuple(
+                    (
+                        _dy,
+                        _relative_mask << _x
+                        if _x >= 0
+                        else _relative_mask >> (-_x),
+                    )
+                    for _dy, _relative_mask in _rows
+                )
+            )
+        _piece_shifted.append(tuple(_anchors))
+    SHIFTED_SHAPE_ROW_MASKS[_piece] = tuple(_piece_shifted)
+
 _FRONT_CORNERS: dict[int, tuple[int, int]] = {
     0: (0, 1),
     1: (1, 3),
@@ -63,15 +95,27 @@ def collides_row_masks(
     """Collision test against compact occupancy rows without cell tuples.
 
     SRS anchors can be negative even when every occupied mino is on-board (for
-    example a vertical I at x=-2). Shift row masks right for those anchors rather
-    than attempting an invalid negative left shift.
+    example a vertical I at x=-2). Standard-width checks use pre-shifted row
+    masks; arbitrary widths keep the generic reference path.
     """
 
     rotation %= 4
+    height = len(rows)
+    if width == BOARD_WIDTH and _SHIFT_X_MIN <= x <= _SHIFT_X_MAX:
+        shifted_rows = SHIFTED_SHAPE_ROW_MASKS[piece][rotation][x - _SHIFT_X_MIN]
+        if shifted_rows is None:
+            return True
+        for dy, shifted_mask in shifted_rows:
+            row_y = y + dy
+            if row_y >= height:
+                return True
+            if row_y >= 0 and rows[row_y] & shifted_mask:
+                return True
+        return False
+
     min_x, max_x, _min_y, _max_y = SHAPE_BOUNDS[piece][rotation]
     if x + min_x < 0 or x + max_x >= width:
         return True
-    height = len(rows)
     for dy, relative_mask in SHAPE_ROW_MASKS[piece][rotation]:
         row_y = y + dy
         if row_y >= height:
