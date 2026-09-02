@@ -83,41 +83,6 @@ def board_row_masks(board: Sequence[Sequence[object | None]]) -> tuple[int, ...]
     return tuple(rows)
 
 
-def _shifted_rows_collide(
-    rows: Sequence[int],
-    shifted_rows: tuple[tuple[int, int], ...],
-    y: int,
-    height: int,
-) -> bool:
-    """Unrolled 1-4 row collision check used by the standard 10-column hot path."""
-
-    dy0, mask0 = shifted_rows[0]
-    row0 = y + dy0
-    if row0 >= height or (row0 >= 0 and rows[row0] & mask0):
-        return True
-    count = len(shifted_rows)
-    if count == 1:
-        return False
-
-    dy1, mask1 = shifted_rows[1]
-    row1 = y + dy1
-    if row1 >= height or (row1 >= 0 and rows[row1] & mask1):
-        return True
-    if count == 2:
-        return False
-
-    dy2, mask2 = shifted_rows[2]
-    row2 = y + dy2
-    if row2 >= height or (row2 >= 0 and rows[row2] & mask2):
-        return True
-    if count == 3:
-        return False
-
-    dy3, mask3 = shifted_rows[3]
-    row3 = y + dy3
-    return row3 >= height or (row3 >= 0 and bool(rows[row3] & mask3))
-
-
 def collides_row_masks(
     rows: Sequence[int],
     piece: str,
@@ -140,7 +105,13 @@ def collides_row_masks(
         shifted_rows = SHIFTED_SHAPE_ROW_MASKS[piece][rotation][x - _SHIFT_X_MIN]
         if shifted_rows is None:
             return True
-        return _shifted_rows_collide(rows, shifted_rows, y, height)
+        for dy, shifted_mask in shifted_rows:
+            row_y = y + dy
+            if row_y >= height:
+                return True
+            if row_y >= 0 and rows[row_y] & shifted_mask:
+                return True
+        return False
 
     min_x, max_x, _min_y, _max_y = SHAPE_BOUNDS[piece][rotation]
     if x + min_x < 0 or x + max_x >= width:
