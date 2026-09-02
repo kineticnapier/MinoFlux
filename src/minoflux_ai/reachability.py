@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
-
 from minoflux_engine import Game, Placement
 from minoflux_engine.pieces import SHAPES, kick_tests
 
@@ -105,22 +103,21 @@ def reachable_placements(
 
     rows = board_row_masks(game.board)
     piece = game.current
+    width = game.width
+    height = game.height
     x_min, x_max, x_count, y_min, packed_count = _state_layout(game)
 
+    # Keep this arithmetic local to the hot loop instead of routing every state
+    # through the generic keyword-heavy helper.
     def pack(x: int, y: int, rotation: int) -> int:
-        return _pack_state(
-            x,
-            y,
-            rotation,
-            x_min=x_min,
-            x_max=x_max,
-            x_count=x_count,
-            y_min=y_min,
-            height=game.height,
-        )
+        if x < x_min or x > x_max or y < y_min or y >= height:
+            return _NO_STATE
+        return ((((y - y_min) * x_count) + (x - x_min)) << 2) | (rotation & 3)
+
+    collision = collides_row_masks
 
     def collides(x: int, y: int, rotation: int) -> bool:
-        return collides_row_masks(rows, piece, x, y, rotation, width=game.width)
+        return collision(rows, piece, x, y, rotation, width=width)
 
     start_state = pack(game.x, game.y, game.rotation)
     if start_state < 0 or collides(game.x, game.y, game.rotation):
@@ -173,12 +170,36 @@ def reachable_placements(
     rotation_froms: list[int] = [-1]
     rotation_tos: list[int] = [-1]
 
-    frontier: deque[int] = deque([0])
+    # A list plus cursor is a FIFO queue like deque.popleft(), but avoids one
+    # method call per reachable state and keeps the traversal order identical.
+    frontier: list[int] = [0]
+    frontier_index = 0
     state_nodes = [_NO_STATE] * packed_count
     rotation_nodes = [_NO_STATE] * packed_count
     state_nodes[start_state] = 0
     reachable_count = 1
     budget = max(1, int(max_nodes))
+
+    if piece == "O":
+        rotation_specs: tuple[tuple[int, int], ...] = ()
+        kick_cache: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {}
+    else:
+        rotation_specs = (
+            ((1, _CMD_CW), (-1, _CMD_CCW), (2, _CMD_180))
+            if allow_180
+            else ((1, _CMD_CW), (-1, _CMD_CCW))
+        )
+        # SRS kick tables depend only on piece/from/to. Resolve them once for this
+        # search rather than performing the same table lookup at every BFS node.
+        kick_cache = {}
+        for source_rotation in range(4):
+            for direction, _command in rotation_specs:
+                target_rotation = (source_rotation + direction) & 3
+                kick_cache[(source_rotation, target_rotation)] = kick_tests(
+                    piece,
+                    source_rotation,
+                    target_rotation,
+                )
 
     def append_node(
         x: int,
@@ -206,8 +227,9 @@ def reachable_placements(
         rotation_tos.append(rotation_to)
         return index
 
-    while frontier and reachable_count <= budget:
-        node_index = frontier.popleft()
+    while frontier_index < len(frontier) and reachable_count <= budget:
+        node_index = frontier[frontier_index]
+        frontier_index += 1
         x = xs[node_index]
         y = ys[node_index]
         rotation = rotations[node_index]
@@ -251,59 +273,55 @@ def reachable_placements(
             reachable_count += 1
             frontier.append(successor)
 
-        if piece != "O":
-            rotation_specs = [(1, _CMD_CW), (-1, _CMD_CCW)]
-            if allow_180:
-                rotation_specs.append((2, _CMD_180))
-            for direction, command in rotation_specs:
-                target_rotation = (rotation + direction) & 3
-                rotated: tuple[int, int, int] | None = None
-                for kick_index, (kick_x, kick_y) in enumerate(
-                    kick_tests(piece, rotation, target_rotation)
-                ):
-                    target_x = x + kick_x
-                    target_y = y + kick_y
-                    if target_y < y_min:
-                        continue
-                    state_id = pack(target_x, target_y, target_rotation)
-                    if state_id < 0:
-                        continue
-                    if not collides(target_x, target_y, target_rotation):
-                        rotated = (target_x, target_y, kick_index)
-                        break
-                if rotated is None:
+        for direction, command in rotation_specs:
+            target_rotation = (rotation + direction) & 3
+            rotated: tuple[int, int, int] | None = None
+            for kick_index, (kick_x, kick_y) in enumerate(
+                kick_cache[(rotation, target_rotation)]
+            ):
+                target_x = x + kick_x
+                target_y = y + kick_y
+                if target_y < y_min:
                     continue
-
-                target_x, target_y, kick_index = rotated
                 state_id = pack(target_x, target_y, target_rotation)
-                previous_rotation = rotation_nodes[state_id]
-                new_depth = depth + 1
-                improves_rotation = (
-                    previous_rotation == _NO_STATE
-                    or new_depth < depths[previous_rotation]
-                )
-                adds_geometry = state_nodes[state_id] == _NO_STATE
-                if not improves_rotation and not adds_geometry:
+                if state_id < 0:
                     continue
+                if not collides(target_x, target_y, target_rotation):
+                    rotated = (target_x, target_y, kick_index)
+                    break
+            if rotated is None:
+                continue
 
-                successor = append_node(
-                    target_x,
-                    target_y,
-                    target_rotation,
-                    node_index,
-                    command,
-                    new_depth,
-                    last_rotation=True,
-                    kick_index=kick_index,
-                    rotation_from=rotation,
-                    rotation_to=target_rotation,
-                )
-                if improves_rotation:
-                    rotation_nodes[state_id] = successor
-                if adds_geometry:
-                    state_nodes[state_id] = successor
-                    reachable_count += 1
-                    frontier.append(successor)
+            target_x, target_y, kick_index = rotated
+            state_id = pack(target_x, target_y, target_rotation)
+            previous_rotation = rotation_nodes[state_id]
+            new_depth = depth + 1
+            improves_rotation = (
+                previous_rotation == _NO_STATE
+                or new_depth < depths[previous_rotation]
+            )
+            adds_geometry = state_nodes[state_id] == _NO_STATE
+            if not improves_rotation and not adds_geometry:
+                continue
+
+            successor = append_node(
+                target_x,
+                target_y,
+                target_rotation,
+                node_index,
+                command,
+                new_depth,
+                last_rotation=True,
+                kick_index=kick_index,
+                rotation_from=rotation,
+                rotation_to=target_rotation,
+            )
+            if improves_rotation:
+                rotation_nodes[state_id] = successor
+            if adds_geometry:
+                state_nodes[state_id] = successor
+                reachable_count += 1
+                frontier.append(successor)
 
         if reachable_count > budget:
             break
@@ -319,7 +337,7 @@ def reachable_placements(
         landing_y = landing_y_for(x, y, rotation)
         if landing_y == _NO_LANDING:
             return
-        key = _geometry_key(piece, x, landing_y, rotation, game.width)
+        key = _geometry_key(piece, x, landing_y, rotation, width)
         if key < 0:
             return
         last_rotation = last_rotations[node_index]
@@ -334,7 +352,7 @@ def reachable_placements(
                 rotation_kick_index=(
                     kick_indices[node_index] if kick_indices[node_index] >= 0 else None
                 ),
-                width=game.width,
+                width=width,
             )
             if last_rotation
             else None
