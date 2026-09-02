@@ -11,6 +11,7 @@ from typing import Sequence
 from minoflux_ai import DEFAULT_WEIGHTS, SearchConfig, apply_search_action, load_weights
 from minoflux_ai.human_review import HumanReviewConfig, collect_neural_review_queue
 from minoflux_ai.neural import NeuralValueEvaluator
+from minoflux_ai.reachability import ReachabilityProfile, collect_reachability_profile
 from minoflux_ai.search import choose_search_actions_batch
 from minoflux.human_review_pygame import launch_human_review_app
 from minoflux_ai.neural_dataset import NeuralDatasetConfig, write_neural_ranking_dataset
@@ -171,6 +172,7 @@ def _evaluate(args: argparse.Namespace) -> int:
         compile_model=args.torch_compile,
     )
     profiled_scorer = _ProfiledNeuralScorer(evaluator) if args.profile else None
+    reachability_profile = ReachabilityProfile() if args.profile else None
     scorer = evaluator if profiled_scorer is None else profiled_scorer
     weights = _weights(args.heuristic_model)
     config = _search_config(args)
@@ -236,12 +238,13 @@ def _evaluate(args: argparse.Namespace) -> int:
                 batch_games = tuple(games[index] for index in indices)
                 if args.profile:
                     search_started = time.perf_counter()
-                    choices = choose_search_actions_batch(
-                        batch_games,
-                        weights,
-                        config,
-                        scorer=scorer,
-                    )
+                    with collect_reachability_profile(reachability_profile):
+                        choices = choose_search_actions_batch(
+                            batch_games,
+                            weights,
+                            config,
+                            scorer=scorer,
+                        )
                     search_seconds += time.perf_counter() - search_started
                     batch_calls += 1
                 else:
@@ -330,6 +333,11 @@ def _evaluate(args: argparse.Namespace) -> int:
                 profiled_scorer.states / max(1, profiled_scorer.calls)
             ),
             "scorerShareOfSearch": scorer_seconds / max(search_seconds, 1e-9),
+            "reachability": (
+                reachability_profile.to_dict()
+                if reachability_profile is not None
+                else {}
+            ),
         }
     print(json.dumps(result, indent=2))
     return 0
@@ -503,7 +511,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument(
         "--profile",
         action="store_true",
-        help="Report search vs neural scorer timing without changing evaluation choices.",
+        help="Report search, scorer, and exact-SRS reachability timing without changing choices.",
     )
     _add_inference_args(evaluate)
     _add_search_args(evaluate)
