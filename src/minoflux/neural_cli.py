@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from typing import Sequence
 
 from minoflux_ai import DEFAULT_WEIGHTS, SearchConfig, apply_search_action, load_weights
 from minoflux_ai.human_review import HumanReviewConfig, collect_neural_review_queue
@@ -14,7 +15,7 @@ from minoflux_ai.search import choose_search_actions_batch
 from minoflux.human_review_pygame import launch_human_review_app
 from minoflux_ai.neural_dataset import NeuralDatasetConfig, write_neural_ranking_dataset
 from minoflux_ai.neural_train import NeuralTrainConfig, train_neural_value_model
-from minoflux_engine import Game
+from minoflux_engine import Game, Placement
 
 
 def _search_config(args: argparse.Namespace) -> SearchConfig:
@@ -35,6 +36,58 @@ def _weights(path: str | None):
 
 def _champion_weights(path: str | None):
     return load_weights(path or "data/models/champion-cem.json")
+
+
+class _ProfiledNeuralScorer:
+    """Measure neural scoring time without changing scorer outputs."""
+
+    def __init__(self, evaluator: NeuralValueEvaluator) -> None:
+        self.evaluator = evaluator
+        self.calls = 0
+        self.groups = 0
+        self.states = 0
+        self.seconds = 0.0
+
+    def score_placement_groups(
+        self,
+        groups: Sequence[tuple[Game, Sequence[Placement]]],
+    ) -> tuple[tuple[float, ...], ...]:
+        started = time.perf_counter()
+        try:
+            return self.evaluator.score_placement_groups(groups)
+        finally:
+            self.seconds += time.perf_counter() - started
+            self.calls += 1
+            self.groups += len(groups)
+            self.states += sum(len(placements) for _game, placements in groups)
+
+    def score_placements(
+        self,
+        game: Game,
+        placements: Sequence[Placement],
+    ) -> tuple[float, ...]:
+        return self.score_placement_groups(((game, placements),))[0]
+
+    def score_many(self, game: Game, evaluations) -> tuple[float, ...]:
+        return self.score_placements(
+            game,
+            tuple(evaluation.placement for evaluation in evaluations),
+        )
+
+
+def _configure_compile_runtime(args: argparse.Namespace) -> None:
+    if not getattr(args, "torch_compile_skip_dynamic_graphs", False):
+        return
+    if not getattr(args, "torch_compile", False):
+        raise SystemExit("--torch-compile-skip-dynamic-graphs requires --torch-compile")
+    try:
+        from torch._inductor import config as inductor_config
+
+        inductor_config.triton.cudagraph_skip_dynamic_graphs = True
+    except Exception as error:
+        raise RuntimeError(
+            "This PyTorch build does not support skipping dynamic CUDAGraph capture"
+        ) from error
 
 
 def _generate(args: argparse.Namespace) -> int:
@@ -110,12 +163,15 @@ def _train(args: argparse.Namespace) -> int:
 
 
 def _evaluate(args: argparse.Namespace) -> int:
+    _configure_compile_runtime(args)
     evaluator = NeuralValueEvaluator.from_checkpoint(
         args.model,
         device=args.device,
         precision=args.precision,
         compile_model=args.torch_compile,
     )
+    profiled_scorer = _ProfiledNeuralScorer(evaluator) if args.profile else None
+    scorer = evaluator if profiled_scorer is None else profiled_scorer
     weights = _weights(args.heuristic_model)
     config = _search_config(args)
     games = [
@@ -127,6 +183,9 @@ def _evaluate(args: argparse.Namespace) -> int:
     total_attack = 0
     topouts = 0
     completed = 0
+    search_seconds = 0.0
+    apply_seconds = 0.0
+    batch_calls = 0
     progress_bar = None
     if not args.no_progress:
         try:
@@ -175,12 +234,23 @@ def _evaluate(args: argparse.Namespace) -> int:
             for start in range(0, len(active), batch_size):
                 indices = active[start : start + batch_size]
                 batch_games = tuple(games[index] for index in indices)
-                choices = choose_search_actions_batch(
-                    batch_games,
-                    weights,
-                    config,
-                    scorer=evaluator,
-                )
+                if args.profile:
+                    search_started = time.perf_counter()
+                    choices = choose_search_actions_batch(
+                        batch_games,
+                        weights,
+                        config,
+                        scorer=scorer,
+                    )
+                    search_seconds += time.perf_counter() - search_started
+                    batch_calls += 1
+                else:
+                    choices = choose_search_actions_batch(
+                        batch_games,
+                        weights,
+                        config,
+                        scorer=scorer,
+                    )
                 batch_gained = 0
                 for game_index, choice in zip(indices, choices):
                     game = games[game_index]
@@ -189,7 +259,12 @@ def _evaluate(args: argparse.Namespace) -> int:
                         continue
                     before_attack = game.attack
                     before_pieces = game.pieces_placed
-                    apply_search_action(game, choice.action)
+                    if args.profile:
+                        apply_started = time.perf_counter()
+                        apply_search_action(game, choice.action)
+                        apply_seconds += time.perf_counter() - apply_started
+                    else:
+                        apply_search_action(game, choice.action)
                     gained_pieces = max(0, game.pieces_placed - before_pieces)
                     batch_gained += gained_pieces
                     total_pieces += gained_pieces
@@ -224,6 +299,7 @@ def _evaluate(args: argparse.Namespace) -> int:
         "device": evaluator.device,
         "precision": evaluator.precision,
         "torchCompiled": evaluator.compiled,
+        "torchCompileSkipDynamicGraphs": bool(args.torch_compile_skip_dynamic_graphs),
         "games": args.games,
         "maxPieces": args.max_pieces,
         "gameBatchSize": batch_size,
@@ -236,6 +312,25 @@ def _evaluate(args: argparse.Namespace) -> int:
         "piecesPerSecond": total_pieces / max(elapsed, 1e-9),
         "searchConfig": config.to_dict(),
     }
+    if profiled_scorer is not None:
+        scorer_seconds = profiled_scorer.seconds
+        search_other_seconds = max(0.0, search_seconds - scorer_seconds)
+        other_seconds = max(0.0, elapsed - search_seconds - apply_seconds)
+        result["profile"] = {
+            "batchCalls": batch_calls,
+            "searchSeconds": search_seconds,
+            "scorerSeconds": scorer_seconds,
+            "searchOtherSeconds": search_other_seconds,
+            "applySeconds": apply_seconds,
+            "otherSeconds": other_seconds,
+            "scorerCalls": profiled_scorer.calls,
+            "scoredGroups": profiled_scorer.groups,
+            "scoredStates": profiled_scorer.states,
+            "statesPerScorerCall": (
+                profiled_scorer.states / max(1, profiled_scorer.calls)
+            ),
+            "scorerShareOfSearch": scorer_seconds / max(search_seconds, 1e-9),
+        }
     print(json.dumps(result, indent=2))
     return 0
 
@@ -243,6 +338,7 @@ def _evaluate(args: argparse.Namespace) -> int:
 def _review(args: argparse.Namespace) -> int:
     queue_path = Path(args.queue)
     if args.regenerate or not queue_path.is_file():
+        _configure_compile_runtime(args)
         evaluator = NeuralValueEvaluator.from_checkpoint(
             args.model,
             device=args.device,
@@ -300,6 +396,11 @@ def _add_inference_args(parser: argparse.ArgumentParser) -> None:
         "--torch-compile",
         action="store_true",
         help="Use torch.compile(reduce-overhead); optional because support varies by platform.",
+    )
+    parser.add_argument(
+        "--torch-compile-skip-dynamic-graphs",
+        action="store_true",
+        help="Skip CUDAGraph capture for dynamic input sizes while keeping torch.compile kernels.",
     )
 
 
@@ -399,6 +500,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Games advanced together per neural GPU batch",
     )
     evaluate.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
+    evaluate.add_argument(
+        "--profile",
+        action="store_true",
+        help="Report search vs neural scorer timing without changing evaluation choices.",
+    )
     _add_inference_args(evaluate)
     _add_search_args(evaluate)
     evaluate.set_defaults(func=_evaluate)
