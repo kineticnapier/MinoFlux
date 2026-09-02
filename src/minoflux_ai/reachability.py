@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import cache
 import time
 from typing import Iterator
 
@@ -158,7 +159,10 @@ def _path(
     return tuple(result)
 
 
+@cache
 def _geometry_key(piece: str, x: int, y: int, rotation: int, width: int) -> int:
+    """Canonical final-cell key, cached across repeated reachability searches."""
+
     key = 0
     for dx, dy in SHAPES[piece][rotation % 4]:
         cell_x, cell_y = x + dx, y + dy
@@ -198,6 +202,7 @@ def reachable_placements(
     setup_started = time.perf_counter() if profile is not None else 0.0
 
     piece = game.current
+    piece_is_t = piece == "T"
     width = game.width
     height = game.height
     x_min, x_max, x_count, y_min, packed_count = _state_layout(game)
@@ -481,7 +486,7 @@ def reachable_placements(
                     ),
                     width=width,
                 )
-                if last_rotation
+                if last_rotation and piece_is_t
                 else None
             )
             preference = (
