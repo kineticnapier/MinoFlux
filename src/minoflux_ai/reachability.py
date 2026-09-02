@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+import time
+from typing import Iterator
+
 from minoflux_engine import Game, Placement
 from minoflux_engine.pieces import SHAPES, kick_tests
 
@@ -30,6 +36,81 @@ _NO_STATE = -1
 _NO_LANDING = -10_000
 _X_MARGIN = 4
 _Y_MIN = -4
+
+
+@dataclass(slots=True)
+class ReachabilityProfile:
+    """Low-overhead aggregate timings for exact-SRS placement generation."""
+
+    calls: int = 0
+    total_seconds: float = 0.0
+    board_mask_seconds: float = 0.0
+    setup_seconds: float = 0.0
+    bfs_seconds: float = 0.0
+    rotation_seconds: float = 0.0
+    landing_seconds: float = 0.0
+    representative_seconds: float = 0.0
+    placement_seconds: float = 0.0
+    bfs_nodes: int = 0
+    collision_checks: int = 0
+    kick_checks: int = 0
+    landing_queries: int = 0
+    landing_cache_hits: int = 0
+    representative_nodes: int = 0
+    placements: int = 0
+
+    def to_dict(self) -> dict[str, int | float]:
+        accounted = (
+            self.board_mask_seconds
+            + self.setup_seconds
+            + self.bfs_seconds
+            + self.landing_seconds
+            + self.representative_seconds
+            + self.placement_seconds
+        )
+        return {
+            "calls": self.calls,
+            "totalSeconds": self.total_seconds,
+            "boardMaskSeconds": self.board_mask_seconds,
+            "setupSeconds": self.setup_seconds,
+            "bfsSeconds": self.bfs_seconds,
+            "rotationSeconds": self.rotation_seconds,
+            "bfsOtherSeconds": max(0.0, self.bfs_seconds - self.rotation_seconds),
+            "landingSeconds": self.landing_seconds,
+            "representativeSeconds": self.representative_seconds,
+            "placementSeconds": self.placement_seconds,
+            "unaccountedSeconds": max(0.0, self.total_seconds - accounted),
+            "bfsNodes": self.bfs_nodes,
+            "collisionChecks": self.collision_checks,
+            "kickChecks": self.kick_checks,
+            "landingQueries": self.landing_queries,
+            "landingCacheHits": self.landing_cache_hits,
+            "representativeNodes": self.representative_nodes,
+            "placements": self.placements,
+            "bfsNodesPerCall": self.bfs_nodes / max(1, self.calls),
+            "placementsPerCall": self.placements / max(1, self.calls),
+            "landingCacheHitRate": self.landing_cache_hits / max(1, self.landing_queries),
+        }
+
+
+_ACTIVE_REACHABILITY_PROFILE: ContextVar[ReachabilityProfile | None] = ContextVar(
+    "minoflux_reachability_profile",
+    default=None,
+)
+
+
+@contextmanager
+def collect_reachability_profile(
+    profile: ReachabilityProfile | None = None,
+) -> Iterator[ReachabilityProfile]:
+    """Collect reachability timings in the current execution context."""
+
+    active = profile if profile is not None else ReachabilityProfile()
+    token = _ACTIVE_REACHABILITY_PROFILE.set(active)
+    try:
+        yield active
+    finally:
+        _ACTIVE_REACHABILITY_PROFILE.reset(token)
 
 
 def _state_layout(game: Game) -> tuple[int, int, int, int, int]:
@@ -98,10 +179,22 @@ def reachable_placements(
     exact historical placement representative and rotation metadata.
     """
 
+    profile = _ACTIVE_REACHABILITY_PROFILE.get()
+    profile_started = time.perf_counter() if profile is not None else 0.0
+    if profile is not None:
+        profile.calls += 1
+
     if game.game_over or game.paused:
+        if profile is not None:
+            profile.total_seconds += time.perf_counter() - profile_started
         return ()
 
+    board_mask_started = time.perf_counter() if profile is not None else 0.0
     rows = board_row_masks(game.board)
+    if profile is not None:
+        profile.board_mask_seconds += time.perf_counter() - board_mask_started
+    setup_started = time.perf_counter() if profile is not None else 0.0
+
     piece = game.current
     width = game.width
     height = game.height
@@ -117,10 +210,15 @@ def reachable_placements(
     collision = collides_row_masks
 
     def collides(x: int, y: int, rotation: int) -> bool:
+        if profile is not None:
+            profile.collision_checks += 1
         return collision(rows, piece, x, y, rotation, width=width)
 
     start_state = pack(game.x, game.y, game.rotation)
     if start_state < 0 or collides(game.x, game.y, game.rotation):
+        if profile is not None:
+            profile.setup_seconds += time.perf_counter() - setup_started
+            profile.total_seconds += time.perf_counter() - profile_started
         return ()
 
     # Cache hard-drop destinations only for states that are actually queried.
@@ -128,11 +226,15 @@ def reachable_placements(
     landing = [_NO_LANDING] * packed_count
 
     def landing_y_for(x: int, y: int, rotation: int) -> int:
+        if profile is not None:
+            profile.landing_queries += 1
         state_id = pack(x, y, rotation)
         if state_id < 0:
             return _NO_LANDING
         cached = landing[state_id]
         if cached != _NO_LANDING:
+            if profile is not None:
+                profile.landing_cache_hits += 1
             return cached
 
         trail: list[int] = []
@@ -144,6 +246,8 @@ def reachable_placements(
                 break
             cached = landing[current_id]
             if cached != _NO_LANDING:
+                if profile is not None:
+                    profile.landing_cache_hits += 1
                 result = cached
                 break
             trail.append(current_id)
@@ -227,9 +331,15 @@ def reachable_placements(
         rotation_tos.append(rotation_to)
         return index
 
+    if profile is not None:
+        profile.setup_seconds += time.perf_counter() - setup_started
+    bfs_started = time.perf_counter() if profile is not None else 0.0
+
     while frontier_index < len(frontier) and reachable_count <= budget:
         node_index = frontier[frontier_index]
         frontier_index += 1
+        if profile is not None:
+            profile.bfs_nodes += 1
         x = xs[node_index]
         y = ys[node_index]
         rotation = rotations[node_index]
@@ -273,12 +383,15 @@ def reachable_placements(
             reachable_count += 1
             frontier.append(successor)
 
+        rotation_started = time.perf_counter() if profile is not None else 0.0
         for direction, command in rotation_specs:
             target_rotation = (rotation + direction) & 3
             rotated: tuple[int, int, int] | None = None
             for kick_index, (kick_x, kick_y) in enumerate(
                 kick_cache[(rotation, target_rotation)]
             ):
+                if profile is not None:
+                    profile.kick_checks += 1
                 target_x = x + kick_x
                 target_y = y + kick_y
                 if target_y < y_min:
@@ -322,59 +435,78 @@ def reachable_placements(
                 state_nodes[state_id] = successor
                 reachable_count += 1
                 frontier.append(successor)
+        if profile is not None:
+            profile.rotation_seconds += time.perf_counter() - rotation_started
 
         if reachable_count > budget:
             break
+
+    if profile is not None:
+        profile.bfs_seconds += time.perf_counter() - bfs_started
 
     # key -> (preference, x, landing_y, rotation, node, last_rotation,
     #         kick, rotation_from, rotation_to)
     best: dict[int, tuple[tuple[int, int, int], int, int, int, int, bool, int, int, int]] = {}
 
     def emit(node_index: int) -> None:
-        x = xs[node_index]
-        y = ys[node_index]
-        rotation = rotations[node_index]
-        landing_y = landing_y_for(x, y, rotation)
-        if landing_y == _NO_LANDING:
-            return
-        key = _geometry_key(piece, x, landing_y, rotation, width)
-        if key < 0:
-            return
-        last_rotation = last_rotations[node_index]
-        spin_kind = (
-            classify_t_spin_row_masks(
-                rows,
-                piece=piece,
-                x=x,
-                y=landing_y,
-                rotation=rotation,
-                last_move_was_rotation=True,
-                rotation_kick_index=(
-                    kick_indices[node_index] if kick_indices[node_index] >= 0 else None
-                ),
-                width=width,
+        emit_started = time.perf_counter() if profile is not None else 0.0
+        landing_elapsed = 0.0
+        try:
+            x = xs[node_index]
+            y = ys[node_index]
+            rotation = rotations[node_index]
+            landing_started = time.perf_counter() if profile is not None else 0.0
+            landing_y = landing_y_for(x, y, rotation)
+            if profile is not None:
+                landing_elapsed = time.perf_counter() - landing_started
+                profile.landing_seconds += landing_elapsed
+            if landing_y == _NO_LANDING:
+                return
+            key = _geometry_key(piece, x, landing_y, rotation, width)
+            if key < 0:
+                return
+            last_rotation = last_rotations[node_index]
+            spin_kind = (
+                classify_t_spin_row_masks(
+                    rows,
+                    piece=piece,
+                    x=x,
+                    y=landing_y,
+                    rotation=rotation,
+                    last_move_was_rotation=True,
+                    rotation_kick_index=(
+                        kick_indices[node_index] if kick_indices[node_index] >= 0 else None
+                    ),
+                    width=width,
+                )
+                if last_rotation
+                else None
             )
-            if last_rotation
-            else None
-        )
-        preference = (
-            int(spin_kind is not None),
-            int(spin_kind == "full"),
-            -depths[node_index],
-        )
-        previous = best.get(key)
-        if previous is None or preference > previous[0]:
-            best[key] = (
-                preference,
-                x,
-                landing_y,
-                rotation,
-                node_index,
-                last_rotation,
-                kick_indices[node_index] if last_rotation else -1,
-                rotation_froms[node_index] if last_rotation else -1,
-                rotation_tos[node_index] if last_rotation else -1,
+            preference = (
+                int(spin_kind is not None),
+                int(spin_kind == "full"),
+                -depths[node_index],
             )
+            previous = best.get(key)
+            if previous is None or preference > previous[0]:
+                best[key] = (
+                    preference,
+                    x,
+                    landing_y,
+                    rotation,
+                    node_index,
+                    last_rotation,
+                    kick_indices[node_index] if last_rotation else -1,
+                    rotation_froms[node_index] if last_rotation else -1,
+                    rotation_tos[node_index] if last_rotation else -1,
+                )
+        finally:
+            if profile is not None:
+                profile.representative_nodes += 1
+                profile.representative_seconds += max(
+                    0.0,
+                    time.perf_counter() - emit_started - landing_elapsed,
+                )
 
     # Keep every reachable source in representative selection. Even for a non-T
     # piece, a shorter hard-drop source can beat a grounded rotation-ending source
@@ -389,6 +521,7 @@ def reachable_placements(
         if node_index != _NO_STATE:
             emit(node_index)
 
+    placement_started = time.perf_counter() if profile is not None else 0.0
     placements: list[Placement] = []
     for (
         _preference,
@@ -417,4 +550,8 @@ def reachable_placements(
         )
 
     placements.sort(key=lambda item: (item.rotation, item.x, item.y, len(item.path)))
+    if profile is not None:
+        profile.placement_seconds += time.perf_counter() - placement_started
+        profile.placements += len(placements)
+        profile.total_seconds += time.perf_counter() - profile_started
     return tuple(placements)
