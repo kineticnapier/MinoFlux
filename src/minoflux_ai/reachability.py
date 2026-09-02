@@ -291,26 +291,34 @@ def reachable_placements(
     reachable_count = 1
     budget = max(1, int(max_nodes))
 
+    # Pre-expand every source rotation to its target rotation, command, and exact
+    # SRS kick sequence. The hot BFS loop then only indexes by the current 0-3
+    # rotation instead of recomputing targets and hashing a kick-table key.
     if piece == "O":
-        rotation_specs: tuple[tuple[int, int], ...] = ()
-        kick_cache: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {}
+        rotation_options: tuple[
+            tuple[tuple[int, int, tuple[tuple[int, int], ...]], ...], ...
+        ] = ((), (), (), ())
     else:
         rotation_specs = (
             ((1, _CMD_CW), (-1, _CMD_CCW), (2, _CMD_180))
             if allow_180
             else ((1, _CMD_CW), (-1, _CMD_CCW))
         )
-        # SRS kick tables depend only on piece/from/to. Resolve them once for this
-        # search rather than performing the same table lookup at every BFS node.
-        kick_cache = {}
-        for source_rotation in range(4):
-            for direction, _command in rotation_specs:
-                target_rotation = (source_rotation + direction) & 3
-                kick_cache[(source_rotation, target_rotation)] = kick_tests(
-                    piece,
-                    source_rotation,
-                    target_rotation,
+        rotation_options = tuple(
+            tuple(
+                (
+                    (source_rotation + direction) & 3,
+                    command,
+                    kick_tests(
+                        piece,
+                        source_rotation,
+                        (source_rotation + direction) & 3,
+                    ),
                 )
+                for direction, command in rotation_specs
+            )
+            for source_rotation in range(4)
+        )
 
     def append_node(
         x: int,
@@ -391,29 +399,44 @@ def reachable_placements(
             frontier.append(successor)
 
         rotation_started = time.perf_counter() if profile is not None else 0.0
-        for direction, command in rotation_specs:
-            target_rotation = (rotation + direction) & 3
-            rotated: tuple[int, int, int] | None = None
-            for kick_index, (kick_x, kick_y) in enumerate(
-                kick_cache[(rotation, target_rotation)]
-            ):
+        for target_rotation, command, kicks in rotation_options[rotation]:
+            successful_kick = -1
+            successful_state = _NO_STATE
+            target_x = x
+            target_y = y
+            for kick_index, (kick_x, kick_y) in enumerate(kicks):
                 if profile is not None:
                     profile.kick_checks += 1
                 target_x = x + kick_x
                 target_y = y + kick_y
                 if target_y < y_min:
                     continue
-                state_id = pack(target_x, target_y, target_rotation)
-                if state_id < 0:
+                if target_x < x_min or target_x > x_max or target_y >= height:
                     continue
-                if not collides(target_x, target_y, target_rotation):
-                    rotated = (target_x, target_y, kick_index)
-                    break
-            if rotated is None:
+                # target_rotation is already normalized to 0..3, so this is the
+                # exact packed-state arithmetic without another Python call.
+                state_id = (
+                    ((((target_y - y_min) * x_count) + (target_x - x_min)) << 2)
+                    | target_rotation
+                )
+                if profile is not None:
+                    profile.collision_checks += 1
+                if collision(
+                    rows,
+                    piece,
+                    target_x,
+                    target_y,
+                    target_rotation,
+                    width=width,
+                ):
+                    continue
+                successful_kick = kick_index
+                successful_state = state_id
+                break
+            if successful_kick < 0:
                 continue
 
-            target_x, target_y, kick_index = rotated
-            state_id = pack(target_x, target_y, target_rotation)
+            state_id = successful_state
             previous_rotation = rotation_nodes[state_id]
             new_depth = depth + 1
             improves_rotation = (
@@ -432,7 +455,7 @@ def reachable_placements(
                 command,
                 new_depth,
                 last_rotation=True,
-                kick_index=kick_index,
+                kick_index=successful_kick,
                 rotation_from=rotation,
                 rotation_to=target_rotation,
             )
