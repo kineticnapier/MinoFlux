@@ -57,6 +57,7 @@ class ReachabilityProfile:
     landing_queries: int = 0
     landing_cache_hits: int = 0
     representative_nodes: int = 0
+    representative_duplicate_skips: int = 0
     placements: int = 0
 
     def to_dict(self) -> dict[str, int | float]:
@@ -86,6 +87,7 @@ class ReachabilityProfile:
             "landingQueries": self.landing_queries,
             "landingCacheHits": self.landing_cache_hits,
             "representativeNodes": self.representative_nodes,
+            "representativeDuplicateSkips": self.representative_duplicate_skips,
             "placements": self.placements,
             "bfsNodesPerCall": self.bfs_nodes / max(1, self.calls),
             "placementsPerCall": self.placements / max(1, self.calls),
@@ -517,9 +519,17 @@ def reachable_placements(
 
     # A hard drop does not clear the preceding rotation metadata, so rotation-ending
     # nodes must also be considered even when geometry was already reached normally.
-    for node_index in rotation_nodes:
-        if node_index != _NO_STATE:
-            emit(node_index)
+    # When both arrays point at the exact same node, emitting it twice is a strict
+    # no-op; skip only that identity duplicate and preserve all alternative rotation
+    # representatives.
+    for state_id, node_index in enumerate(rotation_nodes):
+        if node_index == _NO_STATE:
+            continue
+        if state_nodes[state_id] == node_index:
+            if profile is not None:
+                profile.representative_duplicate_skips += 1
+            continue
+        emit(node_index)
 
     placement_started = time.perf_counter() if profile is not None else 0.0
     placements: list[Placement] = []
