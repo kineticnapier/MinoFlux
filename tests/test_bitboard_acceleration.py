@@ -6,6 +6,7 @@ from minoflux_ai.bitboard import board_row_masks, collides_row_masks
 from minoflux_ai.features import BoardFeatures, extract_board_features_from_masks
 from minoflux_ai.reachability import reachable_placements
 from minoflux_engine import Game
+from minoflux_engine.pieces import SHAPES
 
 
 def _placement_signature(placement):
@@ -122,6 +123,19 @@ def _legacy_features(board) -> BoardFeatures:
     )
 
 
+def _reference_collision(rows, piece: str, x: int, y: int, rotation: int) -> bool:
+    width = 10
+    height = len(rows)
+    for dx, dy in SHAPES[piece][rotation % 4]:
+        cell_x = x + dx
+        cell_y = y + dy
+        if cell_x < 0 or cell_x >= width or cell_y >= height:
+            return True
+        if cell_y >= 0 and rows[cell_y] & (1 << cell_x):
+            return True
+    return False
+
+
 def test_negative_srs_anchor_bitboard_collision() -> None:
     rows = (0,) * 24
     # Vertical I has all occupied cells at dx=2, so x=-2 is a legal anchor.
@@ -129,6 +143,22 @@ def test_negative_srs_anchor_bitboard_collision() -> None:
     blocked = list(rows)
     blocked[1] = 1
     assert collides_row_masks(tuple(blocked), "I", -2, 1, 1)
+
+
+def test_precomputed_collision_masks_match_reference() -> None:
+    rng = random.Random(90210)
+    boards = [(0,) * 24]
+    for _ in range(8):
+        boards.append(tuple(rng.randrange(1 << 10) for _ in range(24)))
+
+    for rows in boards:
+        for piece in SHAPES:
+            for rotation in range(4):
+                for x in range(-4, 14):
+                    for y in (-4, -1, 0, 1, 10, 20, 23, 24):
+                        assert collides_row_masks(rows, piece, x, y, rotation) == _reference_collision(
+                            rows, piece, x, y, rotation
+                        )
 
 
 def test_mask_feature_extractor_matches_legacy_reference() -> None:
