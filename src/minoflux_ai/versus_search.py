@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import copy
 from dataclasses import asdict, dataclass, field
-from typing import Literal
+from typing import Literal, Protocol
 
 from minoflux_engine import GarbagePacket, GarbageQueue, VersusMatch, VersusResolution, VersusSide
 
@@ -12,6 +12,7 @@ from .search import (
     DEFAULT_SEARCH_CONFIG,
     SearchAction,
     SearchConfig,
+    SearchScorer,
     apply_search_action,
     clone_game,
     rank_search_actions,
@@ -20,9 +21,16 @@ from .search import (
 SideName = Literal["player", "ai"]
 
 
+class VersusStateScorer(Protocol):
+    """Root-side value scorer for a complete versus match state."""
+
+    def score_match(self, match: VersusMatch, root_side: SideName) -> float: ...
+
+
 @dataclass(frozen=True, slots=True)
 class VersusWeights:
     solo_evaluation: float = 1.0
+    state_value: float = 24.0
     sent_lines: float = 8.0
     canceled_lines: float = 6.0
     garbage_applied: float = -8.0
@@ -120,6 +128,7 @@ def score_versus_state(
     weights: VersusWeights = DEFAULT_VERSUS_WEIGHTS,
     resolution: VersusResolution | None = None,
     solo_score: float = 0.0,
+    state_value: float = 0.0,
     path_length: int = 0,
     action_side: SideName | None = None,
 ) -> float:
@@ -137,6 +146,7 @@ def score_versus_state(
     input_direction = 1.0 if action_side in (None, root_side) else -1.0
     score = (
         solo_score * weights.solo_evaluation
+        + state_value * weights.state_value
         + own.pending.pending_lines * weights.own_pending
         + opponent.pending.pending_lines * weights.opponent_pending
         + own_board.max_height * weights.own_max_height
@@ -168,13 +178,32 @@ def _simulate_action(
     return simulated, resolution
 
 
+def _state_value(
+    scorer: VersusStateScorer | None,
+    match: VersusMatch,
+    root_side: SideName,
+) -> float:
+    return 0.0 if scorer is None else float(scorer.score_match(match, root_side))
+
+
 def choose_versus_action(
     match: VersusMatch,
     side_name: SideName,
     heuristic_weights: HeuristicWeights = DEFAULT_WEIGHTS,
     config: VersusSearchConfig = DEFAULT_VERSUS_SEARCH_CONFIG,
     versus_weights: VersusWeights = DEFAULT_VERSUS_WEIGHTS,
+    *,
+    scorer: SearchScorer | None = None,
+    opponent_scorer: SearchScorer | None = None,
+    state_scorer: VersusStateScorer | None = None,
 ) -> VersusChoice | None:
+    """Choose a versus action using neural placement/reply scorers when supplied.
+
+    ``scorer`` ranks the root side's placements. ``opponent_scorer`` ranks reply
+    candidates and defaults to ``scorer`` for self-play. ``state_scorer`` is an
+    optional learned match-value term evaluated from the root side's perspective.
+    """
+
     cfg = config.normalized()
     own = _side(match, side_name)
     ranked = rank_search_actions(
@@ -182,11 +211,13 @@ def choose_versus_action(
         heuristic_weights,
         cfg.placement_search,
         limit=cfg.candidate_width,
+        scorer=scorer,
     )
     if not ranked:
         return None
 
     opponent_name = _opponent_name(side_name)
+    reply_scorer = scorer if opponent_scorer is None else opponent_scorer
     best: VersusChoice | None = None
     for action, evaluation in ranked:
         after, resolution = _simulate_action(match, side_name, action)
@@ -196,6 +227,7 @@ def choose_versus_action(
             weights=versus_weights,
             resolution=resolution,
             solo_score=evaluation.score,
+            state_value=_state_value(state_scorer, after, side_name),
             path_length=len(action.placement.path),
             action_side=side_name,
         )
@@ -212,6 +244,7 @@ def choose_versus_action(
                 heuristic_weights,
                 cfg.placement_search,
                 limit=cfg.opponent_reply_width,
+                scorer=reply_scorer,
             )
             if replies:
                 worst_score: float | None = None
@@ -224,6 +257,7 @@ def choose_versus_action(
                         weights=versus_weights,
                         resolution=reply_resolution,
                         solo_score=-reply_evaluation.score,
+                        state_value=_state_value(state_scorer, replied, side_name),
                         path_length=len(reply.placement.path),
                         action_side=opponent_name,
                     )
