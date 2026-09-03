@@ -12,6 +12,15 @@ from minoflux_ai import (
 from minoflux_engine import VersusMatch
 
 
+class _CountingScorer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def score_many(self, game, evaluations):
+        self.calls += 1
+        return tuple(float(index) for index, _evaluation in enumerate(evaluations))
+
+
 class VersusSearchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = VersusSearchConfig(
@@ -47,6 +56,21 @@ class VersusSearchTests(unittest.TestCase):
         assert choice is not None
         self.assertEqual(choice.action.placement.piece, match.ai.game.current)
 
+    def test_neural_scorer_is_used_for_root_and_reply_candidates(self) -> None:
+        match = VersusMatch(71)
+        root = _CountingScorer()
+        reply = _CountingScorer()
+        choice = choose_versus_action(
+            match,
+            "ai",
+            config=self.config,
+            scorer=root,
+            opponent_scorer=reply,
+        )
+        self.assertIsNotNone(choice)
+        self.assertGreater(root.calls, 0)
+        self.assertGreater(reply.calls, 0)
+
     def test_small_headless_benchmark_is_deterministic(self) -> None:
         first = run_versus_benchmark(
             1,
@@ -65,6 +89,9 @@ class VersusSearchTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first.games, 1)
         self.assertLessEqual(first.per_game[0].turns, 8)
+        result = first.to_dict()
+        self.assertIn("playerSentPerPiece", result)
+        self.assertIn("playerMeanCanceled", result)
 
 
 if __name__ == "__main__":
