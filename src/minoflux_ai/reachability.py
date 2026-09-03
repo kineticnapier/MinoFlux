@@ -8,9 +8,10 @@ import time
 from typing import Iterator
 
 from minoflux_engine import Game, Placement
-from minoflux_engine.pieces import SHAPES, kick_tests
+from minoflux_engine.pieces import BOARD_WIDTH, SHAPES, kick_tests
 
 from .bitboard import (
+    SHIFTED_SHAPE_ROW_MASKS,
     board_row_masks,
     classify_t_spin_row_masks,
     collides_row_masks,
@@ -35,6 +36,9 @@ _CMD_180 = 5
 _COMMAND_NAMES = (MOVE_LEFT, MOVE_RIGHT, MOVE_DOWN, ROTATE_CW, ROTATE_CCW, ROTATE_180)
 _NO_STATE = -1
 _NO_LANDING = -10_000
+_COLLISION_UNKNOWN = 0
+_COLLISION_CLEAR = 1
+_COLLISION_BLOCKED = 2
 _X_MARGIN = 4
 _Y_MIN = -4
 
@@ -54,6 +58,8 @@ class ReachabilityProfile:
     placement_seconds: float = 0.0
     bfs_nodes: int = 0
     collision_checks: int = 0
+    collision_evaluations: int = 0
+    collision_cache_hits: int = 0
     kick_checks: int = 0
     landing_queries: int = 0
     landing_cache_hits: int = 0
@@ -84,6 +90,9 @@ class ReachabilityProfile:
             "unaccountedSeconds": max(0.0, self.total_seconds - accounted),
             "bfsNodes": self.bfs_nodes,
             "collisionChecks": self.collision_checks,
+            "collisionEvaluations": self.collision_evaluations,
+            "collisionCacheHits": self.collision_cache_hits,
+            "collisionCacheHitRate": self.collision_cache_hits / max(1, self.collision_checks),
             "kickChecks": self.kick_checks,
             "landingQueries": self.landing_queries,
             "landingCacheHits": self.landing_cache_hits,
@@ -172,6 +181,45 @@ def _geometry_key(piece: str, x: int, y: int, rotation: int, width: int) -> int:
     return key
 
 
+@cache
+def _rotation_options(
+    piece: str,
+    allow_180: bool,
+    x_count: int,
+) -> tuple[tuple[tuple[int, int, tuple[tuple[int, int, int, int], ...]], ...], ...]:
+    """Precompute exact SRS targets, commands, kicks, and packed-state deltas."""
+
+    if piece == "O":
+        return ((), (), (), ())
+    rotation_specs = (
+        ((1, _CMD_CW), (-1, _CMD_CCW), (2, _CMD_180))
+        if allow_180
+        else ((1, _CMD_CW), (-1, _CMD_CCW))
+    )
+    return tuple(
+        tuple(
+            (
+                target_rotation,
+                command,
+                tuple(
+                    (
+                        kick_index,
+                        kick_x,
+                        kick_y,
+                        ((kick_y * x_count + kick_x) << 2) + target_rotation,
+                    )
+                    for kick_index, (kick_x, kick_y) in enumerate(
+                        kick_tests(piece, source_rotation, target_rotation)
+                    )
+                ),
+            )
+            for direction, command in rotation_specs
+            for target_rotation in ((source_rotation + direction) & 3,)
+        )
+        for source_rotation in range(4)
+    )
+
+
 def reachable_placements(
     game: Game,
     *,
@@ -208,28 +256,67 @@ def reachable_placements(
     x_min, x_max, x_count, y_min, packed_count = _state_layout(game)
     row_state_stride = x_count << 2
 
-    def pack(x: int, y: int, rotation: int) -> int:
-        if x < x_min or x > x_max or y < y_min or y >= height:
-            return _NO_STATE
-        return ((((y - y_min) * x_count) + (x - x_min)) << 2) | (rotation & 3)
+    start_rotation = game.rotation & 3
+    if (
+        game.x < x_min
+        or game.x > x_max
+        or game.y < y_min
+        or game.y >= height
+    ):
+        if profile is not None:
+            profile.setup_seconds += time.perf_counter() - setup_started
+            profile.total_seconds += time.perf_counter() - profile_started
+        return ()
+    start_state = (
+        ((((game.y - y_min) * x_count) + (game.x - x_min)) << 2)
+        | start_rotation
+    )
 
-    collision = collides_row_masks
+    collision_cache = bytearray(packed_count)
+    if width == BOARD_WIDTH:
+        shifted_piece_rows = SHIFTED_SHAPE_ROW_MASKS[piece]
 
-    def collides(x: int, y: int, rotation: int) -> bool:
+        def evaluate_collision(x: int, y: int, rotation: int) -> bool:
+            shifted_rows = shifted_piece_rows[rotation & 3][x + _X_MARGIN]
+            if shifted_rows is None:
+                return True
+            for dy, shifted_mask in shifted_rows:
+                row_y = y + dy
+                if row_y >= height:
+                    return True
+                if row_y >= 0 and rows[row_y] & shifted_mask:
+                    return True
+            return False
+
+    else:
+
+        def evaluate_collision(x: int, y: int, rotation: int) -> bool:
+            return collides_row_masks(rows, piece, x, y, rotation, width=width)
+
+    def collides_state(state_id: int, x: int, y: int, rotation: int) -> bool:
         if profile is not None:
             profile.collision_checks += 1
-        return collision(rows, piece, x, y, rotation, width=width)
+        if state_id < 0 or state_id >= packed_count:
+            return True
+        cached = collision_cache[state_id]
+        if cached != _COLLISION_UNKNOWN:
+            if profile is not None:
+                profile.collision_cache_hits += 1
+            return cached == _COLLISION_BLOCKED
+        blocked = evaluate_collision(x, y, rotation)
+        collision_cache[state_id] = (
+            _COLLISION_BLOCKED if blocked else _COLLISION_CLEAR
+        )
+        if profile is not None:
+            profile.collision_evaluations += 1
+        return blocked
 
-    start_state = pack(game.x, game.y, game.rotation)
-    if start_state < 0 or collides(game.x, game.y, game.rotation):
+    if collides_state(start_state, game.x, game.y, start_rotation):
         if profile is not None:
             profile.setup_seconds += time.perf_counter() - setup_started
             profile.total_seconds += time.perf_counter() - profile_started
         return ()
 
-    # Cache hard-drop destinations only for states that are actually queried.
-    # The representative scan already knows each packed state id; cache hits use
-    # that id directly, and only misses enter the vertical-chain helper.
     landing = [_NO_LANDING] * packed_count
 
     def compute_landing_from_state(
@@ -243,13 +330,13 @@ def reachable_placements(
         current_y = y
         result = _NO_LANDING
         while True:
-            if collides(x, current_y + 1, rotation):
+            target_y = current_y + 1
+            target_id = current_id + row_state_stride
+            if collides_state(target_id, x, target_y, rotation):
                 result = current_y
                 break
-            current_y += 1
-            current_id += row_state_stride
-            if current_id < 0 or current_id >= packed_count:
-                break
+            current_y = target_y
+            current_id = target_id
             cached = landing[current_id]
             if cached != _NO_LANDING:
                 if profile is not None:
@@ -263,11 +350,10 @@ def reachable_placements(
                 landing[cached_id] = result
         return result
 
-    # Parallel primitive arrays avoid allocating a dataclass and tuple hash key
-    # for every reachable geometry.
     xs: list[int] = [game.x]
     ys: list[int] = [game.y]
-    rotations: list[int] = [game.rotation & 3]
+    rotations: list[int] = [start_rotation]
+    state_ids: list[int] = [start_state]
     parents: list[int] = [-1]
     commands: list[int] = [_CMD_NONE]
     depths: list[int] = [0]
@@ -276,51 +362,27 @@ def reachable_placements(
     rotation_froms: list[int] = [-1]
     rotation_tos: list[int] = [-1]
 
-    # A list plus cursor is a FIFO queue like deque.popleft(), but avoids one
-    # method call per reachable state and keeps the traversal order identical.
+    append_x = xs.append
+    append_y = ys.append
+    append_rotation = rotations.append
+    append_state_id = state_ids.append
+    append_parent = parents.append
+    append_command = commands.append
+    append_depth = depths.append
+    append_last_rotation = last_rotations.append
+    append_kick_index = kick_indices.append
+    append_rotation_from = rotation_froms.append
+    append_rotation_to = rotation_tos.append
+
     frontier: list[int] = [0]
+    append_frontier = frontier.append
     frontier_index = 0
     state_nodes = [_NO_STATE] * packed_count
     rotation_nodes = [_NO_STATE] * packed_count
     state_nodes[start_state] = 0
     reachable_count = 1
     budget = max(1, int(max_nodes))
-
-    # Pre-expand targets, command ids, exact kick order, and packed-state deltas.
-    # The BFS rotation loop therefore does no kick-table lookup, enumerate(), or
-    # packed-coordinate multiplication for each attempted kick.
-    if piece == "O":
-        rotation_options: tuple[
-            tuple[tuple[int, int, tuple[tuple[int, int, int, int], ...]], ...], ...
-        ] = ((), (), (), ())
-    else:
-        rotation_specs = (
-            ((1, _CMD_CW), (-1, _CMD_CCW), (2, _CMD_180))
-            if allow_180
-            else ((1, _CMD_CW), (-1, _CMD_CCW))
-        )
-        rotation_options = tuple(
-            tuple(
-                (
-                    target_rotation,
-                    command,
-                    tuple(
-                        (
-                            kick_index,
-                            kick_x,
-                            kick_y,
-                            ((kick_y * x_count + kick_x) << 2) + target_rotation,
-                        )
-                        for kick_index, (kick_x, kick_y) in enumerate(
-                            kick_tests(piece, source_rotation, target_rotation)
-                        )
-                    ),
-                )
-                for direction, command in rotation_specs
-                for target_rotation in ((source_rotation + direction) & 3,)
-            )
-            for source_rotation in range(4)
-        )
+    rotation_options = _rotation_options(piece, bool(allow_180), x_count)
 
     if profile is not None:
         profile.setup_seconds += time.perf_counter() - setup_started
@@ -334,77 +396,79 @@ def reachable_placements(
         x = xs[node_index]
         y = ys[node_index]
         rotation = rotations[node_index]
+        state_id = state_ids[node_index]
         depth = depths[node_index]
         new_depth = depth + 1
-        state_id = ((((y - y_min) * x_count) + (x - x_min)) << 2) | rotation
         state_base = state_id & ~3
 
-        # Preserve historical traversal order exactly: left, right, down, rotations.
         if x > x_min:
             target_x = x - 1
             target_state = state_id - 4
-            if state_nodes[target_state] == _NO_STATE:
-                if profile is not None:
-                    profile.collision_checks += 1
-                if not collision(rows, piece, target_x, y, rotation, width=width):
-                    successor = len(xs)
-                    xs.append(target_x)
-                    ys.append(y)
-                    rotations.append(rotation)
-                    parents.append(node_index)
-                    commands.append(_CMD_LEFT)
-                    depths.append(new_depth)
-                    last_rotations.append(False)
-                    kick_indices.append(-1)
-                    rotation_froms.append(-1)
-                    rotation_tos.append(-1)
-                    state_nodes[target_state] = successor
-                    reachable_count += 1
-                    frontier.append(successor)
+            if (
+                state_nodes[target_state] == _NO_STATE
+                and not collides_state(target_state, target_x, y, rotation)
+            ):
+                successor = len(xs)
+                append_x(target_x)
+                append_y(y)
+                append_rotation(rotation)
+                append_state_id(target_state)
+                append_parent(node_index)
+                append_command(_CMD_LEFT)
+                append_depth(new_depth)
+                append_last_rotation(False)
+                append_kick_index(-1)
+                append_rotation_from(-1)
+                append_rotation_to(-1)
+                state_nodes[target_state] = successor
+                reachable_count += 1
+                append_frontier(successor)
 
         if x < x_max:
             target_x = x + 1
             target_state = state_id + 4
-            if state_nodes[target_state] == _NO_STATE:
-                if profile is not None:
-                    profile.collision_checks += 1
-                if not collision(rows, piece, target_x, y, rotation, width=width):
-                    successor = len(xs)
-                    xs.append(target_x)
-                    ys.append(y)
-                    rotations.append(rotation)
-                    parents.append(node_index)
-                    commands.append(_CMD_RIGHT)
-                    depths.append(new_depth)
-                    last_rotations.append(False)
-                    kick_indices.append(-1)
-                    rotation_froms.append(-1)
-                    rotation_tos.append(-1)
-                    state_nodes[target_state] = successor
-                    reachable_count += 1
-                    frontier.append(successor)
+            if (
+                state_nodes[target_state] == _NO_STATE
+                and not collides_state(target_state, target_x, y, rotation)
+            ):
+                successor = len(xs)
+                append_x(target_x)
+                append_y(y)
+                append_rotation(rotation)
+                append_state_id(target_state)
+                append_parent(node_index)
+                append_command(_CMD_RIGHT)
+                append_depth(new_depth)
+                append_last_rotation(False)
+                append_kick_index(-1)
+                append_rotation_from(-1)
+                append_rotation_to(-1)
+                state_nodes[target_state] = successor
+                reachable_count += 1
+                append_frontier(successor)
 
         if y + 1 < height:
             target_y = y + 1
             target_state = state_id + row_state_stride
-            if state_nodes[target_state] == _NO_STATE:
-                if profile is not None:
-                    profile.collision_checks += 1
-                if not collision(rows, piece, x, target_y, rotation, width=width):
-                    successor = len(xs)
-                    xs.append(x)
-                    ys.append(target_y)
-                    rotations.append(rotation)
-                    parents.append(node_index)
-                    commands.append(_CMD_DOWN)
-                    depths.append(new_depth)
-                    last_rotations.append(False)
-                    kick_indices.append(-1)
-                    rotation_froms.append(-1)
-                    rotation_tos.append(-1)
-                    state_nodes[target_state] = successor
-                    reachable_count += 1
-                    frontier.append(successor)
+            if (
+                state_nodes[target_state] == _NO_STATE
+                and not collides_state(target_state, x, target_y, rotation)
+            ):
+                successor = len(xs)
+                append_x(x)
+                append_y(target_y)
+                append_rotation(rotation)
+                append_state_id(target_state)
+                append_parent(node_index)
+                append_command(_CMD_DOWN)
+                append_depth(new_depth)
+                append_last_rotation(False)
+                append_kick_index(-1)
+                append_rotation_from(-1)
+                append_rotation_to(-1)
+                state_nodes[target_state] = successor
+                reachable_count += 1
+                append_frontier(successor)
 
         rotation_started = time.perf_counter() if profile is not None else 0.0
         for target_rotation, command, kicks in rotation_options[rotation]:
@@ -422,15 +486,11 @@ def reachable_placements(
                 if target_x < x_min or target_x > x_max or target_y >= height:
                     continue
                 target_state = state_base + packed_delta
-                if profile is not None:
-                    profile.collision_checks += 1
-                if collision(
-                    rows,
-                    piece,
+                if collides_state(
+                    target_state,
                     target_x,
                     target_y,
                     target_rotation,
-                    width=width,
                 ):
                     continue
                 successful_kick = kick_index
@@ -449,22 +509,23 @@ def reachable_placements(
                 continue
 
             successor = len(xs)
-            xs.append(target_x)
-            ys.append(target_y)
-            rotations.append(target_rotation)
-            parents.append(node_index)
-            commands.append(command)
-            depths.append(new_depth)
-            last_rotations.append(True)
-            kick_indices.append(successful_kick)
-            rotation_froms.append(rotation)
-            rotation_tos.append(target_rotation)
+            append_x(target_x)
+            append_y(target_y)
+            append_rotation(target_rotation)
+            append_state_id(successful_state)
+            append_parent(node_index)
+            append_command(command)
+            append_depth(new_depth)
+            append_last_rotation(True)
+            append_kick_index(successful_kick)
+            append_rotation_from(rotation)
+            append_rotation_to(target_rotation)
             if improves_rotation:
                 rotation_nodes[successful_state] = successor
             if adds_geometry:
                 state_nodes[successful_state] = successor
                 reachable_count += 1
-                frontier.append(successor)
+                append_frontier(successor)
         if profile is not None:
             profile.rotation_seconds += time.perf_counter() - rotation_started
 
@@ -474,8 +535,6 @@ def reachable_placements(
     if profile is not None:
         profile.bfs_seconds += time.perf_counter() - bfs_started
 
-    # key -> (preference, x, landing_y, rotation, node, last_rotation,
-    #         kick, rotation_from, rotation_to)
     best: dict[int, tuple[tuple[int, int, int], int, int, int, int, bool, int, int, int]] = {}
 
     def emit(state_id: int, node_index: int) -> None:
@@ -545,18 +604,10 @@ def reachable_placements(
                     time.perf_counter() - emit_started - landing_elapsed,
                 )
 
-    # Keep every reachable source in representative selection. Even for a non-T
-    # piece, a shorter hard-drop source can beat a grounded rotation-ending source
-    # for the same cells, which affects the exact placement metadata/tie order.
     for state_id, node_index in enumerate(state_nodes):
         if node_index != _NO_STATE:
             emit(state_id, node_index)
 
-    # A hard drop does not clear the preceding rotation metadata, so rotation-ending
-    # nodes must also be considered even when geometry was already reached normally.
-    # When both arrays point at the exact same node, emitting it twice is a strict
-    # no-op; skip only that identity duplicate and preserve all alternative rotation
-    # representatives.
     for state_id, node_index in enumerate(rotation_nodes):
         if node_index == _NO_STATE:
             continue
