@@ -3,9 +3,11 @@ from __future__ import annotations
 from argparse import ArgumentParser
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 import time
 
-from minoflux_ai import SearchConfig, apply_search_action
+from minoflux_ai import NeuralValueEvaluator, SearchConfig, apply_search_action
+from minoflux_ai.versus_neural import VersusValueEvaluator
 from minoflux_ai.versus_search import (
     VersusChoice,
     VersusSearchConfig,
@@ -26,6 +28,8 @@ from .versus import (
     _soft_drop,
 )
 
+DEFAULT_NEURAL_MODEL = Path("data/models/neural-value-human.pt")
+
 
 @dataclass(frozen=True, slots=True)
 class AIJob:
@@ -39,10 +43,19 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--ai-pps", type=float, default=1.0)
     parser.add_argument("--ai-model")
+    parser.add_argument(
+        "--ai-neural-model",
+        default=None,
+        help="Solo neural placement checkpoint; defaults to data/models/neural-value-human.pt when present",
+    )
+    parser.add_argument("--ai-versus-value-model", default=None, help="Optional learned two-board match-value checkpoint")
+    parser.add_argument("--ai-device", default="auto")
+    parser.add_argument("--ai-precision", choices=("float32", "float16", "bfloat16", "auto"), default="float32")
+    parser.add_argument("--ai-torch-compile", action="store_true")
     parser.add_argument("--ai-lookahead", type=int, default=0)
-    parser.add_argument("--ai-beam", type=int, default=2)
-    parser.add_argument("--ai-candidates", type=int, default=8)
-    parser.add_argument("--ai-reply-width", type=int, default=2)
+    parser.add_argument("--ai-beam", type=int, default=4)
+    parser.add_argument("--ai-candidates", type=int, default=16)
+    parser.add_argument("--ai-reply-width", type=int, default=4)
     parser.add_argument("--garbage-cap", type=int, default=8)
     return parser
 
@@ -71,9 +84,24 @@ def _match_signature(match: VersusMatch) -> tuple[object, ...]:
     )
 
 
-def _run_ai_job(generation: int, match: VersusMatch, weights, config: VersusSearchConfig) -> AIJob:
+def _run_ai_job(
+    generation: int,
+    match: VersusMatch,
+    weights,
+    config: VersusSearchConfig,
+    scorer,
+    state_scorer,
+) -> AIJob:
     signature = _match_signature(match)
-    choice = choose_versus_action(match, "ai", weights, config)
+    choice = choose_versus_action(
+        match,
+        "ai",
+        weights,
+        config,
+        scorer=scorer,
+        opponent_scorer=scorer,
+        state_scorer=state_scorer,
+    )
     return AIJob(generation, signature, choice)
 
 
@@ -95,6 +123,32 @@ def main(argv: list[str] | None = None) -> int:
     key_codes = _key_codes(pygame, settings)
     handling = HandlingController()
     weights, model_name = _load_ai_weights(args.ai_model)
+
+    neural_path = Path(args.ai_neural_model) if args.ai_neural_model else DEFAULT_NEURAL_MODEL
+    scorer = None
+    if neural_path.is_file():
+        scorer = NeuralValueEvaluator.from_checkpoint(
+            neural_path,
+            device=args.ai_device,
+            precision=args.ai_precision,
+            compile_model=args.ai_torch_compile,
+        )
+        model_name = f"{model_name} + {neural_path.name}"
+    elif args.ai_neural_model:
+        raise SystemExit(f"Neural model not found: {neural_path}")
+
+    state_scorer = None
+    if args.ai_versus_value_model:
+        value_path = Path(args.ai_versus_value_model)
+        if not value_path.is_file():
+            raise SystemExit(f"Versus value model not found: {value_path}")
+        state_scorer = VersusValueEvaluator.from_checkpoint(
+            value_path,
+            device=args.ai_device,
+            compile_model=args.ai_torch_compile,
+        )
+        model_name = f"{model_name} + {value_path.name}"
+
     placement_config = SearchConfig(
         allow_hold=True,
         lookahead_pieces=args.ai_lookahead,
@@ -223,7 +277,15 @@ def main(argv: list[str] | None = None) -> int:
             if not paused and match.winner is None and not ai_game.game_over:
                 if ai_future is None and now >= ai_next_at:
                     preview = clone_versus_match(match)
-                    ai_future = executor.submit(_run_ai_job, generation, preview, weights, versus_config)
+                    ai_future = executor.submit(
+                        _run_ai_job,
+                        generation,
+                        preview,
+                        weights,
+                        versus_config,
+                        scorer,
+                        state_scorer,
+                    )
                 elif ai_future is not None and ai_future.done():
                     try:
                         job = ai_future.result()
