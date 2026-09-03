@@ -124,6 +124,7 @@ def run_versus_game(
 
     while match.winner is None and turns < limit:
         weights = player_weights if turn_side == "player" else ai_weights
+        opponent_weights = ai_weights if turn_side == "player" else player_weights
         config = player_config if turn_side == "player" else ai_config
         scorer = player_scorer if turn_side == "player" else ai_scorer
         opponent_scorer = ai_scorer if turn_side == "player" else player_scorer
@@ -135,6 +136,7 @@ def run_versus_game(
             config,
             scorer=scorer,
             opponent_scorer=opponent_scorer,
+            opponent_heuristic_weights=opponent_weights,
             state_scorer=state_scorer,
         )
         if choice is None:
