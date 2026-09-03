@@ -121,6 +121,28 @@ def _clip01(value: float) -> float:
     return min(1.0, max(0.0, float(value)))
 
 
+def _context_prefix(
+    *,
+    current: str,
+    hold_piece: str | None,
+    queue: Sequence[str | None],
+    config: NeuralValueConfig,
+) -> tuple[float, ...]:
+    """Encode the placement-invariant categorical part of neural context."""
+
+    context: list[float] = []
+    context.extend(_one_hot_piece(current))
+    context.extend(_one_hot_piece(hold_piece, include_none=True))
+    queue_length = config.queue_length
+    for index in range(queue_length):
+        piece = queue[index] if index < len(queue) else None
+        context.extend(_one_hot_piece(piece))
+    expected = config.context_size - 9
+    if len(context) != expected:
+        raise AssertionError(f"Neural context prefix size mismatch: {len(context)} != {expected}")
+    return tuple(context)
+
+
 def _context_values(
     *,
     current: str,
@@ -136,29 +158,32 @@ def _context_values(
     last_spin: bool,
     last_perfect_clear: bool,
     config: NeuralValueConfig,
+    prefix: tuple[float, ...] | None = None,
 ) -> tuple[float, ...]:
-    context: list[float] = []
-    context.extend(_one_hot_piece(current))
-    context.extend(_one_hot_piece(hold_piece, include_none=True))
-    for index in range(config.queue_length):
-        piece = queue[index] if index < len(queue) else None
-        context.extend(_one_hot_piece(piece))
-    context.extend(
-        (
-            _clip01((combo + 1) / 16.0),
-            float(bool(back_to_back)),
-            _clip01(b2b_chain / 20.0),
-            _clip01(surge_charge / 20.0),
-            float(bool(game_over)),
-            _clip01(last_lines / 4.0),
-            _clip01(last_attack / 20.0),
-            float(bool(last_spin)),
-            float(bool(last_perfect_clear)),
+    head = (
+        prefix
+        if prefix is not None
+        else _context_prefix(
+            current=current,
+            hold_piece=hold_piece,
+            queue=queue,
+            config=config,
         )
+    )
+    context = head + (
+        _clip01((combo + 1) / 16.0),
+        float(bool(back_to_back)),
+        _clip01(b2b_chain / 20.0),
+        _clip01(surge_charge / 20.0),
+        float(bool(game_over)),
+        _clip01(last_lines / 4.0),
+        _clip01(last_attack / 20.0),
+        float(bool(last_spin)),
+        float(bool(last_perfect_clear)),
     )
     if len(context) != config.context_size:
         raise AssertionError(f"Neural context size mismatch: {len(context)} != {config.context_size}")
-    return tuple(context)
+    return context
 
 
 def _encode_components(
@@ -235,6 +260,8 @@ def _encode_placement_result_compact(
     *,
     source_rows: tuple[int, ...] | None = None,
     source_queue: tuple[str, ...] | None = None,
+    normal_context_prefix: tuple[float, ...] | None = None,
+    locked_context_prefix: tuple[float, ...] | None = None,
 ) -> _CompactNeuralState | None:
     if placement.piece != game.current:
         raise ValueError(f"Placement is for {placement.piece}, current piece is {game.current}")
@@ -279,6 +306,7 @@ def _encode_placement_result_compact(
         current = game.current
         next_queue: Sequence[str | None] = queue
         game_over = True
+        context_prefix = locked_context_prefix
     else:
         if len(queue) < config.queue_length + 1:
             return None
@@ -292,6 +320,7 @@ def _encode_placement_result_compact(
             0,
             width=game.width,
         )
+        context_prefix = normal_context_prefix
 
     context = _context_values(
         current=current,
@@ -307,6 +336,7 @@ def _encode_placement_result_compact(
         last_spin=spin is not None,
         last_perfect_clear=perfect_clear,
         config=config,
+        prefix=context_prefix,
     )
     return _CompactNeuralState(rows=after_rows, context=context)
 
@@ -473,9 +503,11 @@ class NeuralValueEvaluator:
         torch = self._torch
         board_values = array("f")
         context_values = array("f")
+        extend_board = board_values.extend
+        extend_context = context_values.extend
         for state in states:
-            board_values.extend(state.board)
-            context_values.extend(state.context)
+            extend_board(state.board)
+            extend_context(state.context)
         boards = torch.frombuffer(board_values, dtype=torch.float32).reshape(
             len(states), 1, self.config.board_height, self.config.board_width
         ).to(self.device)
@@ -484,7 +516,7 @@ class NeuralValueEvaluator:
         ).to(self.device)
         with torch.inference_mode(), self._autocast_context():
             values = self.model(boards, contexts).reshape(-1)
-        return tuple(float(value) for value in values.detach().cpu().tolist())
+        return tuple(values.detach().cpu().tolist())
 
     def _score_compact_states(self, states: Sequence[_CompactNeuralState]) -> tuple[float, ...]:
         if not states:
@@ -492,10 +524,13 @@ class NeuralValueEvaluator:
         torch = self._torch
         board_bytes = bytearray()
         context_values = array("f")
+        extend_board = board_bytes.extend
+        extend_context = context_values.extend
+        occupancy_bytes = ROW_OCCUPANCY_BYTES
         for state in states:
             for mask in state.rows:
-                board_bytes.extend(ROW_OCCUPANCY_BYTES[mask])
-            context_values.extend(state.context)
+                extend_board(occupancy_bytes[mask])
+            extend_context(state.context)
 
         board_cpu = torch.frombuffer(board_bytes, dtype=torch.uint8).reshape(
             len(states), 1, self.config.board_height, self.config.board_width
@@ -507,7 +542,7 @@ class NeuralValueEvaluator:
         contexts = context_cpu.to(device=self.device)
         with torch.inference_mode(), self._autocast_context():
             values = self.model(boards, contexts).reshape(-1)
-        return tuple(float(value) for value in values.detach().cpu().tolist())
+        return tuple(values.detach().cpu().tolist())
 
     def score_placement_groups(
         self,
@@ -517,24 +552,44 @@ class NeuralValueEvaluator:
 
         states: list[_CompactNeuralState] = []
         sizes: list[int] = []
+        config = self.config
+        queue_length = config.queue_length
         for game, placements in groups:
             sizes.append(len(placements))
             source_rows = board_row_masks(game.board)
             source_queue = tuple(game.queue)
+            locked_context_prefix = _context_prefix(
+                current=game.current,
+                hold_piece=game.hold_piece,
+                queue=source_queue,
+                config=config,
+            )
+            normal_context_prefix = (
+                _context_prefix(
+                    current=source_queue[0],
+                    hold_piece=game.hold_piece,
+                    queue=source_queue[1:],
+                    config=config,
+                )
+                if len(source_queue) >= queue_length + 1
+                else None
+            )
             for placement in placements:
                 encoded = _encode_placement_result_compact(
                     game,
                     placement,
-                    self.config,
+                    config,
                     source_rows=source_rows,
                     source_queue=source_queue,
+                    normal_context_prefix=normal_context_prefix,
+                    locked_context_prefix=locked_context_prefix,
                 )
                 if encoded is None:
                     from .search import clone_game
 
                     child = clone_game(game)
                     child.place(placement)
-                    state = encode_game_state(child, self.config)
+                    state = encode_game_state(child, config)
                     encoded = _CompactNeuralState(
                         rows=board_row_masks(child.board),
                         context=state.context,
