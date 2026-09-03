@@ -1,7 +1,22 @@
 from __future__ import annotations
 
-from minoflux_ai.versus_neural import VersusValueConfig, encode_versus_state
+import json
+
+from minoflux_ai.search import SearchConfig
+from minoflux_ai.versus_neural import (
+    VERSUS_SELFPLAY_FORMAT,
+    VersusSelfPlayConfig,
+    VersusValueConfig,
+    encode_versus_state,
+    generate_versus_selfplay_dataset,
+)
+from minoflux_ai.versus_search import VersusSearchConfig
 from minoflux_engine import VersusMatch
+
+
+class _FlatScorer:
+    def score_many(self, game, evaluations):
+        return tuple(0.0 for _evaluation in evaluations)
 
 
 def test_versus_state_encoding_has_two_perspectives() -> None:
@@ -19,3 +34,31 @@ def test_versus_state_encoding_has_two_perspectives() -> None:
     assert player.own_rows == ai.opponent_rows
     assert player.opponent_rows == ai.own_rows
     assert player.context != ai.context
+
+
+def test_tiny_selfplay_dataset_contains_outcomes(tmp_path) -> None:
+    output = tmp_path / "versus.jsonl"
+    result = generate_versus_selfplay_dataset(
+        output,
+        _FlatScorer(),
+        VersusSelfPlayConfig(
+            games=1,
+            max_turns=2,
+            search_config=VersusSearchConfig(
+                placement_search=SearchConfig(
+                    allow_hold=False,
+                    lookahead_pieces=0,
+                    beam_width=1,
+                    srs_reachable=False,
+                ),
+                candidate_width=2,
+                opponent_reply_width=0,
+            ),
+        ),
+    )
+
+    records = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert result["records"] == len(records)
+    assert records
+    assert all(record["format"] == VERSUS_SELFPLAY_FORMAT for record in records)
+    assert all(record["outcome"] in (-1.0, 0.0, 1.0) for record in records)
