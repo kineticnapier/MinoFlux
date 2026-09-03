@@ -27,6 +27,7 @@ minoflux-neural-dagger = "minoflux.neural_dagger_cli:main"
 minoflux-neural-mix = "minoflux.neural_mix_cli:main"
 minoflux-replay = "minoflux.replay:main"
 minoflux-versus = "minoflux.versus_ai:main"
+minoflux-versus-neural = "minoflux.versus_neural_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
