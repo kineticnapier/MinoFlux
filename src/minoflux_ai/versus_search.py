@@ -24,7 +24,12 @@ SideName = Literal["player", "ai"]
 class VersusStateScorer(Protocol):
     """Root-side value scorer for a complete versus match state."""
 
-    def score_match(self, match: VersusMatch, root_side: SideName) -> float: ...
+    def score_match(
+        self,
+        match: VersusMatch,
+        root_side: SideName,
+        to_move: SideName | None = None,
+    ) -> float: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,8 +187,9 @@ def _state_value(
     scorer: VersusStateScorer | None,
     match: VersusMatch,
     root_side: SideName,
+    to_move: SideName | None,
 ) -> float:
-    return 0.0 if scorer is None else float(scorer.score_match(match, root_side))
+    return 0.0 if scorer is None else float(scorer.score_match(match, root_side, to_move))
 
 
 def choose_versus_action(
@@ -195,14 +201,10 @@ def choose_versus_action(
     *,
     scorer: SearchScorer | None = None,
     opponent_scorer: SearchScorer | None = None,
+    opponent_heuristic_weights: HeuristicWeights | None = None,
     state_scorer: VersusStateScorer | None = None,
 ) -> VersusChoice | None:
-    """Choose a versus action using neural placement/reply scorers when supplied.
-
-    ``scorer`` ranks the root side's placements. ``opponent_scorer`` ranks reply
-    candidates and defaults to ``scorer`` for self-play. ``state_scorer`` is an
-    optional learned match-value term evaluated from the root side's perspective.
-    """
+    """Choose a versus action with optional neural candidate/reply/value scorers."""
 
     cfg = config.normalized()
     own = _side(match, side_name)
@@ -218,6 +220,7 @@ def choose_versus_action(
 
     opponent_name = _opponent_name(side_name)
     reply_scorer = scorer if opponent_scorer is None else opponent_scorer
+    reply_weights = heuristic_weights if opponent_heuristic_weights is None else opponent_heuristic_weights
     best: VersusChoice | None = None
     for action, evaluation in ranked:
         after, resolution = _simulate_action(match, side_name, action)
@@ -227,7 +230,7 @@ def choose_versus_action(
             weights=versus_weights,
             resolution=resolution,
             solo_score=evaluation.score,
-            state_value=_state_value(state_scorer, after, side_name),
+            state_value=_state_value(state_scorer, after, side_name, opponent_name),
             path_length=len(action.placement.path),
             action_side=side_name,
         )
@@ -241,7 +244,7 @@ def choose_versus_action(
         ):
             replies = rank_search_actions(
                 _side(after, opponent_name).game,
-                heuristic_weights,
+                reply_weights,
                 cfg.placement_search,
                 limit=cfg.opponent_reply_width,
                 scorer=reply_scorer,
@@ -257,7 +260,7 @@ def choose_versus_action(
                         weights=versus_weights,
                         resolution=reply_resolution,
                         solo_score=-reply_evaluation.score,
-                        state_value=_state_value(state_scorer, replied, side_name),
+                        state_value=_state_value(state_scorer, replied, side_name, side_name),
                         path_length=len(reply.placement.path),
                         action_side=opponent_name,
                     )
