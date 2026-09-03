@@ -36,8 +36,11 @@ def test_reachability_profile_preserves_placements() -> None:
     assert metrics["placements"] == len(profiled)
     assert metrics["bfsNodes"] > 0
     assert metrics["collisionChecks"] > 0
+    assert 0 < metrics["collisionEvaluations"] <= metrics["collisionChecks"]
+    assert 0 <= metrics["collisionCacheHits"] <= metrics["collisionChecks"]
     assert metrics["landingQueries"] > 0
     assert metrics["representativeNodes"] >= len(profiled)
     assert metrics["totalSeconds"] >= 0.0
     assert metrics["bfsSeconds"] >= metrics["rotationSeconds"] >= 0.0
+    assert 0.0 <= metrics["collisionCacheHitRate"] <= 1.0
     assert 0.0 <= metrics["landingCacheHitRate"] <= 1.0
