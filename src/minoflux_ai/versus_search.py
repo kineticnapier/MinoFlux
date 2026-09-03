@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import copy
 from dataclasses import asdict, dataclass, field
-from typing import Literal, Protocol
+from typing import Literal, Protocol, Sequence
 
 from minoflux_engine import GarbagePacket, GarbageQueue, VersusMatch, VersusResolution, VersusSide
 
@@ -22,7 +22,7 @@ SideName = Literal["player", "ai"]
 
 
 class VersusStateScorer(Protocol):
-    """Root-side value scorer for a complete versus match state."""
+    """Root-side value scorer for complete versus match states."""
 
     def score_match(
         self,
@@ -183,13 +183,21 @@ def _simulate_action(
     return simulated, resolution
 
 
-def _state_value(
+def _state_values(
     scorer: VersusStateScorer | None,
-    match: VersusMatch,
-    root_side: SideName,
-    to_move: SideName | None,
-) -> float:
-    return 0.0 if scorer is None else float(scorer.score_match(match, root_side, to_move))
+    entries: Sequence[tuple[VersusMatch, SideName, SideName | None]],
+) -> tuple[float, ...]:
+    if not entries:
+        return ()
+    if scorer is None:
+        return (0.0,) * len(entries)
+    score_matches = getattr(scorer, "score_matches", None)
+    if callable(score_matches):
+        values = tuple(float(value) for value in score_matches(entries))
+        if len(values) != len(entries):
+            raise ValueError("Versus state scorer returned the wrong number of values")
+        return values
+    return tuple(float(scorer.score_match(match, root_side, to_move)) for match, root_side, to_move in entries)
 
 
 def choose_versus_action(
@@ -204,7 +212,7 @@ def choose_versus_action(
     opponent_heuristic_weights: HeuristicWeights | None = None,
     state_scorer: VersusStateScorer | None = None,
 ) -> VersusChoice | None:
-    """Choose a versus action with optional neural candidate/reply/value scorers."""
+    """Choose a versus action with neural candidate, reply, and state-value scoring."""
 
     cfg = config.normalized()
     own = _side(match, side_name)
@@ -221,16 +229,30 @@ def choose_versus_action(
     opponent_name = _opponent_name(side_name)
     reply_scorer = scorer if opponent_scorer is None else opponent_scorer
     reply_weights = heuristic_weights if opponent_heuristic_weights is None else opponent_heuristic_weights
-    best: VersusChoice | None = None
+
+    root_candidates: list[
+        tuple[SearchAction, PlacementEvaluation, VersusMatch, VersusResolution]
+    ] = []
     for action, evaluation in ranked:
         after, resolution = _simulate_action(match, side_name, action)
+        root_candidates.append((action, evaluation, after, resolution))
+    root_state_values = _state_values(
+        state_scorer,
+        tuple((after, side_name, opponent_name) for _action, _evaluation, after, _resolution in root_candidates),
+    )
+
+    best: VersusChoice | None = None
+    for (action, evaluation, after, resolution), root_state_value in zip(
+        root_candidates,
+        root_state_values,
+    ):
         base_score = score_versus_state(
             after,
             side_name,
             weights=versus_weights,
             resolution=resolution,
             solo_score=evaluation.score,
-            state_value=_state_value(state_scorer, after, side_name, opponent_name),
+            state_value=root_state_value,
             path_length=len(action.placement.path),
             action_side=side_name,
         )
@@ -250,17 +272,34 @@ def choose_versus_action(
                 scorer=reply_scorer,
             )
             if replies:
-                worst_score: float | None = None
-                worst_action: SearchAction | None = None
+                reply_candidates: list[
+                    tuple[SearchAction, PlacementEvaluation, VersusMatch, VersusResolution]
+                ] = []
                 for reply, reply_evaluation in replies:
                     replied, reply_resolution = _simulate_action(after, opponent_name, reply)
+                    reply_candidates.append((reply, reply_evaluation, replied, reply_resolution))
+                reply_state_values = _state_values(
+                    state_scorer,
+                    tuple(
+                        (replied, side_name, side_name)
+                        for _reply, _reply_evaluation, replied, _reply_resolution in reply_candidates
+                    ),
+                )
+                worst_score: float | None = None
+                worst_action: SearchAction | None = None
+                for (
+                    reply,
+                    reply_evaluation,
+                    replied,
+                    reply_resolution,
+                ), reply_state_value in zip(reply_candidates, reply_state_values):
                     reply_score = score_versus_state(
                         replied,
                         side_name,
                         weights=versus_weights,
                         resolution=reply_resolution,
                         solo_score=-reply_evaluation.score,
-                        state_value=_state_value(state_scorer, replied, side_name, side_name),
+                        state_value=reply_state_value,
                         path_length=len(reply.placement.path),
                         action_side=opponent_name,
                     )
