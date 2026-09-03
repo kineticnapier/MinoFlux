@@ -19,14 +19,15 @@ class _FlatScorer:
         return tuple(0.0 for _evaluation in evaluations)
 
 
-def test_versus_state_encoding_has_two_perspectives() -> None:
+def test_versus_state_encoding_has_two_perspectives_and_turn_context() -> None:
     match = VersusMatch(20260903)
     match.player.pending.enqueue(4, 2)
     match.ai.pending.enqueue(2, 7)
     config = VersusValueConfig()
 
-    player = encode_versus_state(match, "player", config)
-    ai = encode_versus_state(match, "ai", config)
+    player = encode_versus_state(match, "player", config, "player")
+    ai = encode_versus_state(match, "ai", config, "player")
+    player_reply_turn = encode_versus_state(match, "player", config, "ai")
 
     assert len(player.own_rows) == config.board_height
     assert len(player.opponent_rows) == config.board_height
@@ -34,9 +35,13 @@ def test_versus_state_encoding_has_two_perspectives() -> None:
     assert player.own_rows == ai.opponent_rows
     assert player.opponent_rows == ai.own_rows
     assert player.context != ai.context
+    assert player.context[-1] == 1.0
+    assert ai.context[-1] == 0.0
+    assert player_reply_turn.context[-1] == 0.0
+    assert player.context != player_reply_turn.context
 
 
-def test_tiny_selfplay_dataset_contains_outcomes(tmp_path) -> None:
+def test_tiny_selfplay_dataset_contains_outcomes_and_terminal_states(tmp_path) -> None:
     output = tmp_path / "versus.jsonl"
     result = generate_versus_selfplay_dataset(
         output,
@@ -62,3 +67,5 @@ def test_tiny_selfplay_dataset_contains_outcomes(tmp_path) -> None:
     assert records
     assert all(record["format"] == VERSUS_SELFPLAY_FORMAT for record in records)
     assert all(record["outcome"] in (-1.0, 0.0, 1.0) for record in records)
+    assert sum(bool(record["terminal"]) for record in records) == 2
+    assert all(len(record["context"]) == VersusValueConfig().context_size for record in records)
