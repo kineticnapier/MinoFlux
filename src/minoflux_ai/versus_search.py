@@ -212,7 +212,12 @@ def choose_versus_action(
     opponent_heuristic_weights: HeuristicWeights | None = None,
     state_scorer: VersusStateScorer | None = None,
 ) -> VersusChoice | None:
-    """Choose a versus action with neural candidate, reply, and state-value scoring."""
+    """Choose a versus action with neural candidate, reply, and state-value scoring.
+
+    ``opponent_scorer=None`` deliberately means heuristic opponent replies. Callers
+    doing neural self-play should explicitly pass the same neural scorer for both
+    ``scorer`` and ``opponent_scorer``.
+    """
 
     cfg = config.normalized()
     own = _side(match, side_name)
@@ -227,7 +232,7 @@ def choose_versus_action(
         return None
 
     opponent_name = _opponent_name(side_name)
-    reply_scorer = scorer if opponent_scorer is None else opponent_scorer
+    reply_scorer = opponent_scorer
     reply_weights = heuristic_weights if opponent_heuristic_weights is None else opponent_heuristic_weights
 
     root_candidates: list[
