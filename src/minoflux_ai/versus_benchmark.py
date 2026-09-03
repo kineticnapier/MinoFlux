@@ -4,11 +4,13 @@ from dataclasses import asdict, dataclass, replace
 
 from minoflux_engine import VersusMatch
 
+from .features import extract_board_features
 from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights
-from .search import apply_search_action
+from .search import SearchScorer, apply_search_action
 from .versus_search import (
     DEFAULT_VERSUS_SEARCH_CONFIG,
     VersusSearchConfig,
+    VersusStateScorer,
     choose_versus_action,
 )
 
@@ -28,6 +30,14 @@ class VersusGameResult:
     ai_canceled: int
     player_received: int
     ai_received: int
+    player_garbage_applied: int
+    ai_garbage_applied: int
+    player_pending: int
+    ai_pending: int
+    player_final_height: int
+    ai_final_height: int
+    player_final_holes: int
+    ai_final_holes: int
     player_max_b2b: int
     ai_max_b2b: int
     player_max_surge: int
@@ -49,9 +59,17 @@ class VersusBenchmarkResult:
     ai_mean_attack: float
     player_mean_sent: float
     ai_mean_sent: float
+    player_mean_canceled: float
+    ai_mean_canceled: float
+    player_mean_received: float
+    ai_mean_received: float
+    player_mean_pieces: float
+    ai_mean_pieces: float
     per_game: tuple[VersusGameResult, ...]
 
     def to_dict(self) -> dict[str, object]:
+        player_pieces = max(1.0, sum(item.player_pieces for item in self.per_game))
+        ai_pieces = max(1.0, sum(item.ai_pieces for item in self.per_game))
         return {
             "games": self.games,
             "maxTurns": self.max_turns,
@@ -64,10 +82,20 @@ class VersusBenchmarkResult:
             "playerWinRate": self.player_wins / self.games,
             "aiWinRate": self.ai_wins / self.games,
             "meanTurns": self.mean_turns,
+            "playerMeanPieces": self.player_mean_pieces,
+            "aiMeanPieces": self.ai_mean_pieces,
             "playerMeanAttack": self.player_mean_attack,
             "aiMeanAttack": self.ai_mean_attack,
             "playerMeanSent": self.player_mean_sent,
             "aiMeanSent": self.ai_mean_sent,
+            "playerMeanCanceled": self.player_mean_canceled,
+            "aiMeanCanceled": self.ai_mean_canceled,
+            "playerMeanReceived": self.player_mean_received,
+            "aiMeanReceived": self.ai_mean_received,
+            "playerSentPerPiece": sum(item.player_sent for item in self.per_game) / player_pieces,
+            "aiSentPerPiece": sum(item.ai_sent for item in self.per_game) / ai_pieces,
+            "playerAttackPerPiece": sum(item.player_attack for item in self.per_game) / player_pieces,
+            "aiAttackPerPiece": sum(item.ai_attack for item in self.per_game) / ai_pieces,
             "perGame": [asdict(item) for item in self.per_game],
         }
 
@@ -82,6 +110,10 @@ def run_versus_game(
     ai_config: VersusSearchConfig = DEFAULT_VERSUS_SEARCH_CONFIG,
     garbage_cap: int = 8,
     player_starts: bool = True,
+    player_scorer: SearchScorer | None = None,
+    ai_scorer: SearchScorer | None = None,
+    player_state_scorer: VersusStateScorer | None = None,
+    ai_state_scorer: VersusStateScorer | None = None,
 ) -> VersusGameResult:
     match = VersusMatch(seed, garbage_cap=garbage_cap)
     limit = max(1, int(max_turns))
@@ -93,7 +125,18 @@ def run_versus_game(
     while match.winner is None and turns < limit:
         weights = player_weights if turn_side == "player" else ai_weights
         config = player_config if turn_side == "player" else ai_config
-        choice = choose_versus_action(match, turn_side, weights, config)
+        scorer = player_scorer if turn_side == "player" else ai_scorer
+        opponent_scorer = ai_scorer if turn_side == "player" else player_scorer
+        state_scorer = player_state_scorer if turn_side == "player" else ai_state_scorer
+        choice = choose_versus_action(
+            match,
+            turn_side,
+            weights,
+            config,
+            scorer=scorer,
+            opponent_scorer=opponent_scorer,
+            state_scorer=state_scorer,
+        )
         if choice is None:
             match.side(turn_side).game.game_over = True
             match._update_winner()
@@ -109,6 +152,8 @@ def run_versus_game(
         turn_side = "ai" if turn_side == "player" else "player"
 
     winner = match.winner or "draw"
+    player_board = extract_board_features(match.player.game.board)
+    ai_board = extract_board_features(match.ai.game.board)
     return VersusGameResult(
         seed=int(seed),
         winner=winner,
@@ -123,6 +168,14 @@ def run_versus_game(
         ai_canceled=match.ai.canceled,
         player_received=match.player.received,
         ai_received=match.ai.received,
+        player_garbage_applied=match.player.garbage_applied,
+        ai_garbage_applied=match.ai.garbage_applied,
+        player_pending=match.player.pending.pending_lines,
+        ai_pending=match.ai.pending.pending_lines,
+        player_final_height=player_board.max_height,
+        ai_final_height=ai_board.max_height,
+        player_final_holes=player_board.holes,
+        ai_final_holes=ai_board.holes,
         player_max_b2b=player_max_b2b,
         ai_max_b2b=ai_max_b2b,
         player_max_surge=player_max_surge,
@@ -145,6 +198,14 @@ def _remap_swapped_result(result: VersusGameResult) -> VersusGameResult:
         ai_canceled=result.player_canceled,
         player_received=result.ai_received,
         ai_received=result.player_received,
+        player_garbage_applied=result.ai_garbage_applied,
+        ai_garbage_applied=result.player_garbage_applied,
+        player_pending=result.ai_pending,
+        ai_pending=result.player_pending,
+        player_final_height=result.ai_final_height,
+        ai_final_height=result.player_final_height,
+        player_final_holes=result.ai_final_holes,
+        ai_final_holes=result.player_final_holes,
         player_max_b2b=result.ai_max_b2b,
         ai_max_b2b=result.player_max_b2b,
         player_max_surge=result.ai_max_surge,
@@ -164,13 +225,15 @@ def run_versus_benchmark(
     player_config: VersusSearchConfig = DEFAULT_VERSUS_SEARCH_CONFIG,
     ai_config: VersusSearchConfig = DEFAULT_VERSUS_SEARCH_CONFIG,
     garbage_cap: int = 8,
+    player_scorer: SearchScorer | None = None,
+    ai_scorer: SearchScorer | None = None,
+    player_state_scorer: VersusStateScorer | None = None,
+    ai_state_scorer: VersusStateScorer | None = None,
 ) -> VersusBenchmarkResult:
     count = max(1, int(games))
     results: list[VersusGameResult] = []
     for index in range(count):
         swapped = index % 2 == 1
-        # Consecutive legs share the same pair of bag seeds. The second leg swaps
-        # models between the physical boards, removing side/bag/start bias.
         seed = int(seed_base) + (index // 2) * int(seed_step)
         physical = run_versus_game(
             seed,
@@ -181,6 +244,10 @@ def run_versus_benchmark(
             ai_config=player_config if swapped else ai_config,
             garbage_cap=garbage_cap,
             player_starts=True,
+            player_scorer=ai_scorer if swapped else player_scorer,
+            ai_scorer=player_scorer if swapped else ai_scorer,
+            player_state_scorer=ai_state_scorer if swapped else player_state_scorer,
+            ai_state_scorer=player_state_scorer if swapped else ai_state_scorer,
         )
         results.append(_remap_swapped_result(physical) if swapped else physical)
 
@@ -198,5 +265,11 @@ def run_versus_benchmark(
         ai_mean_attack=sum(item.ai_attack for item in result_tuple) / count,
         player_mean_sent=sum(item.player_sent for item in result_tuple) / count,
         ai_mean_sent=sum(item.ai_sent for item in result_tuple) / count,
+        player_mean_canceled=sum(item.player_canceled for item in result_tuple) / count,
+        ai_mean_canceled=sum(item.ai_canceled for item in result_tuple) / count,
+        player_mean_received=sum(item.player_received for item in result_tuple) / count,
+        ai_mean_received=sum(item.ai_received for item in result_tuple) / count,
+        player_mean_pieces=sum(item.player_pieces for item in result_tuple) / count,
+        ai_mean_pieces=sum(item.ai_pieces for item in result_tuple) / count,
         per_game=result_tuple,
     )
