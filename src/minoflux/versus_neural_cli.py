@@ -129,6 +129,7 @@ def build_parser() -> ArgumentParser:
     train = sub.add_parser("train", help="Train a two-board match-value network from self-play")
     train.add_argument("dataset", nargs="?", default=DEFAULT_SELFPLAY)
     train.add_argument("--output", default=DEFAULT_VERSUS_MODEL)
+    train.add_argument("--resume", default=None, help="Optional previous versus-value checkpoint")
     train.add_argument("--epochs", type=int, default=6)
     train.add_argument("--batch-size", type=int, default=256)
     train.add_argument("--learning-rate", type=float, default=3e-4)
@@ -221,6 +222,7 @@ def _train(args) -> int:
             seed=args.seed,
             device=args.device,
         ),
+        resume_from=args.resume,
     )
     _print(result)
     return 0
