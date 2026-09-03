@@ -522,14 +522,15 @@ class NeuralValueEvaluator:
         if not states:
             return ()
         torch = self._torch
-        board_bytes = bytearray()
-        context_values = array("f")
-        extend_board = board_bytes.extend
-        extend_context = context_values.extend
         occupancy_bytes = ROW_OCCUPANCY_BYTES
+        board_bytes = bytearray().join(
+            occupancy_bytes[mask]
+            for state in states
+            for mask in state.rows
+        )
+        context_values = array("f")
+        extend_context = context_values.extend
         for state in states:
-            for mask in state.rows:
-                extend_board(occupancy_bytes[mask])
             extend_context(state.context)
 
         board_cpu = torch.frombuffer(board_bytes, dtype=torch.uint8).reshape(
