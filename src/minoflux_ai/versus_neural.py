@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from array import array
-from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 import json
 import math
 from pathlib import Path
 import random
-from typing import Any, Iterable, Literal, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from minoflux_engine import VersusMatch
 
@@ -49,7 +48,13 @@ _HOLD_ONE_HOT[None] = tuple(
     1.0 if index == len(PIECES) else 0.0
     for index in range(len(PIECES) + 1)
 )
-_SIDE_NUMERIC_SIZE = 11
+_HOLE_ONE_HOT = tuple(
+    tuple(1.0 if index == hole else 0.0 for index in range(VERSUS_BOARD_WIDTH))
+    for hole in range(VERSUS_BOARD_WIDTH)
+)
+_ZERO_HOLE = (0.0,) * VERSUS_BOARD_WIDTH
+_PENDING_HOLE_SLOTS = 2
+_SIDE_NUMERIC_SIZE = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,11 +102,17 @@ class VersusValueConfig:
 
     @property
     def side_context_size(self) -> int:
-        return len(PIECES) + len(PIECES) + 1 + self.queue_length * len(PIECES) + _SIDE_NUMERIC_SIZE
+        categorical = (
+            len(PIECES)
+            + len(PIECES) + 1
+            + self.queue_length * len(PIECES)
+            + _PENDING_HOLE_SLOTS * self.board_width
+        )
+        return categorical + _SIDE_NUMERIC_SIZE
 
     @property
     def context_size(self) -> int:
-        return self.side_context_size * 2
+        return self.side_context_size * 2 + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +168,14 @@ def _side_context(side, config: VersusValueConfig) -> tuple[float, ...]:
     queue = tuple(game.queue)
     for index in range(config.queue_length):
         values.extend(_piece_hot(queue[index] if index < len(queue) else None))
+
+    packets = tuple(side.pending.packets)
+    for index in range(_PENDING_HOLE_SLOTS):
+        if index < len(packets):
+            values.extend(_HOLE_ONE_HOT[packets[index].hole])
+        else:
+            values.extend(_ZERO_HOLE)
+
     values.extend(
         (
             _clip01((game.combo + 1) / 16.0),
@@ -164,6 +183,7 @@ def _side_context(side, config: VersusValueConfig) -> tuple[float, ...]:
             _clip01(game.b2b_chain / 20.0),
             _clip01(game.surge_charge / 20.0),
             _clip01(side.pending.pending_lines / 20.0),
+            _clip01(len(packets) / 8.0),
             _clip01(side.sent / 100.0),
             _clip01(side.received / 100.0),
             _clip01(side.canceled / 100.0),
@@ -181,6 +201,7 @@ def encode_versus_state(
     match: VersusMatch,
     root_side: SideName,
     config: VersusValueConfig = VersusValueConfig(),
+    to_move: SideName | None = None,
 ) -> VersusNeuralState:
     cfg = config.normalized()
     own = match.side(root_side)
@@ -189,7 +210,10 @@ def encode_versus_state(
     opponent_rows = board_row_masks(opponent.game.board)
     if len(own_rows) != cfg.board_height or len(opponent_rows) != cfg.board_height:
         raise ValueError("Unexpected versus board height")
-    context = _side_context(own, cfg) + _side_context(opponent, cfg)
+    turn_value = 0.5 if to_move is None else float(to_move == root_side)
+    context = _side_context(own, cfg) + _side_context(opponent, cfg) + (turn_value,)
+    if len(context) != cfg.context_size:
+        raise AssertionError(f"Versus context size mismatch: {len(context)} != {cfg.context_size}")
     return VersusNeuralState(own_rows, opponent_rows, context)
 
 
@@ -336,8 +360,14 @@ class VersusValueEvaluator(VersusStateScorer):
             values = self.model(boards, contexts).reshape(-1)
         return tuple(values.detach().cpu().tolist())
 
-    def score_match(self, match: VersusMatch, root_side: SideName) -> float:
-        return self.score_states((encode_versus_state(match, root_side, self.config),))[0]
+    def score_match(
+        self,
+        match: VersusMatch,
+        root_side: SideName,
+        to_move: SideName | None = None,
+    ) -> float:
+        state = encode_versus_state(match, root_side, self.config, to_move)
+        return self.score_states((state,))[0]
 
 
 def _state_record(
@@ -347,7 +377,9 @@ def _state_record(
     ply: int,
     side: SideName,
     seed: int,
+    to_move: SideName | None,
     teacher_value: float,
+    terminal: bool = False,
 ) -> dict[str, object]:
     return {
         "format": VERSUS_SELFPLAY_FORMAT,
@@ -355,6 +387,8 @@ def _state_record(
         "ply": int(ply),
         "side": side,
         "seed": int(seed),
+        "toMove": to_move,
+        "terminal": bool(terminal),
         "ownRows": list(state.own_rows),
         "opponentRows": list(state.opponent_rows),
         "context": list(state.context),
@@ -386,6 +420,7 @@ def generate_versus_selfplay_dataset(
         garbage_cap=max(1, int(config.garbage_cap)),
         search_config=config.search_config.normalized(),
     )
+    value_cfg = value_config.normalized()
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     total_records = 0
@@ -401,7 +436,7 @@ def generate_versus_selfplay_dataset(
             turns = 0
             while match.winner is None and turns < cfg.max_turns:
                 for perspective in ("player", "ai"):
-                    state = encode_versus_state(match, perspective, value_config)
+                    state = encode_versus_state(match, perspective, value_cfg, turn_side)
                     teacher_raw = score_versus_state(match, perspective, weights=versus_weights)
                     teacher_value = math.tanh(teacher_raw / 64.0)
                     pending_records.append(
@@ -412,6 +447,7 @@ def generate_versus_selfplay_dataset(
                                 ply=turns,
                                 side=perspective,
                                 seed=seed,
+                                to_move=turn_side,
                                 teacher_value=teacher_value,
                             ),
                             perspective,
@@ -425,6 +461,7 @@ def generate_versus_selfplay_dataset(
                     versus_weights,
                     scorer=solo_scorer,
                     opponent_scorer=solo_scorer,
+                    opponent_heuristic_weights=heuristic_weights,
                     state_scorer=value_scorer,
                 )
                 if choice is None:
@@ -439,6 +476,26 @@ def generate_versus_selfplay_dataset(
             winner = match.winner or "draw"
             wins[winner] += 1
             total_turns += turns
+
+            for perspective in ("player", "ai"):
+                terminal_state = encode_versus_state(match, perspective, value_cfg, None)
+                terminal_target = _outcome(winner, perspective)
+                pending_records.append(
+                    (
+                        _state_record(
+                            terminal_state,
+                            game_index=game_index,
+                            ply=turns,
+                            side=perspective,
+                            seed=seed,
+                            to_move=None,
+                            teacher_value=terminal_target,
+                            terminal=True,
+                        ),
+                        perspective,
+                    )
+                )
+
             for record, perspective in pending_records:
                 record["outcome"] = _outcome(winner, perspective)
                 handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -454,6 +511,7 @@ def generate_versus_selfplay_dataset(
         "draws": wins["draw"],
         "meanTurns": total_turns / cfg.games,
         "searchConfig": cfg.search_config.to_dict(),
+        "valueConfig": asdict(value_cfg),
     }
 
 
@@ -478,6 +536,8 @@ def train_versus_value_model(
     output_path: str | Path,
     train_config: VersusTrainConfig = VersusTrainConfig(),
     model_config: VersusValueConfig = VersusValueConfig(),
+    *,
+    resume_from: str | Path | None = None,
 ) -> dict[str, object]:
     torch, _ = _require_torch()
     cfg = model_config.normalized()
@@ -493,14 +553,37 @@ def train_versus_value_model(
     )
     records = _load_selfplay_records(dataset_path)
     rng = random.Random(train_cfg.seed)
-    order = list(range(len(records)))
-    rng.shuffle(order)
-    validation_count = int(round(len(order) * train_cfg.validation_fraction))
-    validation_count = min(max(0, validation_count), max(0, len(order) - 1))
-    validation_indices = order[:validation_count]
-    train_indices = order[validation_count:]
+
+    game_ids = sorted({(int(record.get("seed", 0)), int(record.get("game", 0))) for record in records})
+    rng.shuffle(game_ids)
+    validation_games = int(round(len(game_ids) * train_cfg.validation_fraction))
+    validation_games = min(max(0, validation_games), max(0, len(game_ids) - 1))
+    validation_set = set(game_ids[:validation_games])
+    train_indices = [
+        index
+        for index, record in enumerate(records)
+        if (int(record.get("seed", 0)), int(record.get("game", 0))) not in validation_set
+    ]
+    validation_indices = [
+        index
+        for index, record in enumerate(records)
+        if (int(record.get("seed", 0)), int(record.get("game", 0))) in validation_set
+    ]
+
     device = _resolve_device(torch, train_cfg.device)
-    model = build_versus_value_model(cfg).to(device)
+    model = build_versus_value_model(cfg)
+    if resume_from is not None:
+        payload = torch.load(Path(resume_from), map_location="cpu", weights_only=False)
+        if not isinstance(payload, dict) or payload.get("format") != VERSUS_VALUE_FORMAT:
+            raise ValueError("Resume checkpoint is not a versus value model")
+        resume_config = VersusValueConfig.from_mapping(payload.get("config", {}))
+        if resume_config != cfg:
+            raise ValueError("Resume checkpoint has a different versus value configuration")
+        state_dict = payload.get("state_dict")
+        if not isinstance(state_dict, Mapping):
+            raise ValueError("Resume checkpoint has no state_dict")
+        model.load_state_dict(state_dict)
+    model = model.to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=train_cfg.learning_rate,
@@ -520,6 +603,12 @@ def train_versus_value_model(
             context = record.get("context")
             if not isinstance(own_rows, list) or not isinstance(opponent_rows, list) or not isinstance(context, list):
                 raise ValueError("Malformed versus self-play state")
+            if len(own_rows) != cfg.board_height or len(opponent_rows) != cfg.board_height:
+                raise ValueError("Versus self-play board height does not match model config")
+            if len(context) != cfg.context_size:
+                raise ValueError(
+                    f"Versus self-play context size {len(context)} does not match model config {cfg.context_size}"
+                )
             for mask in own_rows:
                 board_bytes.extend(occupancy[int(mask)])
             for mask in opponent_rows:
@@ -538,6 +627,12 @@ def train_versus_value_model(
         teacher_tensor = torch.frombuffer(teachers, dtype=torch.float32).to(device)
         return boards, contexts, outcome_tensor, teacher_tensor
 
+    def loss_for(predictions: Any, outcomes: Any, teachers: Any) -> Any:
+        loss = torch.mean((predictions - outcomes) ** 2)
+        if train_cfg.teacher_weight:
+            loss = loss + train_cfg.teacher_weight * torch.mean((predictions - teachers) ** 2)
+        return loss
+
     def evaluate(indices: Sequence[int]) -> float:
         if not indices:
             return 0.0
@@ -548,10 +643,7 @@ def train_versus_value_model(
             for start in range(0, len(indices), train_cfg.batch_size):
                 batch = indices[start : start + train_cfg.batch_size]
                 boards, contexts, outcomes, teachers = pack(batch)
-                predictions = model(boards, contexts)
-                loss = torch.mean((predictions - outcomes) ** 2)
-                if train_cfg.teacher_weight:
-                    loss = loss + train_cfg.teacher_weight * torch.mean((predictions - teachers) ** 2)
+                loss = loss_for(model(boards, contexts), outcomes, teachers)
                 total += float(loss.detach().cpu()) * len(batch)
                 count += len(batch)
         return total / max(1, count)
@@ -566,10 +658,7 @@ def train_versus_value_model(
             batch = train_indices[start : start + train_cfg.batch_size]
             boards, contexts, outcomes, teachers = pack(batch)
             optimizer.zero_grad(set_to_none=True)
-            predictions = model(boards, contexts)
-            loss = torch.mean((predictions - outcomes) ** 2)
-            if train_cfg.teacher_weight:
-                loss = loss + train_cfg.teacher_weight * torch.mean((predictions - teachers) ** 2)
+            loss = loss_for(model(boards, contexts), outcomes, teachers)
             loss.backward()
             optimizer.step()
             total_loss += float(loss.detach().cpu()) * len(batch)
@@ -590,6 +679,7 @@ def train_versus_value_model(
             "dataset": str(dataset_path),
             "records": len(records),
             "trainConfig": asdict(train_cfg),
+            "resumeFrom": str(resume_from) if resume_from is not None else None,
             "history": history,
         },
     )
@@ -600,6 +690,9 @@ def train_versus_value_model(
         "records": len(records),
         "trainRecords": len(train_indices),
         "validationRecords": len(validation_indices),
+        "trainGames": len(game_ids) - validation_games,
+        "validationGames": validation_games,
+        "resumeFrom": str(resume_from) if resume_from is not None else None,
         "history": history,
         "config": asdict(cfg),
     }
