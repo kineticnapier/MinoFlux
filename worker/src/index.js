@@ -61,8 +61,6 @@ export default {
     }
 
     if (url.pathname.startsWith("/api/")) {
-      if (!env.COMMAND_TOKEN) return json({ error: "COMMAND_TOKEN is not configured" }, 503);
-      if (!authorized(request, env.COMMAND_TOKEN)) return json({ error: "unauthorized" }, 401);
       return remoteStub(env).fetch(request);
     }
 
