@@ -140,7 +140,7 @@ export class RemoteHub {
       this.state.storage.get("status"),
     ]);
 
-    if (pending) {
+    if (pending && command !== "stop") {
       return json({ error: "a command is already queued", pending }, 409);
     }
     if (command !== "stop" && ["preparing", "running"].includes(status?.state)) {
@@ -154,7 +154,7 @@ export class RemoteHub {
     };
     await this.state.storage.put("pending", queued);
     this.wakeWaiters();
-    return json({ ok: true, queued }, 202);
+    return json({ ok: true, queued, replaced: Boolean(pending) }, 202);
   }
 
   async poll(request) {
