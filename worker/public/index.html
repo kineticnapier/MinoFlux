@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d12">
+  <title>MinoFlux Remote</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg:#0b0d12; --panel:#141821; --panel2:#1a202b; --text:#f5f7fb;
+      --muted:#9aa6b6; --line:#2a3342; --accent:#7aa2ff; --good:#52d273;
+      --warn:#f0b84b; --bad:#ff6b6b;
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { width:min(900px,100%); margin:0 auto; padding:max(18px,env(safe-area-inset-top)) 16px max(28px,env(safe-area-inset-bottom)); }
+    h1 { margin:0 0 4px; font-size:26px; }
+    h2 { margin:0 0 12px; font-size:16px; }
+    p { margin:0; }
+    .sub { color:var(--muted); margin-bottom:18px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:14px; }
+    .status-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
+    .state-wrap { display:flex; align-items:center; gap:9px; min-width:0; }
+    .dot { width:10px; height:10px; border-radius:50%; background:var(--muted); flex:none; }
+    .dot.good { background:var(--good); } .dot.warn { background:var(--warn); } .dot.bad { background:var(--bad); }
+    #state { font-weight:700; }
+    #updated { color:var(--muted); font-size:12px; white-space:nowrap; }
+    .meta { display:grid; grid-template-columns:120px 1fr; gap:6px 10px; color:var(--muted); font-size:13px; margin-bottom:12px; }
+    .meta strong { color:var(--text); font-weight:600; overflow-wrap:anywhere; }
+    pre { margin:0; max-height:320px; overflow:auto; padding:12px; background:#090b0f; border:1px solid var(--line); border-radius:10px; color:#d8e0ec; font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+    button, input { font:inherit; }
+    button { appearance:none; width:100%; border:1px solid var(--line); border-radius:12px; background:var(--panel2); color:var(--text); padding:13px 12px; font-weight:700; text-align:left; cursor:pointer; touch-action:manipulation; }
+    button.primary { border-color:color-mix(in srgb,var(--accent) 60%,var(--line)); }
+    button.danger { border-color:color-mix(in srgb,var(--bad) 55%,var(--line)); }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    button:active:not(:disabled) { transform:scale(.99); }
+    button small { display:block; margin-top:4px; color:var(--muted); font-weight:400; }
+    .auth { display:flex; gap:8px; }
+    .auth input { flex:1; min-width:0; border:1px solid var(--line); border-radius:10px; background:#090b0f; color:var(--text); padding:11px 12px; }
+    .auth button { width:auto; text-align:center; white-space:nowrap; }
+    .hint { margin-top:10px; color:var(--muted); font-size:12px; }
+    #notice { margin-top:10px; min-height:1.4em; font-size:13px; }
+    .ok { color:var(--good); } .err { color:var(--bad); }
+    @media (max-width:560px) { .grid { grid-template-columns:1fr; } .meta { grid-template-columns:92px 1fr; } .auth { flex-direction:column; } .auth button { width:100%; } h1 { font-size:23px; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>MinoFlux Remote</h1>
+  <p class="sub">Cloudflare経由で家PCの学習・評価を操作</p>
+
+  <section class="panel">
+    <h2>認証</h2>
+    <div class="auth">
+      <input id="token" type="password" autocomplete="current-password" placeholder="Command token">
+      <button id="saveToken">保存して接続</button>
+      <button id="clearToken">削除</button>
+    </div>
+    <p class="hint">tokenはこの端末のlocalStorageにだけ保存されます。HTMLには埋め込まれていません。</p>
+    <p id="notice"></p>
+  </section>
+
+  <section class="panel">
+    <div class="status-head">
+      <div class="state-wrap"><span id="dot" class="dot"></span><span id="state">未接続</span></div>
+      <span id="updated">--</span>
+    </div>
+    <div class="meta">
+      <span>agent</span><strong id="agent">--</strong>
+      <span>command</span><strong id="command">--</strong>
+      <span>queued</span><strong id="queued">--</strong>
+      <span>message</span><strong id="message">--</strong>
+    </div>
+    <pre id="log">Command tokenを設定してください。</pre>
+  </section>
+
+  <section class="panel">
+    <h2>Placement AI v2</h2>
+    <div class="grid">
+      <button class="primary command" data-command="placement-v2-full-50">
+        Full v2 × 50
+        <small>Teacher生成 → 8epoch学習 → 新旧モデル評価</small>
+      </button>
+      <button class="command" data-command="placement-v2-generate-50">
+        Generate v2 × 50
+        <small>depth 2 / beam 24 / 6 workersで教師dataset生成</small>
+      </button>
+      <button class="command" data-command="placement-v2-train">
+        Train Placement v2
+        <small>既存datasetからplacement-v2.ptを学習</small>
+      </button>
+      <button class="command" data-command="placement-v2-evaluate">
+        Evaluate Placement v2
+        <small>placement-v2.ptと旧モデルを同seed比較</small>
+      </button>
+      <button class="danger command" data-command="stop">
+        Stop active task
+        <small>実行中process treeを停止</small>
+      </button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>旧Versus実験</h2>
+    <div class="grid">
+      <button class="command" data-command="train-v1">Train v1<small>Versus Value v1を学習</small></button>
+      <button class="command" data-command="benchmark-v1-20">Benchmark v1 × 20<small>Value v1 vs Neural-only</small></button>
+      <button class="command" data-command="selfplay-v2-50">Self-play v2 × 50<small>次世代self-play dataを生成</small></button>
+      <button class="command" data-command="train-v2">Train v2<small>Versus Value v2を学習</small></button>
+      <button class="command" data-command="benchmark-v2-20">Benchmark v2 × 20<small>Value v2 vs Value v1</small></button>
+    </div>
+  </section>
+</main>
+<script>
+(() => {
+  const TOKEN_KEY = "minoflux-remote-command-token";
+  const $ = id => document.getElementById(id);
+  const tokenInput = $("token"), notice = $("notice"), dot = $("dot"), state = $("state"), updated = $("updated");
+  const agent = $("agent"), command = $("command"), queued = $("queued"), message = $("message"), log = $("log");
+  const buttons = [...document.querySelectorAll(".command")];
+  let token = localStorage.getItem(TOKEN_KEY) || "";
+  tokenInput.value = token;
+
+  function authHeaders(extra = {}) { return { Authorization: `Bearer ${token}`, ...extra }; }
+  function setEnabled(value) { buttons.forEach(button => { button.disabled = !value; }); }
+  function showNotice(text, error = false) { notice.textContent = text; notice.className = error ? "err" : "ok"; }
+  function formatTime(iso) { const ms = Date.parse(iso || ""); return Number.isFinite(ms) ? new Date(ms).toLocaleString() : "--"; }
+
+  function paint(data) {
+    agent.textContent = data.agentOnline ? "online" : "offline";
+    state.textContent = data.state || "unknown";
+    command.textContent = data.command || "--";
+    queued.textContent = data.queuedCommand || "--";
+    message.textContent = data.message || "--";
+    updated.textContent = formatTime(data.updatedAt || data.lastAgentSeen);
+    log.textContent = Array.isArray(data.logTail) && data.logTail.length ? data.logTail.join("\n") : "(no log yet)";
+    dot.className = "dot";
+    if (!data.agentOnline || data.state === "error") dot.classList.add("bad");
+    else if (["preparing", "running"].includes(data.state)) dot.classList.add("warn");
+    else dot.classList.add("good");
+    setEnabled(true);
+  }
+
+  async function refresh() {
+    if (!token) { setEnabled(false); return; }
+    try {
+      const response = await fetch("/api/status", { headers: authHeaders(), cache: "no-store" });
+      if (response.status === 401) throw new Error("Command tokenが違います");
+      if (!response.ok) throw new Error(`status HTTP ${response.status}`);
+      paint(await response.json());
+    } catch (error) {
+      setEnabled(false);
+      dot.className = "dot bad";
+      state.textContent = "接続失敗";
+      showNotice(String(error), true);
+    }
+  }
+
+  async function send(commandName) {
+    if (!token) return;
+    if (!confirm(`${commandName} を実行しますか？`)) return;
+    setEnabled(false);
+    showNotice(`${commandName} を送信中...`);
+    try {
+      const response = await fetch("/api/command", {
+        method: "POST",
+        headers: authHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ command: commandName }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      showNotice(`${commandName} をqueueしました`);
+      await refresh();
+    } catch (error) {
+      showNotice(String(error), true);
+      setEnabled(true);
+    }
+  }
+
+  $("saveToken").addEventListener("click", async () => {
+    token = tokenInput.value.trim();
+    if (!token) { showNotice("tokenを入力してください", true); return; }
+    localStorage.setItem(TOKEN_KEY, token);
+    showNotice("保存しました");
+    await refresh();
+  });
+  $("clearToken").addEventListener("click", () => {
+    localStorage.removeItem(TOKEN_KEY); token = ""; tokenInput.value = ""; setEnabled(false); showNotice("tokenを削除しました");
+  });
+  buttons.forEach(button => button.addEventListener("click", () => send(button.dataset.command)));
+
+  setEnabled(false);
+  refresh();
+  setInterval(refresh, 2000);
+})();
+</script>
+</body>
+</html>
