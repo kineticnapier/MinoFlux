@@ -59,6 +59,11 @@ def build_parser() -> ArgumentParser:
         help="Solo neural placement checkpoint; defaults to data/models/neural-value-human.pt when present",
     )
     parser.add_argument(
+        "--no-ai-neural",
+        action="store_true",
+        help="Disable the solo neural placement scorer and use heuristic candidate ranking",
+    )
+    parser.add_argument(
         "--ai-versus-value-model",
         default=None,
         help="Learned two-board match-value checkpoint; defaults to v2, then v1, when present",
@@ -77,6 +82,19 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--ai-reply-width", type=int, default=4)
     parser.add_argument("--garbage-cap", type=int, default=8)
     return parser
+
+
+def _resolve_neural_model(
+    explicit: str | None,
+    *,
+    disabled: bool = False,
+    default: Path = DEFAULT_NEURAL_MODEL,
+) -> Path | None:
+    if disabled:
+        return None
+    if explicit:
+        return Path(explicit)
+    return default if default.is_file() else None
 
 
 def _resolve_versus_value_model(
@@ -156,9 +174,14 @@ def main(argv: list[str] | None = None) -> int:
     handling = HandlingController()
     weights, model_name = _load_ai_weights(args.ai_model)
 
-    neural_path = Path(args.ai_neural_model) if args.ai_neural_model else DEFAULT_NEURAL_MODEL
+    neural_path = _resolve_neural_model(
+        args.ai_neural_model,
+        disabled=args.no_ai_neural,
+    )
     scorer = None
-    if neural_path.is_file():
+    if neural_path is not None:
+        if not neural_path.is_file():
+            raise SystemExit(f"Neural model not found: {neural_path}")
         scorer = NeuralValueEvaluator.from_checkpoint(
             neural_path,
             device=args.ai_device,
@@ -166,8 +189,6 @@ def main(argv: list[str] | None = None) -> int:
             compile_model=args.ai_torch_compile,
         )
         model_name = f"{model_name} + {neural_path.name}"
-    elif args.ai_neural_model:
-        raise SystemExit(f"Neural model not found: {neural_path}")
 
     state_scorer = None
     value_path = _resolve_versus_value_model(
@@ -365,10 +386,12 @@ def main(argv: list[str] | None = None) -> int:
                 small=small,
                 elapsed=elapsed,
             )
+            neural_label = neural_path.name if scorer is not None and neural_path is not None else "neural OFF"
             value_label = value_path.name if value_path is not None else "versus-value OFF"
             footer = (
                 f"[ / ] AI speed    replies {versus_config.opponent_reply_width}    "
-                f"candidates {versus_config.candidate_width}    Value: {value_label}    Model: {model_name}"
+                f"candidates {versus_config.candidate_width}    Neural: {neural_label}    "
+                f"Value: {value_label}    Model: {model_name}"
             )
             screen.blit(small.render(footer, True, palette.muted), (24, 696))
             if paused or match.winner is not None:
