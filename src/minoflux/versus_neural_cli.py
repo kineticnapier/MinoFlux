@@ -13,6 +13,7 @@ from minoflux_ai.versus_neural import (
     VersusSelfPlayConfig,
     VersusTrainConfig,
     VersusValueEvaluator,
+    encode_versus_state,
 )
 from minoflux_ai.versus_progress import (
     generate_versus_selfplay_dataset_progress,
@@ -79,6 +80,20 @@ def _load_solo(path: str | None, args, cache: dict[str, NeuralValueEvaluator]):
         bar.close()
 
 
+def _enable_batched_match_scoring(evaluator: VersusValueEvaluator) -> VersusValueEvaluator:
+    """Expose the batch hook already consumed by versus_search._state_values."""
+
+    def score_matches(entries):
+        states = tuple(
+            encode_versus_state(match, root_side, evaluator.config, to_move)
+            for match, root_side, to_move in entries
+        )
+        return evaluator.score_states(states)
+
+    evaluator.score_matches = score_matches  # type: ignore[attr-defined]
+    return evaluator
+
+
 def _load_versus_value(path: str | None, args, cache: dict[str, VersusValueEvaluator]):
     if not path:
         return None
@@ -88,10 +103,12 @@ def _load_versus_value(path: str | None, args, cache: dict[str, VersusValueEvalu
         return cached
     bar = progress_bar(total=1, desc=f"Load versus model: {Path(path).name}", unit="model")
     try:
-        evaluator = VersusValueEvaluator.from_checkpoint(
-            path,
-            device=args.device,
-            compile_model=args.torch_compile,
+        evaluator = _enable_batched_match_scoring(
+            VersusValueEvaluator.from_checkpoint(
+                path,
+                device=args.device,
+                compile_model=args.torch_compile,
+            )
         )
         cache[key] = evaluator
         bar.update(1)
