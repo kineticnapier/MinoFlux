@@ -329,36 +329,34 @@ def choose_versus_action(
     ]
 
     reply_root_indices: list[int] = []
-    reply_games: list[Game] = []
     if cfg.opponent_reply_width > 0:
         for index, (_action, _evaluation, after, _resolution) in enumerate(root_candidates):
             if after.winner is None and not _side(after, opponent_name).game.game_over:
                 reply_root_indices.append(index)
-                reply_games.append(_side(after, opponent_name).game)
 
-    replies_by_root: dict[int, tuple[tuple[SearchAction, PlacementEvaluation], ...]] = {}
-    if reply_games:
-        ranked_reply_groups = _rank_search_actions_batch(
-            tuple(reply_games),
+    # A root action can change the opponent's pending garbage, but not the
+    # opponent Game itself. Garbage is only applied after the opponent locks.
+    # Therefore legal reply placements and solo-neural reply ranking are
+    # identical for every non-terminal root candidate and only need computing once.
+    shared_replies: tuple[tuple[SearchAction, PlacementEvaluation], ...] = ()
+    if reply_root_indices:
+        reply_game = _side(root_candidates[reply_root_indices[0]][2], opponent_name).game
+        shared_replies = rank_search_actions(
+            reply_game,
             reply_weights,
             cfg.placement_search,
             limit=cfg.opponent_reply_width,
             scorer=reply_scorer,
         )
-        replies_by_root = {
-            root_index: replies
-            for root_index, replies in zip(reply_root_indices, ranked_reply_groups)
-        }
 
     flat_reply_candidates: list[
         tuple[int, SearchAction, PlacementEvaluation, VersusMatch, VersusResolution]
     ] = []
     for root_index in reply_root_indices:
-        replies = replies_by_root.get(root_index, ())
-        if not replies:
+        if not shared_replies:
             continue
         after = root_candidates[root_index][2]
-        for reply, reply_evaluation in replies:
+        for reply, reply_evaluation in shared_replies:
             replied, reply_resolution = _simulate_action(after, opponent_name, reply)
             flat_reply_candidates.append(
                 (root_index, reply, reply_evaluation, replied, reply_resolution)
