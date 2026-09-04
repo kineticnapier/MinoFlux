@@ -235,6 +235,14 @@ def train_versus_value_model_progress(
     ]
 
     device = _resolve_device(torch, train_cfg.device)
+    torch.manual_seed(train_cfg.seed)
+    if device.startswith("cuda"):
+        torch.cuda.manual_seed_all(train_cfg.seed)
+        cudnn = getattr(getattr(torch, "backends", None), "cudnn", None)
+        if cudnn is not None:
+            cudnn.benchmark = False
+            cudnn.deterministic = True
+
     model = build_versus_value_model(cfg)
     if resume_from is not None:
         payload = torch.load(Path(resume_from), map_location="cpu", weights_only=False)
@@ -321,6 +329,12 @@ def train_versus_value_model_progress(
         return total / max(1, count)
 
     history: list[dict[str, float | int]] = []
+    best_epoch = 0
+    best_validation_loss: float | None = None
+    best_metric_loss = math.inf
+    best_state_dict: dict[str, Any] | None = None
+    selection_metric = "validationLoss" if validation_indices else "trainLoss"
+
     epoch_bar = progress_bar(range(1, train_cfg.epochs + 1), total=train_cfg.epochs, desc="Train", unit="epoch")
     for epoch in epoch_bar:
         rng.shuffle(train_indices)
@@ -355,21 +369,45 @@ def train_versus_value_model_progress(
                 "validationLoss": validation_loss,
             }
         )
-        epoch_bar.set_postfix(train=f"{train_loss:.5f}", val=f"{validation_loss:.5f}")
+
+        metric_loss = validation_loss if validation_indices else train_loss
+        if metric_loss < best_metric_loss:
+            best_metric_loss = metric_loss
+            best_epoch = epoch
+            best_validation_loss = validation_loss if validation_indices else None
+            best_state_dict = {
+                name: tensor.detach().cpu().clone()
+                for name, tensor in model.state_dict().items()
+            }
+
+        epoch_bar.set_postfix(
+            train=f"{train_loss:.5f}",
+            val=f"{validation_loss:.5f}",
+            best=best_epoch,
+        )
     epoch_bar.close()
 
-    save_bar = progress_bar(total=1, desc="Save checkpoint", unit="file")
+    if best_state_dict is None:
+        raise AssertionError("Training completed without selecting a best checkpoint")
+    model.load_state_dict(best_state_dict)
+
+    save_bar = progress_bar(total=1, desc=f"Save best checkpoint (epoch {best_epoch})", unit="file")
+    checkpoint_metadata = {
+        "dataset": str(dataset_path),
+        "records": len(records),
+        "trainConfig": asdict(train_cfg),
+        "resumeFrom": str(resume_from) if resume_from is not None else None,
+        "history": history,
+        "bestEpoch": best_epoch,
+        "bestValidationLoss": best_validation_loss,
+        "selectionMetric": selection_metric,
+        "bestMetricLoss": best_metric_loss,
+    }
     save_versus_value_checkpoint(
         output_path,
         model,
         cfg,
-        metadata={
-            "dataset": str(dataset_path),
-            "records": len(records),
-            "trainConfig": asdict(train_cfg),
-            "resumeFrom": str(resume_from) if resume_from is not None else None,
-            "history": history,
-        },
+        metadata=checkpoint_metadata,
     )
     save_bar.update(1)
     save_bar.close()
@@ -385,5 +423,9 @@ def train_versus_value_model_progress(
         "validationGames": validation_games,
         "resumeFrom": str(resume_from) if resume_from is not None else None,
         "history": history,
+        "bestEpoch": best_epoch,
+        "bestValidationLoss": best_validation_loss,
+        "selectionMetric": selection_metric,
+        "bestMetricLoss": best_metric_loss,
         "config": asdict(cfg),
     }
