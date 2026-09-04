@@ -6,6 +6,7 @@ from minoflux_engine import VersusMatch
 
 from .features import extract_board_features
 from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights
+from .progress import progress_bar
 from .search import SearchScorer, apply_search_action
 from .versus_search import (
     DEFAULT_VERSUS_SEARCH_CONFIG,
@@ -114,6 +115,8 @@ def run_versus_game(
     ai_scorer: SearchScorer | None = None,
     player_state_scorer: VersusStateScorer | None = None,
     ai_state_scorer: VersusStateScorer | None = None,
+    progress: bool = False,
+    progress_desc: str | None = None,
 ) -> VersusGameResult:
     match = VersusMatch(seed, garbage_cap=garbage_cap)
     limit = max(1, int(max_turns))
@@ -121,37 +124,48 @@ def run_versus_game(
     turns = 0
     player_max_b2b = ai_max_b2b = 0
     player_max_surge = ai_max_surge = 0
+    turn_bar = progress_bar(
+        total=limit,
+        desc=progress_desc or f"seed {seed}",
+        unit="turn",
+        leave=False,
+        disable=not progress,
+    )
 
-    while match.winner is None and turns < limit:
-        weights = player_weights if turn_side == "player" else ai_weights
-        opponent_weights = ai_weights if turn_side == "player" else player_weights
-        config = player_config if turn_side == "player" else ai_config
-        scorer = player_scorer if turn_side == "player" else ai_scorer
-        opponent_scorer = ai_scorer if turn_side == "player" else player_scorer
-        state_scorer = player_state_scorer if turn_side == "player" else ai_state_scorer
-        choice = choose_versus_action(
-            match,
-            turn_side,
-            weights,
-            config,
-            scorer=scorer,
-            opponent_scorer=opponent_scorer,
-            opponent_heuristic_weights=opponent_weights,
-            state_scorer=state_scorer,
-        )
-        if choice is None:
-            match.side(turn_side).game.game_over = True
-            match._update_winner()
-            break
-        side = match.side(turn_side)
-        result = apply_search_action(side.game, choice.action)
-        match.resolve_lock(turn_side, result)
-        turns += 1
-        player_max_b2b = max(player_max_b2b, match.player.game.b2b_chain)
-        ai_max_b2b = max(ai_max_b2b, match.ai.game.b2b_chain)
-        player_max_surge = max(player_max_surge, match.player.game.surge_charge)
-        ai_max_surge = max(ai_max_surge, match.ai.game.surge_charge)
-        turn_side = "ai" if turn_side == "player" else "player"
+    try:
+        while match.winner is None and turns < limit:
+            weights = player_weights if turn_side == "player" else ai_weights
+            opponent_weights = ai_weights if turn_side == "player" else player_weights
+            config = player_config if turn_side == "player" else ai_config
+            scorer = player_scorer if turn_side == "player" else ai_scorer
+            opponent_scorer = ai_scorer if turn_side == "player" else player_scorer
+            state_scorer = player_state_scorer if turn_side == "player" else ai_state_scorer
+            choice = choose_versus_action(
+                match,
+                turn_side,
+                weights,
+                config,
+                scorer=scorer,
+                opponent_scorer=opponent_scorer,
+                opponent_heuristic_weights=opponent_weights,
+                state_scorer=state_scorer,
+            )
+            if choice is None:
+                match.side(turn_side).game.game_over = True
+                match._update_winner()
+                break
+            side = match.side(turn_side)
+            result = apply_search_action(side.game, choice.action)
+            match.resolve_lock(turn_side, result)
+            turns += 1
+            turn_bar.update(1)
+            player_max_b2b = max(player_max_b2b, match.player.game.b2b_chain)
+            ai_max_b2b = max(ai_max_b2b, match.ai.game.b2b_chain)
+            player_max_surge = max(player_max_surge, match.player.game.surge_charge)
+            ai_max_surge = max(ai_max_surge, match.ai.game.surge_charge)
+            turn_side = "ai" if turn_side == "player" else "player"
+    finally:
+        turn_bar.close()
 
     winner = match.winner or "draw"
     player_board = extract_board_features(match.player.game.board)
@@ -231,10 +245,18 @@ def run_versus_benchmark(
     ai_scorer: SearchScorer | None = None,
     player_state_scorer: VersusStateScorer | None = None,
     ai_state_scorer: VersusStateScorer | None = None,
+    progress: bool = False,
 ) -> VersusBenchmarkResult:
     count = max(1, int(games))
     results: list[VersusGameResult] = []
-    for index in range(count):
+    game_bar = progress_bar(
+        range(count),
+        total=count,
+        desc="Benchmark",
+        unit="game",
+        disable=not progress,
+    )
+    for index in game_bar:
         swapped = index % 2 == 1
         seed = int(seed_base) + (index // 2) * int(seed_step)
         physical = run_versus_game(
@@ -250,8 +272,17 @@ def run_versus_benchmark(
             ai_scorer=player_scorer if swapped else ai_scorer,
             player_state_scorer=ai_state_scorer if swapped else player_state_scorer,
             ai_state_scorer=player_state_scorer if swapped else ai_state_scorer,
+            progress=progress,
+            progress_desc=f"Game {index + 1}/{count}",
         )
-        results.append(_remap_swapped_result(physical) if swapped else physical)
+        logical = _remap_swapped_result(physical) if swapped else physical
+        results.append(logical)
+        if progress:
+            player_wins = sum(item.winner == "player" for item in results)
+            ai_wins = sum(item.winner == "ai" for item in results)
+            draws = len(results) - player_wins - ai_wins
+            game_bar.set_postfix(P=player_wins, A=ai_wins, D=draws, turns=logical.turns)
+    game_bar.close()
 
     result_tuple = tuple(results)
     return VersusBenchmarkResult(
