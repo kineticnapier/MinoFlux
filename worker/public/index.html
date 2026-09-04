@@ -30,20 +30,15 @@
     .meta strong { color:var(--text); font-weight:600; overflow-wrap:anywhere; }
     pre { margin:0; max-height:320px; overflow:auto; padding:12px; background:#090b0f; border:1px solid var(--line); border-radius:10px; color:#d8e0ec; font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
     .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
-    button, input { font:inherit; }
-    button { appearance:none; width:100%; border:1px solid var(--line); border-radius:12px; background:var(--panel2); color:var(--text); padding:13px 12px; font-weight:700; text-align:left; cursor:pointer; touch-action:manipulation; }
+    button { font:inherit; appearance:none; width:100%; border:1px solid var(--line); border-radius:12px; background:var(--panel2); color:var(--text); padding:13px 12px; font-weight:700; text-align:left; cursor:pointer; touch-action:manipulation; }
     button.primary { border-color:color-mix(in srgb,var(--accent) 60%,var(--line)); }
     button.danger { border-color:color-mix(in srgb,var(--bad) 55%,var(--line)); }
     button:disabled { opacity:.45; cursor:not-allowed; }
     button:active:not(:disabled) { transform:scale(.99); }
     button small { display:block; margin-top:4px; color:var(--muted); font-weight:400; }
-    .auth { display:flex; gap:8px; }
-    .auth input { flex:1; min-width:0; border:1px solid var(--line); border-radius:10px; background:#090b0f; color:var(--text); padding:11px 12px; }
-    .auth button { width:auto; text-align:center; white-space:nowrap; }
-    .hint { margin-top:10px; color:var(--muted); font-size:12px; }
     #notice { margin-top:10px; min-height:1.4em; font-size:13px; }
     .ok { color:var(--good); } .err { color:var(--bad); }
-    @media (max-width:560px) { .grid { grid-template-columns:1fr; } .meta { grid-template-columns:92px 1fr; } .auth { flex-direction:column; } .auth button { width:100%; } h1 { font-size:23px; } }
+    @media (max-width:560px) { .grid { grid-template-columns:1fr; } .meta { grid-template-columns:92px 1fr; } h1 { font-size:23px; } }
   </style>
 </head>
 <body>
@@ -52,19 +47,8 @@
   <p class="sub">Cloudflare経由で家PCの学習・評価を操作</p>
 
   <section class="panel">
-    <h2>認証</h2>
-    <div class="auth">
-      <input id="token" type="password" autocomplete="current-password" placeholder="Command token">
-      <button id="saveToken">保存して接続</button>
-      <button id="clearToken">削除</button>
-    </div>
-    <p class="hint">tokenはこの端末のlocalStorageにだけ保存されます。HTMLには埋め込まれていません。</p>
-    <p id="notice"></p>
-  </section>
-
-  <section class="panel">
     <div class="status-head">
-      <div class="state-wrap"><span id="dot" class="dot"></span><span id="state">未接続</span></div>
+      <div class="state-wrap"><span id="dot" class="dot"></span><span id="state">接続中</span></div>
       <span id="updated">--</span>
     </div>
     <div class="meta">
@@ -73,7 +57,8 @@
       <span>queued</span><strong id="queued">--</strong>
       <span>message</span><strong id="message">--</strong>
     </div>
-    <pre id="log">Command tokenを設定してください。</pre>
+    <pre id="log">statusを取得中...</pre>
+    <p id="notice"></p>
   </section>
 
   <section class="panel">
@@ -115,15 +100,11 @@
 </main>
 <script>
 (() => {
-  const TOKEN_KEY = "minoflux-remote-command-token";
   const $ = id => document.getElementById(id);
-  const tokenInput = $("token"), notice = $("notice"), dot = $("dot"), state = $("state"), updated = $("updated");
+  const notice = $("notice"), dot = $("dot"), state = $("state"), updated = $("updated");
   const agent = $("agent"), command = $("command"), queued = $("queued"), message = $("message"), log = $("log");
   const buttons = [...document.querySelectorAll(".command")];
-  let token = localStorage.getItem(TOKEN_KEY) || "";
-  tokenInput.value = token;
 
-  function authHeaders(extra = {}) { return { Authorization: `Bearer ${token}`, ...extra }; }
   function setEnabled(value) { buttons.forEach(button => { button.disabled = !value; }); }
   function showNotice(text, error = false) { notice.textContent = text; notice.className = error ? "err" : "ok"; }
   function formatTime(iso) { const ms = Date.parse(iso || ""); return Number.isFinite(ms) ? new Date(ms).toLocaleString() : "--"; }
@@ -144,10 +125,8 @@
   }
 
   async function refresh() {
-    if (!token) { setEnabled(false); return; }
     try {
-      const response = await fetch("/api/status", { headers: authHeaders(), cache: "no-store" });
-      if (response.status === 401) throw new Error("Command tokenが違います");
+      const response = await fetch("/api/status", { cache: "no-store" });
       if (!response.ok) throw new Error(`status HTTP ${response.status}`);
       paint(await response.json());
     } catch (error) {
@@ -159,14 +138,13 @@
   }
 
   async function send(commandName) {
-    if (!token) return;
     if (!confirm(`${commandName} を実行しますか？`)) return;
     setEnabled(false);
     showNotice(`${commandName} を送信中...`);
     try {
       const response = await fetch("/api/command", {
         method: "POST",
-        headers: authHeaders({ "content-type": "application/json" }),
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({ command: commandName }),
       });
       const data = await response.json().catch(() => ({}));
@@ -179,16 +157,6 @@
     }
   }
 
-  $("saveToken").addEventListener("click", async () => {
-    token = tokenInput.value.trim();
-    if (!token) { showNotice("tokenを入力してください", true); return; }
-    localStorage.setItem(TOKEN_KEY, token);
-    showNotice("保存しました");
-    await refresh();
-  });
-  $("clearToken").addEventListener("click", () => {
-    localStorage.removeItem(TOKEN_KEY); token = ""; tokenInput.value = ""; setEnabled(false); showNotice("tokenを削除しました");
-  });
   buttons.forEach(button => button.addEventListener("click", () => send(button.dataset.command)));
 
   setEnabled(false);
