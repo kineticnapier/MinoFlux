@@ -29,6 +29,11 @@ from .versus import (
 )
 
 DEFAULT_NEURAL_MODEL = Path("data/models/neural-value-human.pt")
+DEFAULT_VERSUS_VALUE_MODELS = (
+    Path("data/models/versus-value-v2.pt"),
+    Path("data/models/versus-value-v1.pt"),
+)
+DEFAULT_AI_PPS = 2.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,14 +46,28 @@ class AIJob:
 def build_parser() -> ArgumentParser:
     parser = ArgumentParser(prog="minoflux-versus", description="Play MinoFlux against the opponent-aware AI")
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--ai-pps", type=float, default=1.0)
+    parser.add_argument(
+        "--ai-pps",
+        type=float,
+        default=DEFAULT_AI_PPS,
+        help=f"AI placements per second (default: {DEFAULT_AI_PPS}; adjust live with [ / ])",
+    )
     parser.add_argument("--ai-model")
     parser.add_argument(
         "--ai-neural-model",
         default=None,
         help="Solo neural placement checkpoint; defaults to data/models/neural-value-human.pt when present",
     )
-    parser.add_argument("--ai-versus-value-model", default=None, help="Optional learned two-board match-value checkpoint")
+    parser.add_argument(
+        "--ai-versus-value-model",
+        default=None,
+        help="Learned two-board match-value checkpoint; defaults to v2, then v1, when present",
+    )
+    parser.add_argument(
+        "--no-ai-versus-value",
+        action="store_true",
+        help="Disable the learned two-board value model and use the solo/heuristic search only",
+    )
     parser.add_argument("--ai-device", default="auto")
     parser.add_argument("--ai-precision", choices=("float32", "float16", "bfloat16", "auto"), default="float32")
     parser.add_argument("--ai-torch-compile", action="store_true")
@@ -58,6 +77,19 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--ai-reply-width", type=int, default=4)
     parser.add_argument("--garbage-cap", type=int, default=8)
     return parser
+
+
+def _resolve_versus_value_model(
+    explicit: str | None,
+    *,
+    disabled: bool = False,
+    defaults: tuple[Path, ...] = DEFAULT_VERSUS_VALUE_MODELS,
+) -> Path | None:
+    if disabled:
+        return None
+    if explicit:
+        return Path(explicit)
+    return next((path for path in defaults if path.is_file()), None)
 
 
 def _game_signature(game) -> tuple[object, ...]:
@@ -138,8 +170,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"Neural model not found: {neural_path}")
 
     state_scorer = None
-    if args.ai_versus_value_model:
-        value_path = Path(args.ai_versus_value_model)
+    value_path = _resolve_versus_value_model(
+        args.ai_versus_value_model,
+        disabled=args.no_ai_versus_value,
+    )
+    if value_path is not None:
         if not value_path.is_file():
             raise SystemExit(f"Versus value model not found: {value_path}")
         state_scorer = VersusValueEvaluator.from_checkpoint(
@@ -292,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
                     except Exception:
                         job = AIJob(generation, (), None)
                     ai_future = None
+                    applied = False
                     if (
                         job.generation == generation
                         and job.signature == _match_signature(match)
@@ -299,7 +335,11 @@ def main(argv: list[str] | None = None) -> int:
                     ):
                         result = apply_search_action(ai_game, job.choice.action)
                         match.resolve_lock("ai", result)
-                    ai_next_at = now + 1.0 / ai_pps
+                        applied = True
+                    # A stale result means the human changed the match while the
+                    # AI was thinking. Retry immediately instead of charging the
+                    # AI an extra PPS interval for a move it never made.
+                    ai_next_at = now + 1.0 / ai_pps if applied else now
 
             screen.fill(palette.background)
             elapsed = max(0.0, now - started_at)
@@ -325,9 +365,10 @@ def main(argv: list[str] | None = None) -> int:
                 small=small,
                 elapsed=elapsed,
             )
+            value_label = value_path.name if value_path is not None else "versus-value OFF"
             footer = (
                 f"[ / ] AI speed    replies {versus_config.opponent_reply_width}    "
-                f"candidates {versus_config.candidate_width}    Model: {model_name}"
+                f"candidates {versus_config.candidate_width}    Value: {value_label}    Model: {model_name}"
             )
             screen.blit(small.render(footer, True, palette.muted), (24, 696))
             if paused or match.winner is not None:
