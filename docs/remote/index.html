@@ -72,7 +72,7 @@
     .meta strong { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
     pre {
       margin: 0;
-      max-height: 260px;
+      max-height: 300px;
       overflow: auto;
       padding: 12px;
       background: #090b0f;
@@ -103,6 +103,7 @@
       cursor: pointer;
       touch-action: manipulation;
     }
+    button.primary { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); }
     button:active, .linkbtn:active { transform: scale(.99); }
     button small {
       display: block;
@@ -147,7 +148,37 @@
   </section>
 
   <section class="panel">
-    <h2>操作</h2>
+    <h2>Placement AI v2</h2>
+    <div class="grid">
+      <button class="primary" data-command="placement-v2-full-50">
+        Full v2 × 50
+        <small>Teacher生成 → 8epoch学習 → 新旧モデルを同seed評価</small>
+      </button>
+      <button data-command="placement-v2-generate-50">
+        Generate v2 × 50
+        <small>depth 2 / beam 24 / 6 workersで教師datasetだけ生成</small>
+      </button>
+      <button data-command="placement-v2-train">
+        Train Placement v2
+        <small>既存placement-v2-ranking.jsonlからplacement-v2.ptを学習</small>
+      </button>
+      <button data-command="placement-v2-evaluate">
+        Evaluate Placement v2
+        <small>placement-v2.ptとneural-value-human.ptを同一8seedで比較</small>
+      </button>
+      <button class="danger" data-command="stop">
+        Stop active task
+        <small>生成・学習を含む実行中process treeを停止</small>
+      </button>
+    </div>
+    <p class="hint">
+      Fullは固定設定の長時間ジョブです。ログは上のstatus欄へ約20秒ごとに反映されます。
+      Stopはremote agent自体ではなく、実行中の学習process treeを停止します。
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>旧Versus実験</h2>
     <div class="grid">
       <button data-command="train-v1">
         Train v1
@@ -168,10 +199,6 @@
       <button data-command="benchmark-v2-20">
         Benchmark v2 × 20
         <small>Value v2 vs Value v1</small>
-      </button>
-      <button class="danger" data-command="stop">
-        Stop
-        <small>実行中のMinoFlux remote taskを停止</small>
       </button>
     </div>
     <p class="hint">
