@@ -6,7 +6,7 @@ from typing import Literal, Protocol, Sequence
 
 from minoflux_engine import Game, GarbagePacket, GarbageQueue, Placement, VersusMatch, VersusResolution, VersusSide
 
-from .features import extract_board_features
+from .features import max_height_and_holes
 from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights, PlacementEvaluation
 from .search import (
     DEFAULT_SEARCH_CONFIG,
@@ -148,18 +148,18 @@ def score_versus_state(
     if match.winner == "draw":
         return 0.0
 
-    own_board = extract_board_features(own.game.board)
-    opponent_board = extract_board_features(opponent.game.board)
+    own_max_height, own_holes = max_height_and_holes(own.game.board)
+    opponent_max_height, opponent_holes = max_height_and_holes(opponent.game.board)
     input_direction = 1.0 if action_side in (None, root_side) else -1.0
     score = (
         solo_score * weights.solo_evaluation
         + state_value * weights.state_value
         + own.pending.pending_lines * weights.own_pending
         + opponent.pending.pending_lines * weights.opponent_pending
-        + own_board.max_height * weights.own_max_height
-        + opponent_board.max_height * weights.opponent_max_height
-        + own_board.holes * weights.own_holes
-        + opponent_board.holes * weights.opponent_holes
+        + own_max_height * weights.own_max_height
+        + opponent_max_height * weights.opponent_max_height
+        + own_holes * weights.own_holes
+        + opponent_holes * weights.opponent_holes
         + own.game.b2b_chain * weights.own_b2b
         + opponent.game.b2b_chain * weights.opponent_b2b
         + own.game.surge_charge * weights.own_surge
