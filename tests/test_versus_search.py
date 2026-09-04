@@ -9,6 +9,7 @@ from minoflux_ai import (
     clone_versus_match,
     run_versus_benchmark,
 )
+from minoflux_ai.features import extract_board_features, max_height_and_holes
 from minoflux_engine import VersusMatch
 
 
@@ -77,6 +78,18 @@ class VersusSearchTests(unittest.TestCase):
         self.assertEqual(match.player.pending.pending_lines, 4)
         self.assertIsNone(match.ai.game.board[-1][0])
         self.assertEqual(cloned.player.pending.pending_lines, 2)
+
+    def test_lightweight_height_and_holes_match_full_features(self) -> None:
+        match = VersusMatch(321)
+        board = match.player.game.board
+        board[-1][0] = "G"
+        board[-2][0] = "G"
+        board[-3][0] = "G"
+        board[-1][1] = "G"
+        board[-3][1] = "G"
+        board[-1][4] = "G"
+        full = extract_board_features(board)
+        self.assertEqual(max_height_and_holes(board), (full.max_height, full.holes))
 
     def test_choice_reads_pending_and_does_not_mutate_match(self) -> None:
         match = VersusMatch(7)
