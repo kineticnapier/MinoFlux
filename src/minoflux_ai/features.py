@@ -58,6 +58,49 @@ def column_heights(board: Board) -> tuple[int, ...]:
     return _column_heights_from_masks(board_row_masks(board), width)
 
 
+def max_height_and_holes_from_masks(
+    rows: Sequence[int],
+    *,
+    width: int,
+) -> tuple[int, int]:
+    """Return only the stack metrics used by versus scoring.
+
+    This intentionally skips hole depth, wells, bumpiness, T-spin-slot scans, and
+    occupied-cell counting performed by ``extract_board_features_from_masks``.
+    """
+
+    if not rows:
+        return 0, 0
+    height = len(rows)
+    row_limit = (1 << width) - 1
+    normalized = tuple(int(row) & row_limit for row in rows)
+    full_height_mask = (1 << height) - 1
+    max_height = 0
+    holes = 0
+    for bits in _column_masks(normalized, width):
+        if not bits:
+            continue
+        top = (bits & -bits).bit_length() - 1
+        max_height = max(max_height, height - top)
+        below_top = full_height_mask ^ ((1 << top) - 1)
+        holes += (below_top & ~bits & full_height_mask).bit_count()
+    return max_height, holes
+
+
+def max_height_and_holes(board: Board) -> tuple[int, int]:
+    """Return exact ``(max_height, holes)`` without extracting unused features."""
+
+    if not board:
+        return 0, 0
+    width = len(board[0])
+    if any(len(row) != width for row in board):
+        raise ValueError("Board rows must have equal width")
+    return max_height_and_holes_from_masks(
+        board_row_masks(board),
+        width=width,
+    )
+
+
 def _occupied_or_wall_masks(rows: Sequence[int], x: int, y: int, width: int) -> bool:
     return (
         x < 0
