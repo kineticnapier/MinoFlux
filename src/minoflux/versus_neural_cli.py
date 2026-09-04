@@ -6,14 +6,17 @@ from pathlib import Path
 
 from minoflux_ai.heuristic import DEFAULT_WEIGHTS, load_weights
 from minoflux_ai.neural import NeuralValueEvaluator
+from minoflux_ai.progress import progress_bar
 from minoflux_ai.search import SearchConfig
 from minoflux_ai.versus_benchmark import run_versus_benchmark
 from minoflux_ai.versus_neural import (
     VersusSelfPlayConfig,
     VersusTrainConfig,
     VersusValueEvaluator,
-    generate_versus_selfplay_dataset,
-    train_versus_value_model,
+)
+from minoflux_ai.versus_progress import (
+    generate_versus_selfplay_dataset_progress,
+    train_versus_value_model_progress,
 )
 from minoflux_ai.versus_search import VersusSearchConfig
 
@@ -61,14 +64,19 @@ def _load_solo(path: str | None, args, cache: dict[str, NeuralValueEvaluator]):
     cached = cache.get(key)
     if cached is not None:
         return cached
-    evaluator = NeuralValueEvaluator.from_checkpoint(
-        path,
-        device=args.device,
-        precision=args.precision,
-        compile_model=args.torch_compile,
-    )
-    cache[key] = evaluator
-    return evaluator
+    bar = progress_bar(total=1, desc=f"Load solo model: {Path(path).name}", unit="model")
+    try:
+        evaluator = NeuralValueEvaluator.from_checkpoint(
+            path,
+            device=args.device,
+            precision=args.precision,
+            compile_model=args.torch_compile,
+        )
+        cache[key] = evaluator
+        bar.update(1)
+        return evaluator
+    finally:
+        bar.close()
 
 
 def _load_versus_value(path: str | None, args, cache: dict[str, VersusValueEvaluator]):
@@ -78,13 +86,18 @@ def _load_versus_value(path: str | None, args, cache: dict[str, VersusValueEvalu
     cached = cache.get(key)
     if cached is not None:
         return cached
-    evaluator = VersusValueEvaluator.from_checkpoint(
-        path,
-        device=args.device,
-        compile_model=args.torch_compile,
-    )
-    cache[key] = evaluator
-    return evaluator
+    bar = progress_bar(total=1, desc=f"Load versus model: {Path(path).name}", unit="model")
+    try:
+        evaluator = VersusValueEvaluator.from_checkpoint(
+            path,
+            device=args.device,
+            compile_model=args.torch_compile,
+        )
+        cache[key] = evaluator
+        bar.update(1)
+        return evaluator
+    finally:
+        bar.close()
 
 
 def build_parser() -> ArgumentParser:
@@ -166,6 +179,7 @@ def _benchmark(args) -> int:
         ai_scorer=ai_scorer,
         player_state_scorer=player_value,
         ai_state_scorer=ai_value,
+        progress=True,
     ).to_dict()
     result["playerPolicy"] = {
         "soloNeural": args.player_neural_model,
@@ -188,7 +202,7 @@ def _selfplay(args) -> int:
         raise SystemExit("--solo-model is required for neural self-play")
     value = _load_versus_value(args.versus_value_model, args, value_cache)
     weights = load_weights(args.heuristic_model) if args.heuristic_model else DEFAULT_WEIGHTS
-    result = generate_versus_selfplay_dataset(
+    result = generate_versus_selfplay_dataset_progress(
         args.output,
         solo,
         VersusSelfPlayConfig(
@@ -209,7 +223,7 @@ def _selfplay(args) -> int:
 
 
 def _train(args) -> int:
-    result = train_versus_value_model(
+    result = train_versus_value_model_progress(
         args.dataset,
         args.output,
         VersusTrainConfig(
