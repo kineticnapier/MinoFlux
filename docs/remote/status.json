@@ -1,10 +1,10 @@
 {
-  "agentOnline": false,
-  "state": "offline",
+  "agentOnline": true,
+  "state": "idle",
   "command": null,
   "issue": null,
   "pid": null,
-  "updatedAt": "2026-09-04T05:30:00Z",
-  "message": "Remote agent has not been started yet",
+  "updatedAt": "2026-09-04T08:49:32.395516Z",
+  "message": "Waiting for a command",
   "logTail": []
 }
