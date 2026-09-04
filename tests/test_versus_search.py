@@ -21,6 +21,40 @@ class _CountingScorer:
         return tuple(float(index) for index, _evaluation in enumerate(evaluations))
 
 
+class _GroupedCountingScorer:
+    def __init__(self) -> None:
+        self.group_calls = 0
+        self.placement_calls = 0
+
+    @staticmethod
+    def _values(placements):
+        return tuple(float(index) for index, _placement in enumerate(placements))
+
+    def score_placement_groups(self, groups):
+        self.group_calls += 1
+        return tuple(self._values(placements) for _game, placements in groups)
+
+    def score_placements(self, game, placements):
+        self.placement_calls += 1
+        return self._values(placements)
+
+    def score_many(self, game, evaluations):
+        self.placement_calls += 1
+        return tuple(float(index) for index, _evaluation in enumerate(evaluations))
+
+
+class _BatchStateScorer:
+    def __init__(self) -> None:
+        self.batch_sizes: list[int] = []
+
+    def score_matches(self, entries):
+        self.batch_sizes.append(len(entries))
+        return (0.0,) * len(entries)
+
+    def score_match(self, match, root_side, to_move=None):
+        raise AssertionError("batch hook should be used")
+
+
 class VersusSearchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = VersusSearchConfig(
@@ -70,6 +104,35 @@ class VersusSearchTests(unittest.TestCase):
         self.assertIsNotNone(choice)
         self.assertGreater(root.calls, 0)
         self.assertGreater(reply.calls, 0)
+
+    def test_grouped_reply_scorer_batches_all_root_candidates(self) -> None:
+        match = VersusMatch(71)
+        config = VersusSearchConfig(
+            placement_search=SearchConfig(
+                allow_hold=False,
+                lookahead_pieces=0,
+                beam_width=1,
+                srs_reachable=False,
+            ),
+            candidate_width=3,
+            opponent_reply_width=2,
+        )
+        root = _GroupedCountingScorer()
+        reply = _GroupedCountingScorer()
+        state = _BatchStateScorer()
+        choice = choose_versus_action(
+            match,
+            "ai",
+            config=config,
+            scorer=root,
+            opponent_scorer=reply,
+            state_scorer=state,
+        )
+        self.assertIsNotNone(choice)
+        self.assertEqual(root.group_calls, 1)
+        self.assertEqual(reply.group_calls, 1)
+        self.assertEqual(reply.placement_calls, 0)
+        self.assertEqual(state.batch_sizes, [3, 6])
 
     def test_small_headless_benchmark_is_deterministic(self) -> None:
         first = run_versus_benchmark(
