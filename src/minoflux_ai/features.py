@@ -73,17 +73,18 @@ def max_height_and_holes_from_masks(
         return 0, 0
     height = len(rows)
     row_limit = (1 << width) - 1
-    normalized = tuple(int(row) & row_limit for row in rows)
-    full_height_mask = (1 << height) - 1
+    occupied_above = 0
     max_height = 0
     holes = 0
-    for bits in _column_masks(normalized, width):
-        if not bits:
-            continue
-        top = (bits & -bits).bit_length() - 1
-        max_height = max(max_height, height - top)
-        below_top = full_height_mask ^ ((1 << top) - 1)
-        holes += (below_top & ~bits & full_height_mask).bit_count()
+    for y, raw_row in enumerate(rows):
+        row = int(raw_row) & row_limit
+        if row and max_height == 0:
+            max_height = height - y
+        # A vacant cell is a hole exactly when its column has already had an
+        # occupied cell in an earlier (higher) row. Tracking those columns as a
+        # bit mask avoids constructing and scanning one height mask per column.
+        holes += (occupied_above & ~row).bit_count()
+        occupied_above |= row
     return max_height, holes
 
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from copy import copy
 from dataclasses import asdict, dataclass, field
-import random
 from typing import Literal, Protocol, Sequence
 
 from minoflux_engine import Game, GarbagePacket, GarbageQueue, Placement, VersusMatch, VersusResolution, VersusSide
@@ -15,10 +14,19 @@ from .search import (
     SearchConfig,
     SearchScorer,
     _branch_groups,
+    _clone_random,
+    _held_search_game,
+    _neural_metadata_evaluation,
     _rank_precomputed_actions,
     apply_search_action,
     clone_game,
     rank_search_actions,
+)
+from .versus_profile import (
+    VersusSearchProfile,
+    active_versus_profile,
+    profile_timer_start,
+    record_profile_elapsed,
 )
 
 SideName = Literal["player", "ai"]
@@ -110,16 +118,55 @@ class VersusSearchRequest:
     state_scorer: VersusStateScorer | None = None
 
 
-def _clone_queue(queue: GarbageQueue) -> GarbageQueue:
+def _materialize_selected_immediate(
+    match: VersusMatch,
+    side_name: SideName,
+    choice: VersusChoice | None,
+    scorer: SearchScorer | None,
+) -> VersusChoice | None:
+    """Restore full public metadata after compact neural-only tie-breaking."""
+
+    if choice is None or not callable(getattr(scorer, "score_placements", None)):
+        return choice
+    source_game = _side(match, side_name).game
+    branch_game = _held_search_game(source_game) if choice.action.use_hold else source_game
+    if branch_game is None:
+        raise AssertionError("Selected Hold action has no legal Hold branch")
+    immediate = _neural_metadata_evaluation(
+        branch_game,
+        choice.action.placement,
+        choice.immediate.score,
+    )
+    return VersusChoice(
+        action=choice.action,
+        score=choice.score,
+        immediate=immediate,
+        resolution=choice.resolution,
+        opponent_reply=choice.opponent_reply,
+    )
+
+
+def _clone_queue(
+    queue: GarbageQueue,
+    *,
+    _profile: VersusSearchProfile | None = None,
+) -> GarbageQueue:
+    started = profile_timer_start(_profile)
     cloned = GarbageQueue(queue.width)
     cloned.packets.extend(GarbagePacket(packet.lines, packet.hole) for packet in queue.packets)
+    record_profile_elapsed(_profile, "garbage_queue_copy", started)
     return cloned
 
 
-def _clone_side(side: VersusSide, *, copy_game: bool = True) -> VersusSide:
+def _clone_side(
+    side: VersusSide,
+    *,
+    copy_game: bool = True,
+    _profile: VersusSearchProfile | None = None,
+) -> VersusSide:
     return VersusSide(
-        game=clone_game(side.game) if copy_game else side.game,
-        pending=_clone_queue(side.pending),
+        game=clone_game(side.game, _profile=_profile) if copy_game else side.game,
+        pending=_clone_queue(side.pending, _profile=_profile),
         sent=side.sent,
         received=side.received,
         canceled=side.canceled,
@@ -127,18 +174,27 @@ def _clone_side(side: VersusSide, *, copy_game: bool = True) -> VersusSide:
     )
 
 
-def clone_versus_match(match: VersusMatch) -> VersusMatch:
+def clone_versus_match(
+    match: VersusMatch,
+    *,
+    _profile: VersusSearchProfile | None = None,
+) -> VersusMatch:
+    started = profile_timer_start(_profile)
     cloned = copy(match)
-    cloned.player = _clone_side(match.player)
-    cloned.ai = _clone_side(match.ai)
-    cloned._garbage_rng = random.Random()
-    cloned._garbage_rng.setstate(match._garbage_rng.getstate())
+    cloned.player = _clone_side(match.player, _profile=_profile)
+    cloned.ai = _clone_side(match.ai, _profile=_profile)
+    rng_started = profile_timer_start(_profile)
+    cloned._garbage_rng = _clone_random(match._garbage_rng)
+    record_profile_elapsed(_profile, "garbage_rng_state_copy", rng_started)
+    record_profile_elapsed(_profile, "clone_versus_match", started)
     return cloned
 
 
 def _clone_versus_match_for_action(
     match: VersusMatch,
     side_name: SideName,
+    *,
+    _profile: VersusSearchProfile | None = None,
 ) -> VersusMatch:
     """Copy only the Game that one simulated lock can mutate.
 
@@ -147,11 +203,22 @@ def _clone_versus_match_for_action(
     read-only for this one-ply simulation and can safely be shared.
     """
 
+    started = profile_timer_start(_profile)
     cloned = copy(match)
-    cloned.player = _clone_side(match.player, copy_game=side_name == "player")
-    cloned.ai = _clone_side(match.ai, copy_game=side_name == "ai")
-    cloned._garbage_rng = random.Random()
-    cloned._garbage_rng.setstate(match._garbage_rng.getstate())
+    cloned.player = _clone_side(
+        match.player,
+        copy_game=side_name == "player",
+        _profile=_profile,
+    )
+    cloned.ai = _clone_side(
+        match.ai,
+        copy_game=side_name == "ai",
+        _profile=_profile,
+    )
+    rng_started = profile_timer_start(_profile)
+    cloned._garbage_rng = _clone_random(match._garbage_rng)
+    record_profile_elapsed(_profile, "garbage_rng_state_copy", rng_started)
+    record_profile_elapsed(_profile, "clone_versus_match", started)
     return cloned
 
 
@@ -161,6 +228,27 @@ def _side(match: VersusMatch, name: SideName) -> VersusSide:
 
 def _opponent_name(name: SideName) -> SideName:
     return "ai" if name == "player" else "player"
+
+
+_BoardMetricsCache = dict[int, tuple[object, tuple[int, int]]]
+
+
+def _board_metrics(
+    board: object,
+    cache: _BoardMetricsCache | None,
+    profile: VersusSearchProfile | None,
+) -> tuple[int, int]:
+    key = id(board)
+    if cache is not None:
+        cached = cache.get(key)
+        if cached is not None and cached[0] is board:
+            return cached[1]
+    started = profile_timer_start(profile)
+    metrics = max_height_and_holes(board)  # type: ignore[arg-type]
+    record_profile_elapsed(profile, "max_height_and_holes", started)
+    if cache is not None:
+        cache[key] = (board, metrics)
+    return metrics
 
 
 def score_versus_state(
@@ -173,18 +261,32 @@ def score_versus_state(
     state_value: float = 0.0,
     path_length: int = 0,
     action_side: SideName | None = None,
+    _metric_cache: _BoardMetricsCache | None = None,
+    _profile: VersusSearchProfile | None = None,
 ) -> float:
+    started = profile_timer_start(_profile)
     own = _side(match, root_side)
     opponent = _side(match, _opponent_name(root_side))
     if match.winner == root_side:
+        record_profile_elapsed(_profile, "score_versus_state", started)
         return weights.win
     if match.winner == _opponent_name(root_side):
+        record_profile_elapsed(_profile, "score_versus_state", started)
         return weights.loss
     if match.winner == "draw":
+        record_profile_elapsed(_profile, "score_versus_state", started)
         return 0.0
 
-    own_max_height, own_holes = max_height_and_holes(own.game.board)
-    opponent_max_height, opponent_holes = max_height_and_holes(opponent.game.board)
+    own_max_height, own_holes = _board_metrics(
+        own.game.board,
+        _metric_cache,
+        _profile,
+    )
+    opponent_max_height, opponent_holes = _board_metrics(
+        opponent.game.board,
+        _metric_cache,
+        _profile,
+    )
     input_direction = 1.0 if action_side in (None, root_side) else -1.0
     score = (
         solo_score * weights.solo_evaluation
@@ -206,6 +308,7 @@ def score_versus_state(
         score += direction * resolution.sent_lines * weights.sent_lines
         score += direction * resolution.canceled_lines * weights.canceled_lines
         score += direction * resolution.garbage_applied * weights.garbage_applied
+    record_profile_elapsed(_profile, "score_versus_state", started)
     return score
 
 
@@ -213,16 +316,35 @@ def _simulate_action(
     match: VersusMatch,
     side_name: SideName,
     action: SearchAction,
+    *,
+    _stage: Literal["root", "reply"] = "root",
+    _profile: VersusSearchProfile | None = None,
 ) -> tuple[VersusMatch, VersusResolution]:
-    simulated = _clone_versus_match_for_action(match, side_name)
+    started = profile_timer_start(_profile)
+    simulated = _clone_versus_match_for_action(
+        match,
+        side_name,
+        _profile=_profile,
+    )
+    apply_started = profile_timer_start(_profile)
     result = apply_search_action(_side(simulated, side_name).game, action)
+    record_profile_elapsed(_profile, "apply_search_action", apply_started)
+    resolve_started = profile_timer_start(_profile)
     resolution = simulated.resolve_lock(side_name, result)
+    record_profile_elapsed(_profile, "resolve_lock", resolve_started)
+    record_profile_elapsed(
+        _profile,
+        "root_simulate_action" if _stage == "root" else "reply_simulate_action",
+        started,
+    )
     return simulated, resolution
 
 
 def _state_values(
     scorer: VersusStateScorer | None,
     entries: Sequence[tuple[VersusMatch, SideName, SideName | None]],
+    *,
+    _stage: Literal["root", "reply"] | None = None,
 ) -> tuple[float, ...]:
     if not entries:
         return ()
@@ -230,7 +352,13 @@ def _state_values(
         return (0.0,) * len(entries)
     score_matches = getattr(scorer, "score_matches", None)
     if callable(score_matches):
-        values = tuple(float(value) for value in score_matches(entries))
+        profiled = getattr(scorer, "_score_matches_profiled", None)
+        raw_values = (
+            profiled(entries, _stage)
+            if callable(profiled)
+            else score_matches(entries)
+        )
+        values = tuple(float(value) for value in raw_values)
         if len(values) != len(entries):
             raise ValueError("Versus state scorer returned the wrong number of values")
         return values
@@ -244,6 +372,7 @@ def _rank_search_actions_batch(
     *,
     limit: int,
     scorer: SearchScorer | None,
+    _profile: VersusSearchProfile | None = None,
 ) -> tuple[tuple[tuple[SearchAction, PlacementEvaluation], ...], ...]:
     """Rank immediate actions for many games with one grouped neural forward pass.
 
@@ -263,6 +392,8 @@ def _rank_search_actions_batch(
                 cfg,
                 limit=limit,
                 scorer=scorer,
+                _profile=_profile,
+                _ranking_only=True,
             )
             for game in games
         )
@@ -271,7 +402,12 @@ def _rank_search_actions_batch(
     groups: list[tuple[Game, Sequence[Placement]]] = []
     group_keys: list[tuple[int, bool]] = []
     for index, game in enumerate(games):
-        direct, held, held_placements = _branch_groups(game, cfg, include_paths=True)
+        direct, held, held_placements = _branch_groups(
+            game,
+            cfg,
+            include_paths=True,
+            _profile=_profile,
+        )
         prepared.append((direct, held, held_placements))
         if direct:
             groups.append((game, direct))
@@ -280,7 +416,14 @@ def _rank_search_actions_batch(
             groups.append((held, held_placements))
             group_keys.append((index, True))
 
+    scoring_started = profile_timer_start(_profile)
     grouped_values = score_groups(tuple(groups)) if groups else ()
+    record_profile_elapsed(
+        _profile,
+        "neural_placement_scoring",
+        scoring_started,
+        calls=len(groups),
+    )
     if len(grouped_values) != len(groups):
         raise ValueError("Search scorer returned the wrong number of placement groups")
     values_by_key = {
@@ -296,7 +439,14 @@ def _rank_search_actions_batch(
             branches.append((False, game, direct, values_by_key[(index, False)]))
         if held is not None and held_placements:
             branches.append((True, held, held_placements, values_by_key[(index, True)]))
-        ranked_groups.append(_rank_precomputed_actions(tuple(branches), limit))
+        ranked_groups.append(
+            _rank_precomputed_actions(
+                tuple(branches),
+                limit,
+                _profile=_profile,
+                _ranking_only=True,
+            )
+        )
     return tuple(ranked_groups)
 
 
@@ -319,16 +469,24 @@ def choose_versus_action(
     ``scorer`` and ``opponent_scorer``.
     """
 
+    profile = active_versus_profile()
+    search_started = profile_timer_start(profile)
+    metric_cache: _BoardMetricsCache = {}
     cfg = config.normalized()
     own = _side(match, side_name)
+    placement_started = profile_timer_start(profile)
     ranked = rank_search_actions(
         own.game,
         heuristic_weights,
         cfg.placement_search,
         limit=cfg.candidate_width,
         scorer=scorer,
+        _profile=profile,
+        _ranking_only=True,
     )
+    record_profile_elapsed(profile, "root_placement_generation", placement_started)
     if not ranked:
+        record_profile_elapsed(profile, "total_search", search_started)
         return None
 
     opponent_name = _opponent_name(side_name)
@@ -339,11 +497,18 @@ def choose_versus_action(
         tuple[SearchAction, PlacementEvaluation, VersusMatch, VersusResolution]
     ] = []
     for action, evaluation in ranked:
-        after, resolution = _simulate_action(match, side_name, action)
+        after, resolution = _simulate_action(
+            match,
+            side_name,
+            action,
+            _stage="root",
+            _profile=profile,
+        )
         root_candidates.append((action, evaluation, after, resolution))
     root_state_values = _state_values(
         state_scorer,
         tuple((after, side_name, opponent_name) for _action, _evaluation, after, _resolution in root_candidates),
+        _stage="root",
     )
 
     base_scores = [
@@ -356,6 +521,8 @@ def choose_versus_action(
             state_value=root_state_value,
             path_length=len(action.placement.path),
             action_side=side_name,
+            _metric_cache=metric_cache,
+            _profile=profile,
         )
         for (action, evaluation, after, resolution), root_state_value in zip(
             root_candidates,
@@ -376,12 +543,20 @@ def choose_versus_action(
     shared_replies: tuple[tuple[SearchAction, PlacementEvaluation], ...] = ()
     if reply_root_indices:
         reply_game = _side(root_candidates[reply_root_indices[0]][2], opponent_name).game
+        placement_started = profile_timer_start(profile)
         shared_replies = rank_search_actions(
             reply_game,
             reply_weights,
             cfg.placement_search,
             limit=cfg.opponent_reply_width,
             scorer=reply_scorer,
+            _profile=profile,
+            _ranking_only=True,
+        )
+        record_profile_elapsed(
+            profile,
+            "opponent_placement_generation",
+            placement_started,
         )
 
     flat_reply_candidates: list[
@@ -392,7 +567,13 @@ def choose_versus_action(
             continue
         after = root_candidates[root_index][2]
         for reply, reply_evaluation in shared_replies:
-            replied, reply_resolution = _simulate_action(after, opponent_name, reply)
+            replied, reply_resolution = _simulate_action(
+                after,
+                opponent_name,
+                reply,
+                _stage="reply",
+                _profile=profile,
+            )
             flat_reply_candidates.append(
                 (root_index, reply, reply_evaluation, replied, reply_resolution)
             )
@@ -403,8 +584,10 @@ def choose_versus_action(
             (replied, side_name, side_name)
             for _root_index, _reply, _reply_evaluation, replied, _reply_resolution in flat_reply_candidates
         ),
+        _stage="reply",
     )
 
+    aggregation_started = profile_timer_start(profile)
     worst_by_root: dict[int, tuple[float, SearchAction]] = {}
     for (
         root_index,
@@ -422,6 +605,8 @@ def choose_versus_action(
             state_value=reply_state_value,
             path_length=len(reply.placement.path),
             action_side=opponent_name,
+            _metric_cache=metric_cache,
+            _profile=profile,
         )
         previous = worst_by_root.get(root_index)
         if previous is None or reply_score < previous[0]:
@@ -455,6 +640,13 @@ def choose_versus_action(
             -int(best.action.use_hold),
         ):
             best = choice
+    best = _materialize_selected_immediate(match, side_name, best, scorer)
+    record_profile_elapsed(
+        profile,
+        "python_aggregation_tie_breaking",
+        aggregation_started,
+    )
+    record_profile_elapsed(profile, "total_search", search_started)
     return best
 
 
@@ -470,6 +662,8 @@ def _rank_request_games(
         ]
     ],
     output_count: int,
+    *,
+    _profile: VersusSearchProfile | None = None,
 ) -> tuple[tuple[tuple[SearchAction, PlacementEvaluation], ...], ...]:
     """Batch compatible placement-ranking requests without mixing evaluators."""
 
@@ -495,6 +689,7 @@ def _rank_request_games(
             config,
             limit=limit,
             scorer=scorers[key],
+            _profile=_profile,
         )
         for (output_index, _game), actions in zip(members, ranked):
             output[output_index] = actions
@@ -506,6 +701,8 @@ def _state_values_by_request(
     entries_by_request: Sequence[
         Sequence[tuple[VersusMatch, SideName, SideName | None]]
     ],
+    *,
+    _stage: Literal["root", "reply"] | None = None,
 ) -> tuple[tuple[float, ...], ...]:
     """Combine match-value requests that share the same evaluator instance."""
 
@@ -535,7 +732,7 @@ def _state_values_by_request(
         flat_entries.extend(entries)
 
     for scorer, slices, flat_entries in groups.values():
-        values = _state_values(scorer, tuple(flat_entries))
+        values = _state_values(scorer, tuple(flat_entries), _stage=_stage)
         offset = 0
         for request_index, size in slices:
             output[request_index] = values[offset : offset + size]
@@ -571,6 +768,9 @@ def choose_versus_actions_batch(
             ),
         )
 
+    profile = active_versus_profile()
+    search_started = profile_timer_start(profile)
+    metric_cache: _BoardMetricsCache = {}
     normalized = tuple(
         VersusSearchRequest(
             match=request.match,
@@ -586,6 +786,7 @@ def choose_versus_actions_batch(
         for request in requests
     )
 
+    placement_started = profile_timer_start(profile)
     root_ranked = _rank_request_games(
         tuple(
             (
@@ -599,6 +800,13 @@ def choose_versus_actions_batch(
             for index, request in enumerate(normalized)
         ),
         len(normalized),
+        _profile=profile,
+    )
+    record_profile_elapsed(
+        profile,
+        "root_placement_generation",
+        placement_started,
+        calls=len(normalized),
     )
 
     root_candidates: list[
@@ -613,7 +821,13 @@ def choose_versus_actions_batch(
         ] = []
         live_indices: list[int] = []
         for action, evaluation in ranked:
-            after, resolution = _simulate_action(request.match, request.side_name, action)
+            after, resolution = _simulate_action(
+                request.match,
+                request.side_name,
+                action,
+                _stage="root",
+                _profile=profile,
+            )
             candidate_index = len(candidates)
             candidates.append((action, evaluation, after, resolution))
             if (
@@ -628,7 +842,11 @@ def choose_versus_actions_batch(
         )
         reply_root_indices.append(live_indices)
 
-    root_state_values = _state_values_by_request(normalized, root_entries)
+    root_state_values = _state_values_by_request(
+        normalized,
+        root_entries,
+        _stage="root",
+    )
     base_scores: list[list[float]] = []
     for request, candidates, values in zip(normalized, root_candidates, root_state_values):
         base_scores.append(
@@ -642,6 +860,8 @@ def choose_versus_actions_batch(
                     state_value=state_value,
                     path_length=len(action.placement.path),
                     action_side=request.side_name,
+                    _metric_cache=metric_cache,
+                    _profile=profile,
                 )
                 for (action, evaluation, after, resolution), state_value in zip(candidates, values)
             ]
@@ -672,9 +892,17 @@ def choose_versus_actions_batch(
                 request.opponent_scorer,
             )
         )
+    placement_started = profile_timer_start(profile)
     shared_replies = _rank_request_games(
         tuple(reply_rank_items),
         len(normalized),
+        _profile=profile,
+    )
+    record_profile_elapsed(
+        profile,
+        "opponent_placement_generation",
+        placement_started,
+        calls=len(reply_rank_items),
     )
 
     reply_candidates: list[
@@ -694,7 +922,13 @@ def choose_versus_actions_batch(
         for root_index in live_indices:
             after = candidates[root_index][2]
             for reply, reply_evaluation in replies:
-                replied, resolution = _simulate_action(after, opponent_name, reply)
+                replied, resolution = _simulate_action(
+                    after,
+                    opponent_name,
+                    reply,
+                    _stage="reply",
+                    _profile=profile,
+                )
                 request_replies.append(
                     (root_index, reply, reply_evaluation, replied, resolution)
                 )
@@ -706,7 +940,12 @@ def choose_versus_actions_batch(
             ]
         )
 
-    reply_state_values = _state_values_by_request(normalized, reply_entries)
+    reply_state_values = _state_values_by_request(
+        normalized,
+        reply_entries,
+        _stage="reply",
+    )
+    aggregation_started = profile_timer_start(profile)
     choices: list[VersusChoice | None] = []
     for request, candidates, scores, replies, reply_values in zip(
         normalized,
@@ -733,6 +972,8 @@ def choose_versus_actions_batch(
                 state_value=state_value,
                 path_length=len(reply.placement.path),
                 action_side=opponent_name,
+                _metric_cache=metric_cache,
+                _profile=profile,
             )
             previous = worst_by_root.get(root_index)
             if previous is None or reply_score < previous[0]:
@@ -764,5 +1005,23 @@ def choose_versus_actions_batch(
                 -int(best.action.use_hold),
             ):
                 best = choice
-        choices.append(best)
+        choices.append(
+            _materialize_selected_immediate(
+                request.match,
+                request.side_name,
+                best,
+                request.scorer,
+            )
+        )
+    record_profile_elapsed(
+        profile,
+        "python_aggregation_tie_breaking",
+        aggregation_started,
+    )
+    record_profile_elapsed(
+        profile,
+        "total_search",
+        search_started,
+        calls=len(normalized),
+    )
     return tuple(choices)

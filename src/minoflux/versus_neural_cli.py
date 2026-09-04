@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from argparse import ArgumentParser, BooleanOptionalAction
+from contextlib import nullcontext
 import json
 from pathlib import Path
+import sys
 
 from minoflux_ai.heuristic import DEFAULT_WEIGHTS, load_weights
 from minoflux_ai.neural import NeuralValueEvaluator
@@ -13,13 +15,13 @@ from minoflux_ai.versus_neural import (
     VersusSelfPlayConfig,
     VersusTrainConfig,
     VersusValueEvaluator,
-    encode_versus_state,
 )
 from minoflux_ai.versus_progress import (
     generate_versus_selfplay_dataset_progress,
     train_versus_value_model_progress,
 )
 from minoflux_ai.versus_search import VersusSearchConfig
+from minoflux_ai.versus_profile import collect_versus_profile
 
 DEFAULT_SOLO_MODEL = "data/models/neural-value-human.pt"
 DEFAULT_VERSUS_MODEL = "data/models/versus-value.pt"
@@ -80,20 +82,6 @@ def _load_solo(path: str | None, args, cache: dict[str, NeuralValueEvaluator]):
         bar.close()
 
 
-def _enable_batched_match_scoring(evaluator: VersusValueEvaluator) -> VersusValueEvaluator:
-    """Expose the batch hook already consumed by versus_search._state_values."""
-
-    def score_matches(entries):
-        states = tuple(
-            encode_versus_state(match, root_side, evaluator.config, to_move)
-            for match, root_side, to_move in entries
-        )
-        return evaluator.score_states(states)
-
-    evaluator.score_matches = score_matches  # type: ignore[attr-defined]
-    return evaluator
-
-
 def _load_versus_value(path: str | None, args, cache: dict[str, VersusValueEvaluator]):
     if not path:
         return None
@@ -103,12 +91,10 @@ def _load_versus_value(path: str | None, args, cache: dict[str, VersusValueEvalu
         return cached
     bar = progress_bar(total=1, desc=f"Load versus model: {Path(path).name}", unit="model")
     try:
-        evaluator = _enable_batched_match_scoring(
-            VersusValueEvaluator.from_checkpoint(
-                path,
-                device=args.device,
-                compile_model=args.torch_compile,
-            )
+        evaluator = VersusValueEvaluator.from_checkpoint(
+            path,
+            device=args.device,
+            compile_model=args.torch_compile,
         )
         cache[key] = evaluator
         bar.update(1)
@@ -142,8 +128,13 @@ def build_parser() -> ArgumentParser:
     benchmark.add_argument(
         "--game-batch",
         type=int,
-        default=8,
+        default=1,
         help="Concurrent games sharing each neural forward pass (1 keeps the serial reference path)",
+    )
+    benchmark.add_argument(
+        "--profile",
+        action="store_true",
+        help="Collect detailed versus-search CPU timings",
     )
     _add_search_args(benchmark)
 
@@ -163,8 +154,13 @@ def build_parser() -> ArgumentParser:
     selfplay.add_argument(
         "--game-batch",
         type=int,
-        default=8,
+        default=1,
         help="Concurrent rolling self-play games sharing each neural forward pass",
+    )
+    selfplay.add_argument(
+        "--profile",
+        action="store_true",
+        help="Collect detailed versus-search CPU timings",
     )
     _add_search_args(selfplay)
 
@@ -194,23 +190,25 @@ def _benchmark(args) -> int:
     player_weights = load_weights(args.player_heuristic_model) if args.player_heuristic_model else DEFAULT_WEIGHTS
     ai_weights = load_weights(args.ai_heuristic_model) if args.ai_heuristic_model else DEFAULT_WEIGHTS
     search_config = _search_config(args)
-    result = run_versus_benchmark(
-        args.games,
-        max_turns=args.max_turns,
-        seed_base=args.seed_base,
-        seed_step=args.seed_step,
-        player_weights=player_weights,
-        ai_weights=ai_weights,
-        player_config=search_config,
-        ai_config=search_config,
-        garbage_cap=args.garbage_cap,
-        player_scorer=player_scorer,
-        ai_scorer=ai_scorer,
-        player_state_scorer=player_value,
-        ai_state_scorer=ai_value,
-        progress=True,
-        game_batch=args.game_batch,
-    ).to_dict()
+    profile_context = collect_versus_profile() if args.profile else nullcontext(None)
+    with profile_context as profile:
+        result = run_versus_benchmark(
+            args.games,
+            max_turns=args.max_turns,
+            seed_base=args.seed_base,
+            seed_step=args.seed_step,
+            player_weights=player_weights,
+            ai_weights=ai_weights,
+            player_config=search_config,
+            ai_config=search_config,
+            garbage_cap=args.garbage_cap,
+            player_scorer=player_scorer,
+            ai_scorer=ai_scorer,
+            player_state_scorer=player_value,
+            ai_state_scorer=ai_value,
+            progress=True,
+            game_batch=args.game_batch,
+        ).to_dict()
     result["gameBatch"] = max(1, int(args.game_batch))
     result["playerPolicy"] = {
         "soloNeural": args.player_neural_model,
@@ -221,6 +219,9 @@ def _benchmark(args) -> int:
         "versusValue": args.ai_versus_value_model,
     }
     result["versusSearchConfig"] = search_config.to_dict()
+    if profile is not None:
+        result["versusProfile"] = profile.to_dict()
+        print(profile.format_table(), file=sys.stderr)
     _print(result)
     return 0
 
@@ -233,23 +234,28 @@ def _selfplay(args) -> int:
         raise SystemExit("--solo-model is required for neural self-play")
     value = _load_versus_value(args.versus_value_model, args, value_cache)
     weights = load_weights(args.heuristic_model) if args.heuristic_model else DEFAULT_WEIGHTS
-    result = generate_versus_selfplay_dataset_progress(
-        args.output,
-        solo,
-        VersusSelfPlayConfig(
-            games=args.games,
-            max_turns=args.max_turns,
-            seed_base=args.seed_base,
-            seed_step=args.seed_step,
-            garbage_cap=args.garbage_cap,
-            search_config=_search_config(args),
-            game_batch=args.game_batch,
-        ),
-        heuristic_weights=weights,
-        value_scorer=value,
-    )
+    profile_context = collect_versus_profile() if args.profile else nullcontext(None)
+    with profile_context as profile:
+        result = generate_versus_selfplay_dataset_progress(
+            args.output,
+            solo,
+            VersusSelfPlayConfig(
+                games=args.games,
+                max_turns=args.max_turns,
+                seed_base=args.seed_base,
+                seed_step=args.seed_step,
+                garbage_cap=args.garbage_cap,
+                search_config=_search_config(args),
+                game_batch=args.game_batch,
+            ),
+            heuristic_weights=weights,
+            value_scorer=value,
+        )
     result["soloModel"] = args.solo_model
     result["versusValueModel"] = args.versus_value_model
+    if profile is not None:
+        result["versusProfile"] = profile.to_dict()
+        print(profile.format_table(), file=sys.stderr)
     _print(result)
     return 0
 

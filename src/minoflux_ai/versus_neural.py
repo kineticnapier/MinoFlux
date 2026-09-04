@@ -25,6 +25,11 @@ from .versus_search import (
     choose_versus_actions_batch,
     score_versus_state,
 )
+from .versus_profile import (
+    active_versus_profile,
+    profile_timer_start,
+    record_profile_elapsed,
+)
 
 VERSUS_VALUE_FORMAT = "minoflux_versus_value_v1"
 VERSUS_SELFPLAY_FORMAT = "minoflux_versus_selfplay_v1"
@@ -207,10 +212,39 @@ def encode_versus_state(
     to_move: SideName | None = None,
 ) -> VersusNeuralState:
     cfg = config.normalized()
+    return _encode_versus_state_normalized(match, root_side, cfg, to_move)
+
+
+def _cached_board_rows(
+    board: object,
+    cache: dict[int, tuple[object, tuple[int, ...]]] | None,
+) -> tuple[int, ...]:
+    if cache is None:
+        return board_row_masks(board)  # type: ignore[arg-type]
+    key = id(board)
+    cached = cache.get(key)
+    if cached is not None and cached[0] is board:
+        return cached[1]
+    rows = board_row_masks(board)  # type: ignore[arg-type]
+    cache[key] = (board, rows)
+    return rows
+
+
+def _encode_versus_state_normalized(
+    match: VersusMatch,
+    root_side: SideName,
+    config: VersusValueConfig,
+    to_move: SideName | None = None,
+    *,
+    row_cache: dict[int, tuple[object, tuple[int, ...]]] | None = None,
+) -> VersusNeuralState:
+    """Encode with an already-normalized config and optional call-local row cache."""
+
+    cfg = config
     own = match.side(root_side)
     opponent = match.opponent(root_side)
-    own_rows = board_row_masks(own.game.board)
-    opponent_rows = board_row_masks(opponent.game.board)
+    own_rows = _cached_board_rows(own.game.board, row_cache)
+    opponent_rows = _cached_board_rows(opponent.game.board, row_cache)
     if len(own_rows) != cfg.board_height or len(opponent_rows) != cfg.board_height:
         raise ValueError("Unexpected versus board height")
     turn_value = 0.5 if to_move is None else float(to_move == root_side)
@@ -369,8 +403,49 @@ class VersusValueEvaluator(VersusStateScorer):
         root_side: SideName,
         to_move: SideName | None = None,
     ) -> float:
-        state = encode_versus_state(match, root_side, self.config, to_move)
-        return self.score_states((state,))[0]
+        return self.score_matches(((match, root_side, to_move),))[0]
+
+    def score_matches(
+        self,
+        entries: Sequence[tuple[VersusMatch, SideName, SideName | None]],
+    ) -> tuple[float, ...]:
+        return self._score_matches_profiled(entries, None)
+
+    def _score_matches_profiled(
+        self,
+        entries: Sequence[tuple[VersusMatch, SideName, SideName | None]],
+        stage: str | None,
+    ) -> tuple[float, ...]:
+        """Encode a match batch while reusing row masks for shared boards."""
+
+        if not entries:
+            return ()
+        profile = active_versus_profile()
+        encode_phase = (
+            "root_state_encoding" if stage == "root" else "reply_state_encoding"
+        )
+        encode_started = profile_timer_start(profile)
+        row_cache: dict[int, tuple[object, tuple[int, ...]]] = {}
+        states = tuple(
+            _encode_versus_state_normalized(
+                match,
+                root_side,
+                self.config,
+                to_move,
+                row_cache=row_cache,
+            )
+            for match, root_side, to_move in entries
+        )
+        record_profile_elapsed(profile, encode_phase, encode_started, calls=len(entries))
+        inference_started = profile_timer_start(profile)
+        values = self.score_states(states)
+        record_profile_elapsed(
+            profile,
+            "versus_value_inference",
+            inference_started,
+            calls=1,
+        )
+        return values
 
 
 def _state_record(

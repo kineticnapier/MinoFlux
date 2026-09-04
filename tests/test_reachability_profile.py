@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from minoflux_ai.reachability import (
     ReachabilityProfile,
+    clear_reachability_cache,
     collect_reachability_profile,
     reachable_placements,
 )
@@ -25,6 +26,7 @@ def _signature(placement):
 def test_reachability_profile_preserves_placements() -> None:
     game = Game(20260902)
     baseline = reachable_placements(game, include_paths=False)
+    clear_reachability_cache()
 
     profile = ReachabilityProfile()
     with collect_reachability_profile(profile):

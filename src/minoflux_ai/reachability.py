@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -41,6 +42,24 @@ _COLLISION_CLEAR = 1
 _COLLISION_BLOCKED = 2
 _X_MARGIN = 4
 _Y_MIN = -4
+_REACHABILITY_CACHE_MAXSIZE = 4_096
+
+_ReachabilityCacheKey = tuple[
+    tuple[int, ...],
+    str,
+    int,
+    int,
+    int,
+    int,
+    int,
+    bool,
+    int,
+    bool,
+]
+_REACHABILITY_CACHE: OrderedDict[
+    _ReachabilityCacheKey,
+    tuple[Placement, ...],
+] = OrderedDict()
 
 
 @dataclass(slots=True)
@@ -56,6 +75,7 @@ class ReachabilityProfile:
     landing_seconds: float = 0.0
     representative_seconds: float = 0.0
     placement_seconds: float = 0.0
+    path_seconds: float = 0.0
     bfs_nodes: int = 0
     collision_checks: int = 0
     collision_evaluations: int = 0
@@ -66,6 +86,9 @@ class ReachabilityProfile:
     representative_nodes: int = 0
     representative_duplicate_skips: int = 0
     placements: int = 0
+    path_calls: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
 
     def to_dict(self) -> dict[str, int | float]:
         accounted = (
@@ -87,6 +110,7 @@ class ReachabilityProfile:
             "landingSeconds": self.landing_seconds,
             "representativeSeconds": self.representative_seconds,
             "placementSeconds": self.placement_seconds,
+            "pathSeconds": self.path_seconds,
             "unaccountedSeconds": max(0.0, self.total_seconds - accounted),
             "bfsNodes": self.bfs_nodes,
             "collisionChecks": self.collision_checks,
@@ -99,6 +123,11 @@ class ReachabilityProfile:
             "representativeNodes": self.representative_nodes,
             "representativeDuplicateSkips": self.representative_duplicate_skips,
             "placements": self.placements,
+            "pathCalls": self.path_calls,
+            "cacheHits": self.cache_hits,
+            "cacheMisses": self.cache_misses,
+            "cacheHitRate": self.cache_hits
+            / max(1, self.cache_hits + self.cache_misses),
             "bfsNodesPerCall": self.bfs_nodes / max(1, self.calls),
             "placementsPerCall": self.placements / max(1, self.calls),
             "landingCacheHitRate": self.landing_cache_hits / max(1, self.landing_queries),
@@ -123,6 +152,22 @@ def collect_reachability_profile(
         yield active
     finally:
         _ACTIVE_REACHABILITY_PROFILE.reset(token)
+
+
+def clear_reachability_cache() -> None:
+    """Clear cached exact-SRS results, primarily for benchmarks and tests."""
+
+    _REACHABILITY_CACHE.clear()
+
+
+def _cache_reachability_result(
+    key: _ReachabilityCacheKey,
+    result: tuple[Placement, ...],
+) -> tuple[Placement, ...]:
+    _REACHABILITY_CACHE[key] = result
+    if len(_REACHABILITY_CACHE) > _REACHABILITY_CACHE_MAXSIZE:
+        _REACHABILITY_CACHE.popitem(last=False)
+    return result
 
 
 def _state_layout(game: Game) -> tuple[int, int, int, int, int]:
@@ -247,6 +292,33 @@ def reachable_placements(
     rows = board_row_masks(game.board)
     if profile is not None:
         profile.board_mask_seconds += time.perf_counter() - board_mask_started
+
+    normalized_allow_180 = bool(allow_180)
+    normalized_max_nodes = max(1, int(max_nodes))
+    normalized_include_paths = bool(include_paths)
+    cache_key: _ReachabilityCacheKey = (
+        rows,
+        game.current,
+        game.x,
+        game.y,
+        game.rotation & 3,
+        game.width,
+        game.height,
+        normalized_allow_180,
+        normalized_max_nodes,
+        normalized_include_paths,
+    )
+    cached = _REACHABILITY_CACHE.pop(cache_key, None)
+    if cached is not None:
+        _REACHABILITY_CACHE[cache_key] = cached
+        if profile is not None:
+            profile.cache_hits += 1
+            profile.placements += len(cached)
+            profile.total_seconds += time.perf_counter() - profile_started
+        return cached
+    if profile is not None:
+        profile.cache_misses += 1
+
     setup_started = time.perf_counter() if profile is not None else 0.0
 
     piece = game.current
@@ -266,7 +338,7 @@ def reachable_placements(
         if profile is not None:
             profile.setup_seconds += time.perf_counter() - setup_started
             profile.total_seconds += time.perf_counter() - profile_started
-        return ()
+        return _cache_reachability_result(cache_key, ())
     start_state = (
         ((((game.y - y_min) * x_count) + (game.x - x_min)) << 2)
         | start_rotation
@@ -315,7 +387,7 @@ def reachable_placements(
         if profile is not None:
             profile.setup_seconds += time.perf_counter() - setup_started
             profile.total_seconds += time.perf_counter() - profile_started
-        return ()
+        return _cache_reachability_result(cache_key, ())
 
     landing = [_NO_LANDING] * packed_count
 
@@ -381,8 +453,8 @@ def reachable_placements(
     rotation_nodes = [_NO_STATE] * packed_count
     state_nodes[start_state] = 0
     reachable_count = 1
-    budget = max(1, int(max_nodes))
-    rotation_options = _rotation_options(piece, bool(allow_180), x_count)
+    budget = normalized_max_nodes
+    rotation_options = _rotation_options(piece, normalized_allow_180, x_count)
 
     if profile is not None:
         profile.setup_seconds += time.perf_counter() - setup_started
@@ -630,6 +702,13 @@ def reachable_placements(
         rotation_from,
         rotation_to,
     ) in best.values():
+        path: tuple[str, ...] = ()
+        if normalized_include_paths:
+            path_started = time.perf_counter() if profile is not None else 0.0
+            path = _path(parents, commands, node_index)
+            if profile is not None:
+                profile.path_seconds += time.perf_counter() - path_started
+                profile.path_calls += 1
         placements.append(
             Placement(
                 piece=piece,
@@ -637,7 +716,7 @@ def reachable_placements(
                 y=landing_y,
                 rotation=rotation,
                 cells=placement_cells(piece, x, landing_y, rotation),
-                path=_path(parents, commands, node_index) if include_paths else (),
+                path=path,
                 last_move_was_rotation=last_rotation,
                 rotation_kick_index=kick_index if kick_index >= 0 else None,
                 rotation_from=rotation_from if rotation_from >= 0 else None,
@@ -650,4 +729,5 @@ def reachable_placements(
         profile.placement_seconds += time.perf_counter() - placement_started
         profile.placements += len(placements)
         profile.total_seconds += time.perf_counter() - profile_started
-    return tuple(placements)
+    result = tuple(placements)
+    return _cache_reachability_result(cache_key, result)

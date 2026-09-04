@@ -17,7 +17,11 @@ from .bitboard import (
     hidden_rows_occupied,
     place_and_clear_row_masks,
 )
-from .features import extract_board_features_from_masks
+from .features import (
+    BoardFeatures,
+    extract_board_features_from_masks,
+    max_height_and_holes_from_masks,
+)
 from .heuristic import (
     DEFAULT_WEIGHTS,
     HeuristicWeights,
@@ -26,17 +30,38 @@ from .heuristic import (
     rank_placements,
 )
 from .reachability import reachable_placements
+from .versus_profile import (
+    VersusSearchProfile,
+    profile_timer_start,
+    record_profile_elapsed,
+)
 
 
-def clone_game(game: Game) -> Game:
+def _clone_random(rng: random.Random) -> random.Random:
+    """Clone MT state without seeding a throwaway generator first."""
+
+    cloned = random.Random.__new__(random.Random)
+    cloned.setstate(rng.getstate())
+    return cloned
+
+
+def clone_game(
+    game: Game,
+    *,
+    _profile: VersusSearchProfile | None = None,
+) -> Game:
+    clone_started = profile_timer_start(_profile)
     cloned = copy(game)
+    board_started = profile_timer_start(_profile)
     cloned.board = [row.copy() for row in game.board]
+    record_profile_elapsed(_profile, "board_copy", board_started)
     cloned.queue = deque(game.queue)
     cloned._bag = copy(game._bag)
     cloned._bag._queue = deque(game._bag._queue)
-    cloned_rng = random.Random()
-    cloned_rng.setstate(game._bag._rng.getstate())
-    cloned._bag._rng = cloned_rng
+    rng_started = profile_timer_start(_profile)
+    cloned._bag._rng = _clone_random(game._bag._rng)
+    record_profile_elapsed(_profile, "bag_rng_state_copy", rng_started)
+    record_profile_elapsed(_profile, "clone_game", clone_started)
     return cloned
 
 
@@ -239,12 +264,92 @@ def _neural_metadata_evaluation(
     return PlacementEvaluation(placement=placement, score=float(score), features=features)
 
 
+def _neural_ranking_evaluation(
+    game: Game,
+    placement: Placement,
+    score: float,
+    *,
+    source_rows: Sequence[int],
+    before_metrics: tuple[int, int],
+) -> PlacementEvaluation:
+    """Compute exactly the metadata used by neural candidate tie-breaking.
+
+    Full board features are materialized only for the ultimately selected root
+    action. This keeps ordering exact while avoiding wells/hole-depth/T-slot
+    scans for every discarded root and reply candidate.
+    """
+
+    rows = source_rows
+    spin_kind = classify_t_spin_row_masks(
+        rows,
+        piece=placement.piece,
+        x=placement.x,
+        y=placement.y,
+        rotation=placement.rotation,
+        last_move_was_rotation=placement.last_move_was_rotation,
+        rotation_kick_index=placement.rotation_kick_index,
+        width=game.width,
+    )
+    after_rows, lines, topped_out = place_and_clear_row_masks(
+        rows,
+        placement,
+        width=game.width,
+    )
+    spin = t_spin_event(spin_kind, lines)
+    perfect_clear = not any(after_rows)
+    difficult = is_difficult_clear(lines, spin)
+    b2b = resolve_b2b_charging(
+        active=game.back_to_back,
+        chain=game.b2b_chain,
+        difficult=difficult,
+        lines=lines,
+        perfect_clear=perfect_clear and lines > 0,
+    )
+    combo = game.combo + 1 if lines else -1
+    attack = base_attack(lines, spin) + b2b.attack_bonus + b2b.released
+    if lines and combo > 0:
+        attack += min(4, combo // 2 + 1)
+    if perfect_clear and lines:
+        attack += 10
+
+    max_height, holes = max_height_and_holes_from_masks(
+        after_rows,
+        width=game.width,
+    )
+    board = BoardFeatures(
+        aggregate_height=0,
+        max_height=max_height,
+        holes=holes,
+        hole_depth=0,
+        bumpiness=0,
+        wells=0,
+        t_spin_slots=0,
+        occupied_cells=0,
+    )
+    features = PlacementFeatures(
+        board=board,
+        new_holes=max(0, holes - before_metrics[1]),
+        lines=lines,
+        attack=attack,
+        spin_lines=lines if spin is not None else 0,
+        perfect_clear=perfect_clear,
+        game_over=topped_out or hidden_rows_occupied(after_rows, game.hidden_rows),
+        spin=spin,
+        t_spin_slot_delta=0,
+    )
+    return PlacementEvaluation(placement=placement, score=float(score), features=features)
+
+
 def _rank_precomputed_actions(
     branches: Sequence[tuple[bool, Game, Sequence[Placement], Sequence[float]]],
     limit: int | None,
+    *,
+    _profile: VersusSearchProfile | None = None,
+    _ranking_only: bool = False,
 ) -> tuple[tuple[SearchAction, PlacementEvaluation], ...]:
     """Globally prune direct/Hold neural candidates before feature extraction."""
 
+    aggregation_started = profile_timer_start(_profile)
     raw: list[tuple[bool, Game, Placement, float]] = []
     for use_hold, branch_game, placements, values in branches:
         if len(values) != len(placements):
@@ -256,10 +361,16 @@ def _rank_precomputed_actions(
             for placement, value in zip(placements, values)
         )
     if not raw:
+        record_profile_elapsed(
+            _profile, "python_aggregation_tie_breaking", aggregation_started
+        )
         return ()
 
     count = len(raw) if limit is None else max(0, int(limit))
     if count == 0:
+        record_profile_elapsed(
+            _profile, "python_aggregation_tie_breaking", aggregation_started
+        )
         return ()
     if count < len(raw):
         cutoff = nlargest(count, (item[3] for item in raw))[-1]
@@ -274,23 +385,41 @@ def _rank_precomputed_actions(
         cached = board_cache.get(board_key)
         if cached is None:
             rows = board_row_masks(branch_game.board)
-            before = extract_board_features_from_masks(rows, width=branch_game.width)
+            before = (
+                max_height_and_holes_from_masks(rows, width=branch_game.width)
+                if _ranking_only
+                else extract_board_features_from_masks(rows, width=branch_game.width)
+            )
             board_cache[board_key] = (rows, before)
         else:
             rows, before = cached
-        evaluation = _neural_metadata_evaluation(
-            branch_game,
-            placement,
-            score,
-            source_rows=rows,
-            before_features=before,
-        )
+        if _ranking_only:
+            evaluation = _neural_ranking_evaluation(
+                branch_game,
+                placement,
+                score,
+                source_rows=rows,
+                before_metrics=before,  # type: ignore[arg-type]
+            )
+        else:
+            evaluation = _neural_metadata_evaluation(
+                branch_game,
+                placement,
+                score,
+                source_rows=rows,
+                before_features=before,
+            )
         ranked.append((SearchAction(use_hold, placement), evaluation))
 
     if count < len(ranked):
-        return tuple(nlargest(count, ranked, key=_candidate_key))
-    ranked.sort(key=_candidate_key, reverse=True)
-    return tuple(ranked)
+        result = tuple(nlargest(count, ranked, key=_candidate_key))
+    else:
+        ranked.sort(key=_candidate_key, reverse=True)
+        result = tuple(ranked)
+    record_profile_elapsed(
+        _profile, "python_aggregation_tie_breaking", aggregation_started
+    )
+    return result
 
 
 def _score_evaluations(
@@ -406,7 +535,9 @@ def _branch_groups(
     cfg: SearchConfig,
     *,
     include_paths: bool = True,
+    _profile: VersusSearchProfile | None = None,
 ) -> tuple[tuple[Placement, ...], Game | None, tuple[Placement, ...]]:
+    started = profile_timer_start(_profile)
     direct = _placements_for_game(game, cfg, include_paths=include_paths)
     held = _held_search_game(game) if cfg.allow_hold else None
     held_placements = (
@@ -414,7 +545,9 @@ def _branch_groups(
         if held is not None
         else ()
     )
-    return direct, held, held_placements
+    result = (direct, held, held_placements)
+    record_profile_elapsed(_profile, "branch_groups", started)
+    return result
 
 
 def rank_search_actions(
@@ -424,10 +557,17 @@ def rank_search_actions(
     *,
     limit: int | None = None,
     scorer: SearchScorer | None = None,
+    _profile: VersusSearchProfile | None = None,
+    _ranking_only: bool = False,
 ) -> tuple[tuple[SearchAction, PlacementEvaluation], ...]:
     cfg = config.normalized()
     branch_limit = None if limit is None else max(1, int(limit))
-    direct_placements, held, held_placements = _branch_groups(game, cfg, include_paths=True)
+    direct_placements, held, held_placements = _branch_groups(
+        game,
+        cfg,
+        include_paths=True,
+        _profile=_profile,
+    )
 
     score_groups = getattr(scorer, "score_placement_groups", None) if scorer is not None else None
     score_placements = getattr(scorer, "score_placements", None) if scorer is not None else None
@@ -440,7 +580,14 @@ def rank_search_actions(
         if held is not None and held_placements:
             groups.append((held, held_placements))
             branch_specs.append((True, held, held_placements))
+        scoring_started = profile_timer_start(_profile)
         grouped_values = score_groups(tuple(groups)) if groups else ()
+        record_profile_elapsed(
+            _profile,
+            "neural_placement_scoring",
+            scoring_started,
+            calls=len(groups),
+        )
         if len(grouped_values) != len(branch_specs):
             raise ValueError("Search scorer returned the wrong number of placement groups")
         return _rank_precomputed_actions(
@@ -449,6 +596,8 @@ def rank_search_actions(
                 for (use_hold, branch_game, placements), values in zip(branch_specs, grouped_values)
             ),
             limit,
+            _profile=_profile,
+            _ranking_only=_ranking_only,
         )
 
     direct_evaluations = _rank_branch(
