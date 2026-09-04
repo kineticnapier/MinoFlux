@@ -26,6 +26,7 @@ LOG_DIR = DATA_DIR / "remote-logs"
 STATUS_WORKTREE = DATA_DIR / "remote-status-worktree"
 STATUS_RELATIVE_PATH = Path("docs/remote/status.json")
 
+# Fixed commands only. Issue bodies and arbitrary arguments are deliberately ignored.
 COMMANDS: dict[str, tuple[str, ...]] = {
     "train-v1": (
         "-m", "minoflux.versus_neural_cli", "train",
@@ -89,6 +90,30 @@ COMMANDS: dict[str, tuple[str, ...]] = {
         "--torch-compile",
         "--device", "auto",
     ),
+    "placement-v2-full-50": (
+        "-m", "minoflux.placement_v2_remote", "full",
+        "--games", "50",
+        "--max-pieces", "300",
+        "--teacher-depth", "2",
+        "--teacher-beam", "24",
+        "--workers", "6",
+        "--epochs", "8",
+    ),
+    "placement-v2-generate-50": (
+        "-m", "minoflux.placement_v2_remote", "generate",
+        "--games", "50",
+        "--max-pieces", "300",
+        "--teacher-depth", "2",
+        "--teacher-beam", "24",
+        "--workers", "6",
+    ),
+    "placement-v2-train": (
+        "-m", "minoflux.placement_v2_remote", "train",
+        "--epochs", "8",
+    ),
+    "placement-v2-evaluate": (
+        "-m", "minoflux.placement_v2_remote", "evaluate",
+    ),
 }
 STOP_COMMAND = "stop"
 
@@ -101,7 +126,11 @@ def _iso_now() -> str:
     return _now().isoformat().replace("+00:00", "Z")
 
 
-def _run_git(*args: str, cwd: Path = PROJECT_ROOT, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _run_git(
+    *args: str,
+    cwd: Path = PROJECT_ROOT,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -128,7 +157,10 @@ def _load_state() -> dict[str, Any]:
 
 def _save_state(state: dict[str, Any]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    STATE_PATH.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _headers() -> dict[str, str]:
@@ -144,14 +176,19 @@ def _headers() -> dict[str, str]:
 
 
 def _fetch_open_issues() -> list[dict[str, Any]]:
-    url = f"https://api.github.com/repos/{REPOSITORY}/issues?state=open&per_page=100&sort=created&direction=asc"
+    url = (
+        f"https://api.github.com/repos/{REPOSITORY}/issues"
+        "?state=open&per_page=100&sort=created&direction=asc"
+    )
     request = Request(url, headers=_headers())
     try:
         with urlopen(request, timeout=20) as response:
             payload = json.load(response)
     except HTTPError as error:
         remaining = error.headers.get("X-RateLimit-Remaining")
-        raise RuntimeError(f"GitHub API HTTP {error.code}; rate-limit remaining={remaining}") from error
+        raise RuntimeError(
+            f"GitHub API HTTP {error.code}; rate-limit remaining={remaining}"
+        ) from error
     except (URLError, TimeoutError) as error:
         raise RuntimeError(f"GitHub API request failed: {error}") from error
     if not isinstance(payload, list):
@@ -184,8 +221,16 @@ def _created_at(issue: dict[str, Any]) -> datetime | None:
         return None
 
 
-def _pending_commands(state: dict[str, Any], *, include_stop: bool = True) -> list[tuple[int, str, dict[str, Any]]]:
-    seen = {int(value) for value in state.get("seenIssues", []) if isinstance(value, int)}
+def _pending_commands(
+    state: dict[str, Any],
+    *,
+    include_stop: bool = True,
+) -> list[tuple[int, str, dict[str, Any]]]:
+    seen = {
+        int(value)
+        for value in state.get("seenIssues", [])
+        if isinstance(value, int)
+    }
     cutoff = _now() - timedelta(hours=24)
     pending: list[tuple[int, str, dict[str, Any]]] = []
     for issue in _fetch_open_issues():
@@ -205,14 +250,17 @@ def _pending_commands(state: dict[str, Any], *, include_stop: bool = True) -> li
 
 
 def _mark_seen(state: dict[str, Any], issue_number: int) -> None:
-    seen = {int(value) for value in state.get("seenIssues", []) if isinstance(value, int)}
+    seen = {
+        int(value)
+        for value in state.get("seenIssues", [])
+        if isinstance(value, int)
+    }
     seen.add(int(issue_number))
     state["seenIssues"] = sorted(seen)
     _save_state(state)
 
 
 def _ensure_status_worktree() -> None:
-    status_file = STATUS_WORKTREE / STATUS_RELATIVE_PATH
     if (STATUS_WORKTREE / ".git").exists() or (STATUS_WORKTREE / ".git").is_file():
         return
 
@@ -229,7 +277,10 @@ def _ensure_status_worktree() -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(f"Could not prepare status worktree:\n{result.stdout}")
-    status_file.parent.mkdir(parents=True, exist_ok=True)
+    (STATUS_WORKTREE / STATUS_RELATIVE_PATH).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
 
 def _publish_status(payload: dict[str, Any]) -> None:
@@ -242,20 +293,40 @@ def _publish_status(payload: dict[str, Any]) -> None:
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        _run_git("add", str(STATUS_RELATIVE_PATH).replace("\\", "/"), cwd=STATUS_WORKTREE)
-        diff = _run_git("diff", "--cached", "--quiet", cwd=STATUS_WORKTREE, check=False)
+        _run_git(
+            "add",
+            str(STATUS_RELATIVE_PATH).replace("\\", "/"),
+            cwd=STATUS_WORKTREE,
+        )
+        diff = _run_git(
+            "diff",
+            "--cached",
+            "--quiet",
+            cwd=STATUS_WORKTREE,
+            check=False,
+        )
         if diff.returncode == 0:
             return
         commit = _run_git(
-            "-c", "user.name=MinoFlux Remote",
-            "-c", "user.email=minoflux-remote@users.noreply.github.com",
-            "commit", "-m", "Update remote status",
+            "-c",
+            "user.name=MinoFlux Remote",
+            "-c",
+            "user.email=minoflux-remote@users.noreply.github.com",
+            "commit",
+            "-m",
+            "Update remote status",
             cwd=STATUS_WORKTREE,
             check=False,
         )
         if commit.returncode != 0:
             raise RuntimeError(commit.stdout)
-        pushed = _run_git("push", "origin", STATUS_BRANCH, cwd=STATUS_WORKTREE, check=False)
+        pushed = _run_git(
+            "push",
+            "origin",
+            STATUS_BRANCH,
+            cwd=STATUS_WORKTREE,
+            check=False,
+        )
         if pushed.returncode != 0:
             raise RuntimeError(pushed.stdout)
     except Exception as error:
@@ -271,7 +342,11 @@ def _tail_log(path: Path, limit: int = 18) -> list[str]:
             raw = handle.read().decode("utf-8", errors="replace")
     except OSError:
         return []
-    parts = [part.strip() for part in re.split(r"[\r\n]+", raw) if part.strip()]
+    parts = [
+        part.strip()
+        for part in re.split(r"[\r\n]+", raw)
+        if part.strip()
+    ]
     return parts[-limit:]
 
 
@@ -279,7 +354,12 @@ def _sync_code() -> None:
     fetched = _run_git("fetch", "origin", CONTROL_BRANCH, check=False)
     if fetched.returncode != 0:
         raise RuntimeError(f"git fetch failed:\n{fetched.stdout}")
-    merged = _run_git("merge", "--ff-only", f"origin/{CONTROL_BRANCH}", check=False)
+    merged = _run_git(
+        "merge",
+        "--ff-only",
+        f"origin/{CONTROL_BRANCH}",
+        check=False,
+    )
     if merged.returncode != 0:
         raise RuntimeError(
             "Could not fast-forward the local self-improve branch. "
@@ -319,7 +399,12 @@ def _check_stop(state: dict[str, Any]) -> int | None:
     return None
 
 
-def _execute(issue_number: int, command: str, state: dict[str, Any], poll_seconds: float) -> None:
+def _execute(
+    issue_number: int,
+    command: str,
+    state: dict[str, Any],
+    poll_seconds: float,
+) -> None:
     started = _iso_now()
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -333,20 +418,24 @@ def _execute(issue_number: int, command: str, state: dict[str, Any], poll_second
         "updatedAt": started,
         "logTail": [],
     }
-    _publish_status({**base, "state": "preparing", "message": "Syncing self-improve"})
+    _publish_status(
+        {**base, "state": "preparing", "message": "Syncing self-improve"}
+    )
 
     try:
         _sync_code()
         python = _python_executable()
         argv = [str(python), *COMMANDS[command]]
     except Exception as error:
-        _publish_status({
-            **base,
-            "state": "error",
-            "updatedAt": _iso_now(),
-            "finishedAt": _iso_now(),
-            "message": str(error),
-        })
+        _publish_status(
+            {
+                **base,
+                "state": "error",
+                "updatedAt": _iso_now(),
+                "finishedAt": _iso_now(),
+                "message": str(error),
+            }
+        )
         return
 
     with log_path.open("wb") as log_handle:
@@ -357,13 +446,15 @@ def _execute(issue_number: int, command: str, state: dict[str, Any], poll_second
             stderr=subprocess.STDOUT,
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
-        _publish_status({
-            **base,
-            "state": "running",
-            "pid": process.pid,
-            "updatedAt": _iso_now(),
-            "message": "Running",
-        })
+        _publish_status(
+            {
+                **base,
+                "state": "running",
+                "pid": process.pid,
+                "updatedAt": _iso_now(),
+                "message": "Running",
+            }
+        )
 
         last_publish = 0.0
         last_stop_check = 0.0
@@ -374,14 +465,16 @@ def _execute(issue_number: int, command: str, state: dict[str, Any], poll_second
         while process.poll() is None:
             now = time.monotonic()
             if now - last_publish >= status_interval:
-                _publish_status({
-                    **base,
-                    "state": "running",
-                    "pid": process.pid,
-                    "updatedAt": _iso_now(),
-                    "message": "Running",
-                    "logTail": _tail_log(log_path),
-                })
+                _publish_status(
+                    {
+                        **base,
+                        "state": "running",
+                        "pid": process.pid,
+                        "updatedAt": _iso_now(),
+                        "message": "Running",
+                        "logTail": _tail_log(log_path),
+                    }
+                )
                 last_publish = now
 
             if now - last_stop_check >= stop_interval:
@@ -410,17 +503,19 @@ def _execute(issue_number: int, command: str, state: dict[str, Any], poll_second
         status = "error"
         message = f"Process exited with code {exit_code}"
 
-    _publish_status({
-        **base,
-        "state": status,
-        "pid": None,
-        "updatedAt": finished,
-        "finishedAt": finished,
-        "exitCode": exit_code,
-        "message": message,
-        "logPath": str(log_path.relative_to(PROJECT_ROOT)),
-        "logTail": log_tail,
-    })
+    _publish_status(
+        {
+            **base,
+            "state": status,
+            "pid": None,
+            "updatedAt": finished,
+            "finishedAt": finished,
+            "exitCode": exit_code,
+            "message": message,
+            "logPath": str(log_path.relative_to(PROJECT_ROOT)),
+            "logTail": log_tail,
+        }
+    )
 
 
 def _idle_status(message: str = "Waiting for a command") -> dict[str, Any]:
@@ -454,18 +549,31 @@ def _heartbeat_status() -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Poll GitHub Issues for fixed MinoFlux remote commands")
-    parser.add_argument("--once", action="store_true", help="Poll once and exit when there is no command")
+    parser = argparse.ArgumentParser(
+        description="Poll GitHub Issues for fixed MinoFlux remote commands"
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Poll once and exit when there is no command",
+    )
     parser.add_argument("--poll-seconds", type=float, default=None)
     args = parser.parse_args()
 
     token = bool(os.environ.get("MINOFLUX_REMOTE_TOKEN", "").strip())
-    poll_seconds = args.poll_seconds if args.poll_seconds is not None else (10.0 if token else 60.0)
+    poll_seconds = (
+        args.poll_seconds
+        if args.poll_seconds is not None
+        else (10.0 if token else 60.0)
+    )
     poll_seconds = max(5.0, float(poll_seconds))
 
     state = _load_state()
     _publish_status(_idle_status())
-    print(f"[remote] watching {REPOSITORY}; poll={poll_seconds:.0f}s; token={'yes' if token else 'no'}")
+    print(
+        f"[remote] watching {REPOSITORY}; poll={poll_seconds:.0f}s; "
+        f"token={'yes' if token else 'no'}"
+    )
 
     while True:
         try:
@@ -484,7 +592,9 @@ def main() -> int:
             _mark_seen(state, number)
             print(f"[remote] issue #{number}: {command}")
             if command == STOP_COMMAND:
-                _publish_status(_idle_status("Stop requested, but no remote task is running"))
+                _publish_status(
+                    _idle_status("Stop requested, but no remote task is running")
+                )
             else:
                 _execute(number, command, state, poll_seconds)
             if args.once:
