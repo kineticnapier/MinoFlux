@@ -139,6 +139,12 @@ def build_parser() -> ArgumentParser:
     benchmark.add_argument("--device", default="auto")
     benchmark.add_argument("--precision", choices=("float32", "float16", "bfloat16", "auto"), default="float32")
     benchmark.add_argument("--torch-compile", action="store_true")
+    benchmark.add_argument(
+        "--game-batch",
+        type=int,
+        default=8,
+        help="Concurrent games sharing each neural forward pass (1 keeps the serial reference path)",
+    )
     _add_search_args(benchmark)
 
     selfplay = sub.add_parser("selfplay", help="Generate win/loss-labelled versus self-play states")
@@ -154,6 +160,12 @@ def build_parser() -> ArgumentParser:
     selfplay.add_argument("--device", default="auto")
     selfplay.add_argument("--precision", choices=("float32", "float16", "bfloat16", "auto"), default="float32")
     selfplay.add_argument("--torch-compile", action="store_true")
+    selfplay.add_argument(
+        "--game-batch",
+        type=int,
+        default=8,
+        help="Concurrent rolling self-play games sharing each neural forward pass",
+    )
     _add_search_args(selfplay)
 
     train = sub.add_parser("train", help="Train a two-board match-value network from self-play")
@@ -197,7 +209,9 @@ def _benchmark(args) -> int:
         player_state_scorer=player_value,
         ai_state_scorer=ai_value,
         progress=True,
+        game_batch=args.game_batch,
     ).to_dict()
+    result["gameBatch"] = max(1, int(args.game_batch))
     result["playerPolicy"] = {
         "soloNeural": args.player_neural_model,
         "versusValue": args.player_versus_value_model,
@@ -229,6 +243,7 @@ def _selfplay(args) -> int:
             seed_step=args.seed_step,
             garbage_cap=args.garbage_cap,
             search_config=_search_config(args),
+            game_batch=args.game_batch,
         ),
         heuristic_weights=weights,
         value_scorer=value,

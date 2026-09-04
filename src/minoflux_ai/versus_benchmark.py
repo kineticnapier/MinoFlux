@@ -10,8 +10,11 @@ from .progress import progress_bar
 from .search import SearchScorer, apply_search_action
 from .versus_search import (
     DEFAULT_VERSUS_SEARCH_CONFIG,
+    SideName,
     VersusSearchConfig,
+    VersusSearchRequest,
     VersusStateScorer,
+    choose_versus_actions_batch,
     choose_versus_action,
 )
 
@@ -60,13 +63,13 @@ class VersusBenchmarkResult:
     ai_mean_attack: float
     player_mean_sent: float
     ai_mean_sent: float
-    player_mean_canceled: float
-    ai_mean_canceled: float
-    player_mean_received: float
-    ai_mean_received: float
-    player_mean_pieces: float
-    ai_mean_pieces: float
-    per_game: tuple[VersusGameResult, ...]
+    player_mean_canceled: float = 0.0
+    ai_mean_canceled: float = 0.0
+    player_mean_received: float = 0.0
+    ai_mean_received: float = 0.0
+    player_mean_pieces: float = 0.0
+    ai_mean_pieces: float = 0.0
+    per_game: tuple[VersusGameResult, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         player_pieces = max(1.0, sum(item.player_pieces for item in self.per_game))
@@ -230,6 +233,223 @@ def _remap_swapped_result(result: VersusGameResult) -> VersusGameResult:
     )
 
 
+@dataclass(slots=True)
+class _BatchedVersusGame:
+    index: int
+    seed: int
+    swapped: bool
+    match: VersusMatch
+    turn_side: SideName = "player"
+    turns: int = 0
+    player_max_b2b: int = 0
+    ai_max_b2b: int = 0
+    player_max_surge: int = 0
+    ai_max_surge: int = 0
+
+
+def _batched_game_result(game: _BatchedVersusGame) -> VersusGameResult:
+    match = game.match
+    player_board = extract_board_features(match.player.game.board)
+    ai_board = extract_board_features(match.ai.game.board)
+    physical = VersusGameResult(
+        seed=game.seed,
+        winner=match.winner or "draw",
+        turns=game.turns,
+        player_pieces=match.player.game.pieces_placed,
+        ai_pieces=match.ai.game.pieces_placed,
+        player_attack=match.player.game.attack,
+        ai_attack=match.ai.game.attack,
+        player_sent=match.player.sent,
+        ai_sent=match.ai.sent,
+        player_canceled=match.player.canceled,
+        ai_canceled=match.ai.canceled,
+        player_received=match.player.received,
+        ai_received=match.ai.received,
+        player_garbage_applied=match.player.garbage_applied,
+        ai_garbage_applied=match.ai.garbage_applied,
+        player_pending=match.player.pending.pending_lines,
+        ai_pending=match.ai.pending.pending_lines,
+        player_final_height=player_board.max_height,
+        ai_final_height=ai_board.max_height,
+        player_final_holes=player_board.holes,
+        ai_final_holes=ai_board.holes,
+        player_max_b2b=game.player_max_b2b,
+        ai_max_b2b=game.ai_max_b2b,
+        player_max_surge=game.player_max_surge,
+        ai_max_surge=game.ai_max_surge,
+    )
+    return _remap_swapped_result(physical) if game.swapped else physical
+
+
+def _summarize_benchmark(
+    results: tuple[VersusGameResult, ...],
+    *,
+    max_turns: int,
+    seed_base: int,
+    seed_step: int,
+) -> VersusBenchmarkResult:
+    count = len(results)
+    return VersusBenchmarkResult(
+        games=count,
+        max_turns=max(1, int(max_turns)),
+        seed_base=int(seed_base),
+        seed_step=int(seed_step),
+        player_wins=sum(item.winner == "player" for item in results),
+        ai_wins=sum(item.winner == "ai" for item in results),
+        draws=sum(item.winner == "draw" for item in results),
+        mean_turns=sum(item.turns for item in results) / count,
+        player_mean_attack=sum(item.player_attack for item in results) / count,
+        ai_mean_attack=sum(item.ai_attack for item in results) / count,
+        player_mean_sent=sum(item.player_sent for item in results) / count,
+        ai_mean_sent=sum(item.ai_sent for item in results) / count,
+        player_mean_canceled=sum(item.player_canceled for item in results) / count,
+        ai_mean_canceled=sum(item.ai_canceled for item in results) / count,
+        player_mean_received=sum(item.player_received for item in results) / count,
+        ai_mean_received=sum(item.ai_received for item in results) / count,
+        player_mean_pieces=sum(item.player_pieces for item in results) / count,
+        ai_mean_pieces=sum(item.ai_pieces for item in results) / count,
+        per_game=results,
+    )
+
+
+def _run_versus_benchmark_batched(
+    count: int,
+    *,
+    game_batch: int,
+    max_turns: int,
+    seed_base: int,
+    seed_step: int,
+    player_weights: HeuristicWeights,
+    ai_weights: HeuristicWeights,
+    player_config: VersusSearchConfig,
+    ai_config: VersusSearchConfig,
+    garbage_cap: int,
+    player_scorer: SearchScorer | None,
+    ai_scorer: SearchScorer | None,
+    player_state_scorer: VersusStateScorer | None,
+    ai_state_scorer: VersusStateScorer | None,
+    progress: bool,
+) -> VersusBenchmarkResult:
+    limit = max(1, int(max_turns))
+    batch_size = max(1, int(game_batch))
+    results: list[VersusGameResult | None] = [None] * count
+    active: list[_BatchedVersusGame] = []
+    next_index = 0
+    completed = 0
+    game_bar = progress_bar(
+        total=count,
+        desc="Benchmark",
+        unit="game",
+        disable=not progress,
+    )
+
+    def refill() -> None:
+        nonlocal next_index
+        while len(active) < batch_size and next_index < count:
+            index = next_index
+            seed = int(seed_base) + (index // 2) * int(seed_step)
+            active.append(
+                _BatchedVersusGame(
+                    index=index,
+                    seed=seed,
+                    swapped=index % 2 == 1,
+                    match=VersusMatch(seed, garbage_cap=garbage_cap),
+                )
+            )
+            next_index += 1
+
+    try:
+        refill()
+        while active:
+            requests: list[VersusSearchRequest] = []
+            for game in active:
+                swapped = game.swapped
+                physical_player_weights = ai_weights if swapped else player_weights
+                physical_ai_weights = player_weights if swapped else ai_weights
+                physical_player_config = ai_config if swapped else player_config
+                physical_ai_config = player_config if swapped else ai_config
+                physical_player_scorer = ai_scorer if swapped else player_scorer
+                physical_ai_scorer = player_scorer if swapped else ai_scorer
+                physical_player_state = ai_state_scorer if swapped else player_state_scorer
+                physical_ai_state = player_state_scorer if swapped else ai_state_scorer
+                player_turn = game.turn_side == "player"
+                requests.append(
+                    VersusSearchRequest(
+                        match=game.match,
+                        side_name=game.turn_side,
+                        heuristic_weights=(
+                            physical_player_weights if player_turn else physical_ai_weights
+                        ),
+                        config=physical_player_config if player_turn else physical_ai_config,
+                        scorer=physical_player_scorer if player_turn else physical_ai_scorer,
+                        opponent_scorer=(
+                            physical_ai_scorer if player_turn else physical_player_scorer
+                        ),
+                        opponent_heuristic_weights=(
+                            physical_ai_weights if player_turn else physical_player_weights
+                        ),
+                        state_scorer=physical_player_state if player_turn else physical_ai_state,
+                    )
+                )
+
+            choices = choose_versus_actions_batch(tuple(requests))
+            finished: list[_BatchedVersusGame] = []
+            for game, choice in zip(active, choices):
+                if choice is None:
+                    game.match.side(game.turn_side).game.game_over = True
+                    game.match._update_winner()
+                else:
+                    side = game.match.side(game.turn_side)
+                    result = apply_search_action(side.game, choice.action)
+                    game.match.resolve_lock(game.turn_side, result)
+                    game.turns += 1
+                    game.player_max_b2b = max(
+                        game.player_max_b2b, game.match.player.game.b2b_chain
+                    )
+                    game.ai_max_b2b = max(game.ai_max_b2b, game.match.ai.game.b2b_chain)
+                    game.player_max_surge = max(
+                        game.player_max_surge, game.match.player.game.surge_charge
+                    )
+                    game.ai_max_surge = max(
+                        game.ai_max_surge, game.match.ai.game.surge_charge
+                    )
+                    game.turn_side = "ai" if game.turn_side == "player" else "player"
+                if game.match.winner is not None or game.turns >= limit:
+                    finished.append(game)
+
+            if finished:
+                finished_ids = {id(game) for game in finished}
+                active[:] = [game for game in active if id(game) not in finished_ids]
+                for game in finished:
+                    logical = _batched_game_result(game)
+                    results[game.index] = logical
+                    completed += 1
+                    game_bar.update(1)
+                    completed_results = [item for item in results if item is not None]
+                    player_wins = sum(item.winner == "player" for item in completed_results)
+                    ai_wins = sum(item.winner == "ai" for item in completed_results)
+                    draws = len(completed_results) - player_wins - ai_wins
+                    game_bar.set_postfix(
+                        P=player_wins,
+                        A=ai_wins,
+                        D=draws,
+                        turns=logical.turns,
+                        active=len(active),
+                    )
+                refill()
+    finally:
+        game_bar.close()
+
+    if completed != count or any(item is None for item in results):
+        raise AssertionError("Batched versus benchmark did not finish every game")
+    return _summarize_benchmark(
+        tuple(item for item in results if item is not None),
+        max_turns=limit,
+        seed_base=seed_base,
+        seed_step=seed_step,
+    )
+
+
 def run_versus_benchmark(
     games: int = 10,
     *,
@@ -246,8 +466,27 @@ def run_versus_benchmark(
     player_state_scorer: VersusStateScorer | None = None,
     ai_state_scorer: VersusStateScorer | None = None,
     progress: bool = False,
+    game_batch: int = 1,
 ) -> VersusBenchmarkResult:
     count = max(1, int(games))
+    if int(game_batch) > 1:
+        return _run_versus_benchmark_batched(
+            count,
+            game_batch=game_batch,
+            max_turns=max_turns,
+            seed_base=seed_base,
+            seed_step=seed_step,
+            player_weights=player_weights,
+            ai_weights=ai_weights,
+            player_config=player_config,
+            ai_config=ai_config,
+            garbage_cap=garbage_cap,
+            player_scorer=player_scorer,
+            ai_scorer=ai_scorer,
+            player_state_scorer=player_state_scorer,
+            ai_state_scorer=ai_state_scorer,
+            progress=progress,
+        )
     results: list[VersusGameResult] = []
     game_bar = progress_bar(
         range(count),
@@ -284,25 +523,9 @@ def run_versus_benchmark(
             game_bar.set_postfix(P=player_wins, A=ai_wins, D=draws, turns=logical.turns)
     game_bar.close()
 
-    result_tuple = tuple(results)
-    return VersusBenchmarkResult(
-        games=count,
-        max_turns=max(1, int(max_turns)),
-        seed_base=int(seed_base),
-        seed_step=int(seed_step),
-        player_wins=sum(item.winner == "player" for item in result_tuple),
-        ai_wins=sum(item.winner == "ai" for item in result_tuple),
-        draws=sum(item.winner == "draw" for item in result_tuple),
-        mean_turns=sum(item.turns for item in result_tuple) / count,
-        player_mean_attack=sum(item.player_attack for item in result_tuple) / count,
-        ai_mean_attack=sum(item.ai_attack for item in result_tuple) / count,
-        player_mean_sent=sum(item.player_sent for item in result_tuple) / count,
-        ai_mean_sent=sum(item.ai_sent for item in result_tuple) / count,
-        player_mean_canceled=sum(item.player_canceled for item in result_tuple) / count,
-        ai_mean_canceled=sum(item.ai_canceled for item in result_tuple) / count,
-        player_mean_received=sum(item.player_received for item in result_tuple) / count,
-        ai_mean_received=sum(item.ai_received for item in result_tuple) / count,
-        player_mean_pieces=sum(item.player_pieces for item in result_tuple) / count,
-        ai_mean_pieces=sum(item.ai_pieces for item in result_tuple) / count,
-        per_game=result_tuple,
+    return _summarize_benchmark(
+        tuple(results),
+        max_turns=max_turns,
+        seed_base=seed_base,
+        seed_step=seed_step,
     )

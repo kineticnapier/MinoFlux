@@ -5,12 +5,15 @@ import unittest
 from minoflux_ai import (
     SearchConfig,
     VersusSearchConfig,
+    apply_search_action,
     choose_versus_action,
     clone_versus_match,
     run_versus_benchmark,
 )
 from minoflux_ai.features import extract_board_features, max_height_and_holes
 from minoflux_engine import VersusMatch
+from minoflux_ai.search import rank_search_actions
+from minoflux_ai.versus_search import _simulate_action
 
 
 class _CountingScorer:
@@ -102,6 +105,33 @@ class VersusSearchTests(unittest.TestCase):
         self.assertEqual(match.ai.pending.pending_lines, before_pending)
         assert choice is not None
         self.assertEqual(choice.action.placement.piece, match.ai.game.current)
+
+    def test_one_side_simulation_matches_full_clone(self) -> None:
+        match = VersusMatch(1701)
+        match.player.pending.enqueue(3, 4)
+        before_player = match.player.game.snapshot()
+        before_ai = match.ai.game.snapshot()
+        ranked = rank_search_actions(
+            match.player.game,
+            config=self.config.placement_search,
+            limit=1,
+        )
+        self.assertTrue(ranked)
+        action = ranked[0][0]
+
+        expected = clone_versus_match(match)
+        expected_lock = apply_search_action(expected.player.game, action)
+        expected_resolution = expected.resolve_lock("player", expected_lock)
+        actual, actual_resolution = _simulate_action(match, "player", action)
+
+        self.assertEqual(actual_resolution, expected_resolution)
+        self.assertEqual(actual.player.game.snapshot(), expected.player.game.snapshot())
+        self.assertEqual(actual.ai.game.snapshot(), expected.ai.game.snapshot())
+        self.assertEqual(tuple(actual.player.pending.packets), tuple(expected.player.pending.packets))
+        self.assertEqual(tuple(actual.ai.pending.packets), tuple(expected.ai.pending.packets))
+        self.assertEqual(actual._garbage_rng.getstate(), expected._garbage_rng.getstate())
+        self.assertEqual(match.player.game.snapshot(), before_player)
+        self.assertEqual(match.ai.game.snapshot(), before_ai)
 
     def test_neural_scorer_is_used_for_root_and_reply_candidates(self) -> None:
         match = VersusMatch(71)

@@ -12,6 +12,7 @@ from minoflux_engine import VersusMatch
 
 from .bitboard import ROW_OCCUPANCY_BYTES, board_row_masks
 from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights
+from .progress import progress_bar
 from .search import SearchScorer, apply_search_action
 from .versus_search import (
     DEFAULT_VERSUS_SEARCH_CONFIG,
@@ -20,7 +21,8 @@ from .versus_search import (
     VersusSearchConfig,
     VersusStateScorer,
     VersusWeights,
-    choose_versus_action,
+    VersusSearchRequest,
+    choose_versus_actions_batch,
     score_versus_state,
 )
 
@@ -142,6 +144,7 @@ class VersusSelfPlayConfig:
     seed_step: int = 31
     garbage_cap: int = 8
     search_config: VersusSearchConfig = DEFAULT_VERSUS_SEARCH_CONFIG
+    game_batch: int = 1
 
 
 def _clip01(value: float) -> float:
@@ -412,6 +415,39 @@ def generate_versus_selfplay_dataset(
     value_scorer: VersusStateScorer | None = None,
     value_config: VersusValueConfig = VersusValueConfig(),
 ) -> dict[str, object]:
+    return _generate_versus_selfplay_dataset_impl(
+        path,
+        solo_scorer,
+        config,
+        heuristic_weights=heuristic_weights,
+        versus_weights=versus_weights,
+        value_scorer=value_scorer,
+        value_config=value_config,
+        progress=False,
+    )
+
+
+@dataclass(slots=True)
+class _SelfPlayGame:
+    index: int
+    seed: int
+    match: VersusMatch
+    turn_side: SideName
+    pending_records: list[tuple[dict[str, object], SideName]]
+    turns: int = 0
+
+
+def _generate_versus_selfplay_dataset_impl(
+    path: str | Path,
+    solo_scorer: SearchScorer,
+    config: VersusSelfPlayConfig = VersusSelfPlayConfig(),
+    *,
+    heuristic_weights: HeuristicWeights = DEFAULT_WEIGHTS,
+    versus_weights: VersusWeights = DEFAULT_VERSUS_WEIGHTS,
+    value_scorer: VersusStateScorer | None = None,
+    value_config: VersusValueConfig = VersusValueConfig(),
+    progress: bool = False,
+) -> dict[str, object]:
     cfg = VersusSelfPlayConfig(
         games=max(1, int(config.games)),
         max_turns=max(1, int(config.max_turns)),
@@ -419,6 +455,7 @@ def generate_versus_selfplay_dataset(
         seed_step=int(config.seed_step),
         garbage_cap=max(1, int(config.garbage_cap)),
         search_config=config.search_config.normalized(),
+        game_batch=max(1, int(config.game_batch)),
     )
     value_cfg = value_config.normalized()
     target = Path(path)
@@ -427,79 +464,155 @@ def generate_versus_selfplay_dataset(
     wins = {"player": 0, "ai": 0, "draw": 0}
     total_turns = 0
 
-    with target.open("w", encoding="utf-8", newline="\n") as handle:
-        for game_index in range(cfg.games):
+    active: list[_SelfPlayGame] = []
+    completed_records: dict[int, list[tuple[dict[str, object], SideName]]] = {}
+    next_index = 0
+    next_write_index = 0
+    game_bar = progress_bar(
+        total=cfg.games,
+        desc="Self-play",
+        unit="game",
+        disable=not progress,
+    )
+
+    def refill() -> None:
+        nonlocal next_index
+        while len(active) < cfg.game_batch and next_index < cfg.games:
+            game_index = next_index
             seed = cfg.seed_base + game_index * cfg.seed_step
-            match = VersusMatch(seed, garbage_cap=cfg.garbage_cap)
-            turn_side: SideName = "player" if game_index % 2 == 0 else "ai"
-            pending_records: list[tuple[dict[str, object], SideName]] = []
-            turns = 0
-            while match.winner is None and turns < cfg.max_turns:
-                for perspective in ("player", "ai"):
-                    state = encode_versus_state(match, perspective, value_cfg, turn_side)
-                    teacher_raw = score_versus_state(match, perspective, weights=versus_weights)
-                    teacher_value = math.tanh(teacher_raw / 64.0)
-                    pending_records.append(
-                        (
-                            _state_record(
-                                state,
-                                game_index=game_index,
-                                ply=turns,
-                                side=perspective,
-                                seed=seed,
-                                to_move=turn_side,
-                                teacher_value=teacher_value,
-                            ),
+            active.append(
+                _SelfPlayGame(
+                    index=game_index,
+                    seed=seed,
+                    match=VersusMatch(seed, garbage_cap=cfg.garbage_cap),
+                    turn_side="player" if game_index % 2 == 0 else "ai",
+                    pending_records=[],
+                )
+            )
+            next_index += 1
+
+    try:
+        with target.open("w", encoding="utf-8", newline="\n") as handle:
+            refill()
+            while active:
+                requests: list[VersusSearchRequest] = []
+                for game in active:
+                    for perspective in ("player", "ai"):
+                        state = encode_versus_state(
+                            game.match,
                             perspective,
+                            value_cfg,
+                            game.turn_side,
+                        )
+                        teacher_raw = score_versus_state(
+                            game.match,
+                            perspective,
+                            weights=versus_weights,
+                        )
+                        game.pending_records.append(
+                            (
+                                _state_record(
+                                    state,
+                                    game_index=game.index,
+                                    ply=game.turns,
+                                    side=perspective,
+                                    seed=game.seed,
+                                    to_move=game.turn_side,
+                                    teacher_value=math.tanh(teacher_raw / 64.0),
+                                ),
+                                perspective,
+                            )
+                        )
+                    requests.append(
+                        VersusSearchRequest(
+                            match=game.match,
+                            side_name=game.turn_side,
+                            heuristic_weights=heuristic_weights,
+                            config=cfg.search_config,
+                            versus_weights=versus_weights,
+                            scorer=solo_scorer,
+                            opponent_scorer=solo_scorer,
+                            opponent_heuristic_weights=heuristic_weights,
+                            state_scorer=value_scorer,
                         )
                     )
-                choice = choose_versus_action(
-                    match,
-                    turn_side,
-                    heuristic_weights,
-                    cfg.search_config,
-                    versus_weights,
-                    scorer=solo_scorer,
-                    opponent_scorer=solo_scorer,
-                    opponent_heuristic_weights=heuristic_weights,
-                    state_scorer=value_scorer,
-                )
-                if choice is None:
-                    match.side(turn_side).game.game_over = True
-                    match._update_winner()
-                    break
-                result = apply_search_action(match.side(turn_side).game, choice.action)
-                match.resolve_lock(turn_side, result)
-                turns += 1
-                turn_side = "ai" if turn_side == "player" else "player"
 
-            winner = match.winner or "draw"
-            wins[winner] += 1
-            total_turns += turns
+                choices = choose_versus_actions_batch(tuple(requests))
+                finished: list[_SelfPlayGame] = []
+                for game, choice in zip(active, choices):
+                    if choice is None:
+                        game.match.side(game.turn_side).game.game_over = True
+                        game.match._update_winner()
+                    else:
+                        result = apply_search_action(
+                            game.match.side(game.turn_side).game,
+                            choice.action,
+                        )
+                        game.match.resolve_lock(game.turn_side, result)
+                        game.turns += 1
+                        game.turn_side = "ai" if game.turn_side == "player" else "player"
+                    if game.match.winner is not None or game.turns >= cfg.max_turns:
+                        finished.append(game)
 
-            for perspective in ("player", "ai"):
-                terminal_state = encode_versus_state(match, perspective, value_cfg, None)
-                terminal_target = _outcome(winner, perspective)
-                pending_records.append(
-                    (
-                        _state_record(
-                            terminal_state,
-                            game_index=game_index,
-                            ply=turns,
-                            side=perspective,
-                            seed=seed,
-                            to_move=None,
-                            teacher_value=terminal_target,
-                            terminal=True,
-                        ),
-                        perspective,
+                if not finished:
+                    continue
+                finished_ids = {id(game) for game in finished}
+                active[:] = [game for game in active if id(game) not in finished_ids]
+                for game in finished:
+                    winner = game.match.winner or "draw"
+                    wins[winner] += 1
+                    total_turns += game.turns
+                    for perspective in ("player", "ai"):
+                        terminal_state = encode_versus_state(
+                            game.match,
+                            perspective,
+                            value_cfg,
+                            None,
+                        )
+                        terminal_target = _outcome(winner, perspective)
+                        game.pending_records.append(
+                            (
+                                _state_record(
+                                    terminal_state,
+                                    game_index=game.index,
+                                    ply=game.turns,
+                                    side=perspective,
+                                    seed=game.seed,
+                                    to_move=None,
+                                    teacher_value=terminal_target,
+                                    terminal=True,
+                                ),
+                                perspective,
+                            )
+                        )
+                    for record, perspective in game.pending_records:
+                        record["outcome"] = _outcome(winner, perspective)
+                    completed_records[game.index] = game.pending_records
+                    game_bar.update(1)
+                    game_bar.set_postfix(
+                        P=wins["player"],
+                        A=wins["ai"],
+                        D=wins["draw"],
+                        turns=game.turns,
+                        records=total_records,
+                        active=len(active),
                     )
-                )
 
-            for record, perspective in pending_records:
-                record["outcome"] = _outcome(winner, perspective)
-                handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-                total_records += 1
+                while next_write_index in completed_records:
+                    records = completed_records.pop(next_write_index)
+                    for record, _perspective in records:
+                        handle.write(
+                            json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+                            + "\n"
+                        )
+                        total_records += 1
+                    next_write_index += 1
+                refill()
+    finally:
+        game_bar.close()
+
+    if next_write_index != cfg.games:
+        raise AssertionError("Batched versus self-play did not write every game")
 
     return {
         "format": VERSUS_SELFPLAY_FORMAT,
@@ -510,6 +623,7 @@ def generate_versus_selfplay_dataset(
         "aiWins": wins["ai"],
         "draws": wins["draw"],
         "meanTurns": total_turns / cfg.games,
+        "gameBatch": cfg.game_batch,
         "searchConfig": cfg.search_config.to_dict(),
         "valueConfig": asdict(value_cfg),
     }

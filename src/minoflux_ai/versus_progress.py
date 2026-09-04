@@ -8,33 +8,26 @@ from pathlib import Path
 import random
 from typing import Any, Mapping, Sequence
 
-from minoflux_engine import VersusMatch
-
 from .bitboard import ROW_OCCUPANCY_BYTES
 from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights
 from .progress import progress_bar
-from .search import SearchScorer, apply_search_action
+from .search import SearchScorer
 from .versus_neural import (
     VERSUS_SELFPLAY_FORMAT,
     VERSUS_VALUE_FORMAT,
     VersusSelfPlayConfig,
     VersusTrainConfig,
     VersusValueConfig,
-    _outcome,
+    _generate_versus_selfplay_dataset_impl,
     _require_torch,
     _resolve_device,
-    _state_record,
     build_versus_value_model,
-    encode_versus_state,
     save_versus_value_checkpoint,
 )
 from .versus_search import (
     DEFAULT_VERSUS_WEIGHTS,
-    SideName,
     VersusStateScorer,
     VersusWeights,
-    choose_versus_action,
-    score_versus_state,
 )
 
 
@@ -48,128 +41,16 @@ def generate_versus_selfplay_dataset_progress(
     value_scorer: VersusStateScorer | None = None,
     value_config: VersusValueConfig = VersusValueConfig(),
 ) -> dict[str, object]:
-    cfg = VersusSelfPlayConfig(
-        games=max(1, int(config.games)),
-        max_turns=max(1, int(config.max_turns)),
-        seed_base=int(config.seed_base),
-        seed_step=int(config.seed_step),
-        garbage_cap=max(1, int(config.garbage_cap)),
-        search_config=config.search_config.normalized(),
+    return _generate_versus_selfplay_dataset_impl(
+        path,
+        solo_scorer,
+        config,
+        heuristic_weights=heuristic_weights,
+        versus_weights=versus_weights,
+        value_scorer=value_scorer,
+        value_config=value_config,
+        progress=True,
     )
-    value_cfg = value_config.normalized()
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    total_records = 0
-    wins = {"player": 0, "ai": 0, "draw": 0}
-    total_turns = 0
-
-    game_bar = progress_bar(range(cfg.games), total=cfg.games, desc="Self-play", unit="game")
-    with target.open("w", encoding="utf-8", newline="\n") as handle:
-        for game_index in game_bar:
-            seed = cfg.seed_base + game_index * cfg.seed_step
-            match = VersusMatch(seed, garbage_cap=cfg.garbage_cap)
-            turn_side: SideName = "player" if game_index % 2 == 0 else "ai"
-            pending_records: list[tuple[dict[str, object], SideName]] = []
-            turns = 0
-            turn_bar = progress_bar(
-                total=cfg.max_turns,
-                desc=f"Game {game_index + 1}/{cfg.games}",
-                unit="ply",
-                leave=False,
-            )
-            try:
-                while match.winner is None and turns < cfg.max_turns:
-                    for perspective in ("player", "ai"):
-                        state = encode_versus_state(match, perspective, value_cfg, turn_side)
-                        teacher_raw = score_versus_state(match, perspective, weights=versus_weights)
-                        teacher_value = math.tanh(teacher_raw / 64.0)
-                        pending_records.append(
-                            (
-                                _state_record(
-                                    state,
-                                    game_index=game_index,
-                                    ply=turns,
-                                    side=perspective,
-                                    seed=seed,
-                                    to_move=turn_side,
-                                    teacher_value=teacher_value,
-                                ),
-                                perspective,
-                            )
-                        )
-                    choice = choose_versus_action(
-                        match,
-                        turn_side,
-                        heuristic_weights,
-                        cfg.search_config,
-                        versus_weights,
-                        scorer=solo_scorer,
-                        opponent_scorer=solo_scorer,
-                        opponent_heuristic_weights=heuristic_weights,
-                        state_scorer=value_scorer,
-                    )
-                    if choice is None:
-                        match.side(turn_side).game.game_over = True
-                        match._update_winner()
-                        break
-                    result = apply_search_action(match.side(turn_side).game, choice.action)
-                    match.resolve_lock(turn_side, result)
-                    turns += 1
-                    turn_bar.update(1)
-                    if turns % 8 == 0:
-                        turn_bar.set_postfix(sentP=match.player.sent, sentA=match.ai.sent)
-                    turn_side = "ai" if turn_side == "player" else "player"
-            finally:
-                turn_bar.close()
-
-            winner = match.winner or "draw"
-            wins[winner] += 1
-            total_turns += turns
-
-            for perspective in ("player", "ai"):
-                terminal_state = encode_versus_state(match, perspective, value_cfg, None)
-                terminal_target = _outcome(winner, perspective)
-                pending_records.append(
-                    (
-                        _state_record(
-                            terminal_state,
-                            game_index=game_index,
-                            ply=turns,
-                            side=perspective,
-                            seed=seed,
-                            to_move=None,
-                            teacher_value=terminal_target,
-                            terminal=True,
-                        ),
-                        perspective,
-                    )
-                )
-
-            for record, perspective in pending_records:
-                record["outcome"] = _outcome(winner, perspective)
-                handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-                total_records += 1
-            game_bar.set_postfix(
-                P=wins["player"],
-                A=wins["ai"],
-                D=wins["draw"],
-                turns=turns,
-                records=total_records,
-            )
-    game_bar.close()
-
-    return {
-        "format": VERSUS_SELFPLAY_FORMAT,
-        "path": str(target),
-        "games": cfg.games,
-        "records": total_records,
-        "playerWins": wins["player"],
-        "aiWins": wins["ai"],
-        "draws": wins["draw"],
-        "meanTurns": total_turns / cfg.games,
-        "searchConfig": cfg.search_config.to_dict(),
-        "valueConfig": asdict(value_cfg),
-    }
 
 
 def _load_selfplay_records_progress(path: str | Path) -> list[dict[str, object]]:
