@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d12">
+  <title>MinoFlux Remote</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d12;
+      --panel: #141821;
+      --panel2: #1a202b;
+      --text: #f5f7fb;
+      --muted: #9aa6b6;
+      --line: #2a3342;
+      --accent: #7aa2ff;
+      --good: #52d273;
+      --warn: #f0b84b;
+      --bad: #ff6b6b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      width: min(880px, 100%);
+      margin: 0 auto;
+      padding: max(18px, env(safe-area-inset-top)) 16px max(28px, env(safe-area-inset-bottom));
+    }
+    h1 { margin: 0 0 4px; font-size: 26px; }
+    h2 { font-size: 16px; margin: 0 0 12px; }
+    p { margin: 0; }
+    .sub { color: var(--muted); margin-bottom: 18px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      margin-bottom: 14px;
+    }
+    .status-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .state-wrap { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--muted); flex: none;
+      box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 14%, transparent);
+    }
+    .dot.good { background: var(--good); }
+    .dot.warn { background: var(--warn); }
+    .dot.bad { background: var(--bad); }
+    #state { font-weight: 700; }
+    #updated { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .meta {
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      gap: 6px 10px;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+    .meta strong { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+    pre {
+      margin: 0;
+      max-height: 260px;
+      overflow: auto;
+      padding: 12px;
+      background: #090b0f;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      color: #d8e0ec;
+      font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    button, .linkbtn {
+      appearance: none;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel2);
+      color: var(--text);
+      padding: 13px 12px;
+      font: inherit;
+      font-weight: 700;
+      text-align: left;
+      text-decoration: none;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+    button:active, .linkbtn:active { transform: scale(.99); }
+    button small {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-weight: 400;
+    }
+    button.danger { border-color: color-mix(in srgb, var(--bad) 55%, var(--line)); }
+    .hint {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .row { display: flex; gap: 10px; margin-top: 10px; }
+    .row .linkbtn { text-align: center; }
+    @media (max-width: 560px) {
+      .grid { grid-template-columns: 1fr; }
+      .meta { grid-template-columns: 88px 1fr; }
+      h1 { font-size: 23px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>MinoFlux Remote</h1>
+  <p class="sub">GitHub経由で家PCの学習・評価を操作</p>
+
+  <section class="panel">
+    <div class="status-head">
+      <div class="state-wrap">
+        <span id="dot" class="dot"></span>
+        <span id="state">loading...</span>
+      </div>
+      <span id="updated">--</span>
+    </div>
+    <div class="meta">
+      <span>command</span><strong id="command">--</strong>
+      <span>message</span><strong id="message">--</strong>
+      <span>issue</span><strong id="issue">--</strong>
+    </div>
+    <pre id="log">statusを取得中...</pre>
+  </section>
+
+  <section class="panel">
+    <h2>操作</h2>
+    <div class="grid">
+      <button data-command="train-v1">
+        Train v1
+        <small>既存のselfplay-v1からVersus Value v1を学習</small>
+      </button>
+      <button data-command="benchmark-v1-20">
+        Benchmark v1 × 20
+        <small>Value v1 vs Neural-only</small>
+      </button>
+      <button data-command="selfplay-v2-50">
+        Self-play v2 × 50
+        <small>Value v1を使って次世代データを生成</small>
+      </button>
+      <button data-command="train-v2">
+        Train v2
+        <small>v1からresumeしてv2を学習</small>
+      </button>
+      <button data-command="benchmark-v2-20">
+        Benchmark v2 × 20
+        <small>Value v2 vs Value v1</small>
+      </button>
+      <button class="danger" data-command="stop">
+        Stop
+        <small>実行中のMinoFlux remote taskを停止</small>
+      </button>
+    </div>
+    <p class="hint">
+      ボタンを押すとGitHubのIssue作成画面が開きます。タイトルを変更せず「Create new issue」を押すと指示が送られます。
+      家PC側はkineticnapier本人が作成した固定コマンドだけを受理します。
+    </p>
+    <div class="row">
+      <a class="linkbtn" href="https://github.com/kineticnapier/MinoFlux/issues" target="_blank" rel="noopener">Issues</a>
+      <a class="linkbtn" href="https://github.com/kineticnapier/MinoFlux/actions" target="_blank" rel="noopener">Actions</a>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const repo = "kineticnapier/MinoFlux";
+  const prefix = "[MinoFlux Remote] ";
+  const statusUrl = "https://raw.githubusercontent.com/kineticnapier/MinoFlux/remote-status/docs/remote/status.json";
+
+  const el = id => document.getElementById(id);
+  const dot = el("dot");
+  const state = el("state");
+  const updated = el("updated");
+  const command = el("command");
+  const message = el("message");
+  const issue = el("issue");
+  const log = el("log");
+
+  function issueUrl(cmd) {
+    const title = prefix + cmd;
+    const body = [
+      "MinoFlux remote command.",
+      "",
+      "Do not edit the title. The home agent only accepts exact whitelisted commands.",
+      "",
+      "Requested from the MinoFlux Remote dashboard."
+    ].join("\n");
+    return `https://github.com/${repo}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+  }
+
+  document.querySelectorAll("[data-command]").forEach(button => {
+    button.addEventListener("click", () => {
+      location.href = issueUrl(button.dataset.command);
+    });
+  });
+
+  function ageSeconds(iso) {
+    const t = Date.parse(iso || "");
+    if (!Number.isFinite(t)) return Infinity;
+    return Math.max(0, (Date.now() - t) / 1000);
+  }
+
+  function stateLabel(value, stale) {
+    if (stale) return "offline / stale";
+    const map = {
+      idle: "idle",
+      preparing: "preparing",
+      running: "running",
+      done: "done",
+      error: "error",
+      stopped: "stopped"
+    };
+    return map[value] || value || "unknown";
+  }
+
+  function paint(data) {
+    const stale = ageSeconds(data.updatedAt) > 150;
+    state.textContent = stateLabel(data.state, stale);
+    updated.textContent = data.updatedAt ? new Date(data.updatedAt).toLocaleString() : "--";
+    command.textContent = data.command || "--";
+    message.textContent = data.message || "--";
+    issue.textContent = data.issue ? `#${data.issue}` : "--";
+    log.textContent = Array.isArray(data.logTail) && data.logTail.length
+      ? data.logTail.join("\n")
+      : "(no log yet)";
+
+    dot.className = "dot";
+    if (stale || data.state === "error") dot.classList.add("bad");
+    else if (data.state === "running" || data.state === "preparing") dot.classList.add("warn");
+    else dot.classList.add("good");
+  }
+
+  async function refresh() {
+    try {
+      const response = await fetch(`${statusUrl}?t=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      paint(await response.json());
+    } catch (error) {
+      state.textContent = "status unavailable";
+      message.textContent = String(error);
+      dot.className = "dot bad";
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 10000);
+})();
+</script>
+</body>
+</html>
