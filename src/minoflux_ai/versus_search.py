@@ -4,7 +4,7 @@ from copy import copy
 from dataclasses import asdict, dataclass, field
 from typing import Literal, Protocol, Sequence
 
-from minoflux_engine import GarbagePacket, GarbageQueue, VersusMatch, VersusResolution, VersusSide
+from minoflux_engine import Game, GarbagePacket, GarbageQueue, Placement, VersusMatch, VersusResolution, VersusSide
 
 from .features import extract_board_features
 from .heuristic import DEFAULT_WEIGHTS, HeuristicWeights, PlacementEvaluation
@@ -13,6 +13,8 @@ from .search import (
     SearchAction,
     SearchConfig,
     SearchScorer,
+    _branch_groups,
+    _rank_precomputed_actions,
     apply_search_action,
     clone_game,
     rank_search_actions,
@@ -200,6 +202,69 @@ def _state_values(
     return tuple(float(scorer.score_match(match, root_side, to_move)) for match, root_side, to_move in entries)
 
 
+def _rank_search_actions_batch(
+    games: Sequence[Game],
+    weights: HeuristicWeights,
+    config: SearchConfig,
+    *,
+    limit: int,
+    scorer: SearchScorer | None,
+) -> tuple[tuple[tuple[SearchAction, PlacementEvaluation], ...], ...]:
+    """Rank immediate actions for many games with one grouped neural forward pass.
+
+    This preserves the existing per-game ranking semantics and falls back to the
+    serial path for heuristic or scorers that do not expose placement-group
+    batching.
+    """
+
+    cfg = config.normalized()
+    score_groups = getattr(scorer, "score_placement_groups", None) if scorer is not None else None
+    score_placements = getattr(scorer, "score_placements", None) if scorer is not None else None
+    if not callable(score_groups) or not callable(score_placements):
+        return tuple(
+            rank_search_actions(
+                game,
+                weights,
+                cfg,
+                limit=limit,
+                scorer=scorer,
+            )
+            for game in games
+        )
+
+    prepared: list[tuple[tuple[Placement, ...], Game | None, tuple[Placement, ...]]] = []
+    groups: list[tuple[Game, Sequence[Placement]]] = []
+    group_keys: list[tuple[int, bool]] = []
+    for index, game in enumerate(games):
+        direct, held, held_placements = _branch_groups(game, cfg, include_paths=True)
+        prepared.append((direct, held, held_placements))
+        if direct:
+            groups.append((game, direct))
+            group_keys.append((index, False))
+        if held is not None and held_placements:
+            groups.append((held, held_placements))
+            group_keys.append((index, True))
+
+    grouped_values = score_groups(tuple(groups)) if groups else ()
+    if len(grouped_values) != len(groups):
+        raise ValueError("Search scorer returned the wrong number of placement groups")
+    values_by_key = {
+        key: values
+        for key, values in zip(group_keys, grouped_values)
+    }
+
+    ranked_groups: list[tuple[tuple[SearchAction, PlacementEvaluation], ...]] = []
+    for index, game in enumerate(games):
+        direct, held, held_placements = prepared[index]
+        branches: list[tuple[bool, Game, Sequence[Placement], Sequence[float]]] = []
+        if direct:
+            branches.append((False, game, direct, values_by_key[(index, False)]))
+        if held is not None and held_placements:
+            branches.append((True, held, held_placements, values_by_key[(index, True)]))
+        ranked_groups.append(_rank_precomputed_actions(tuple(branches), limit))
+    return tuple(ranked_groups)
+
+
 def choose_versus_action(
     match: VersusMatch,
     side_name: SideName,
@@ -246,12 +311,8 @@ def choose_versus_action(
         tuple((after, side_name, opponent_name) for _action, _evaluation, after, _resolution in root_candidates),
     )
 
-    best: VersusChoice | None = None
-    for (action, evaluation, after, resolution), root_state_value in zip(
-        root_candidates,
-        root_state_values,
-    ):
-        base_score = score_versus_state(
+    base_scores = [
+        score_versus_state(
             after,
             side_name,
             weights=versus_weights,
@@ -261,60 +322,85 @@ def choose_versus_action(
             path_length=len(action.placement.path),
             action_side=side_name,
         )
-        reply_action: SearchAction | None = None
-        score = base_score
+        for (action, evaluation, after, resolution), root_state_value in zip(
+            root_candidates,
+            root_state_values,
+        )
+    ]
 
-        if (
-            cfg.opponent_reply_width > 0
-            and after.winner is None
-            and not _side(after, opponent_name).game.game_over
-        ):
-            replies = rank_search_actions(
-                _side(after, opponent_name).game,
-                reply_weights,
-                cfg.placement_search,
-                limit=cfg.opponent_reply_width,
-                scorer=reply_scorer,
+    reply_root_indices: list[int] = []
+    reply_games: list[Game] = []
+    if cfg.opponent_reply_width > 0:
+        for index, (_action, _evaluation, after, _resolution) in enumerate(root_candidates):
+            if after.winner is None and not _side(after, opponent_name).game.game_over:
+                reply_root_indices.append(index)
+                reply_games.append(_side(after, opponent_name).game)
+
+    replies_by_root: dict[int, tuple[tuple[SearchAction, PlacementEvaluation], ...]] = {}
+    if reply_games:
+        ranked_reply_groups = _rank_search_actions_batch(
+            tuple(reply_games),
+            reply_weights,
+            cfg.placement_search,
+            limit=cfg.opponent_reply_width,
+            scorer=reply_scorer,
+        )
+        replies_by_root = {
+            root_index: replies
+            for root_index, replies in zip(reply_root_indices, ranked_reply_groups)
+        }
+
+    flat_reply_candidates: list[
+        tuple[int, SearchAction, PlacementEvaluation, VersusMatch, VersusResolution]
+    ] = []
+    for root_index in reply_root_indices:
+        replies = replies_by_root.get(root_index, ())
+        if not replies:
+            continue
+        after = root_candidates[root_index][2]
+        for reply, reply_evaluation in replies:
+            replied, reply_resolution = _simulate_action(after, opponent_name, reply)
+            flat_reply_candidates.append(
+                (root_index, reply, reply_evaluation, replied, reply_resolution)
             )
-            if replies:
-                reply_candidates: list[
-                    tuple[SearchAction, PlacementEvaluation, VersusMatch, VersusResolution]
-                ] = []
-                for reply, reply_evaluation in replies:
-                    replied, reply_resolution = _simulate_action(after, opponent_name, reply)
-                    reply_candidates.append((reply, reply_evaluation, replied, reply_resolution))
-                reply_state_values = _state_values(
-                    state_scorer,
-                    tuple(
-                        (replied, side_name, side_name)
-                        for _reply, _reply_evaluation, replied, _reply_resolution in reply_candidates
-                    ),
-                )
-                worst_score: float | None = None
-                worst_action: SearchAction | None = None
-                for (
-                    reply,
-                    reply_evaluation,
-                    replied,
-                    reply_resolution,
-                ), reply_state_value in zip(reply_candidates, reply_state_values):
-                    reply_score = score_versus_state(
-                        replied,
-                        side_name,
-                        weights=versus_weights,
-                        resolution=reply_resolution,
-                        solo_score=-reply_evaluation.score,
-                        state_value=reply_state_value,
-                        path_length=len(reply.placement.path),
-                        action_side=opponent_name,
-                    )
-                    if worst_score is None or reply_score < worst_score:
-                        worst_score = reply_score
-                        worst_action = reply
-                if worst_score is not None:
-                    score = worst_score
-                    reply_action = worst_action
 
+    reply_state_values = _state_values(
+        state_scorer,
+        tuple(
+            (replied, side_name, side_name)
+            for _root_index, _reply, _reply_evaluation, replied, _reply_resolution in flat_reply_candidates
+        ),
+    )
+
+    worst_by_root: dict[int, tuple[float, SearchAction]] = {}
+    for (
+        root_index,
+        reply,
+        reply_evaluation,
+        replied,
+        reply_resolution,
+    ), reply_state_value in zip(flat_reply_candidates, reply_state_values):
+        reply_score = score_versus_state(
+            replied,
+            side_name,
+            weights=versus_weights,
+            resolution=reply_resolution,
+            solo_score=-reply_evaluation.score,
+            state_value=reply_state_value,
+            path_length=len(reply.placement.path),
+            action_side=opponent_name,
+        )
+        previous = worst_by_root.get(root_index)
+        if previous is None or reply_score < previous[0]:
+            worst_by_root[root_index] = (reply_score, reply)
+
+    best: VersusChoice | None = None
+    for index, ((action, evaluation, _after, resolution), base_score) in enumerate(
+        zip(root_candidates, base_scores)
+    ):
+        worst = worst_by_root.get(index)
+        score = base_score if worst is None else worst[0]
+        reply_action = None if worst is None else worst[1]
         choice = VersusChoice(
             action=action,
             score=score,
