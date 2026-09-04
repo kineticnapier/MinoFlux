@@ -436,6 +436,23 @@ def _idle_status(message: str = "Waiting for a command") -> dict[str, Any]:
     }
 
 
+def _heartbeat_status() -> None:
+    try:
+        _ensure_status_worktree()
+        target = STATUS_WORKTREE / STATUS_RELATIVE_PATH
+        if target.exists():
+            value = json.loads(target.read_text(encoding="utf-8"))
+        else:
+            value = _idle_status()
+        if not isinstance(value, dict):
+            value = _idle_status()
+        value["agentOnline"] = True
+        value["updatedAt"] = _iso_now()
+        _publish_status(value)
+    except Exception as error:
+        print(f"[remote] heartbeat failed: {error}", file=sys.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Poll GitHub Issues for fixed MinoFlux remote commands")
     parser.add_argument("--once", action="store_true", help="Poll once and exit when there is no command")
@@ -452,7 +469,7 @@ def main() -> int:
 
     while True:
         try:
-            pending = _pending_commands(state, include_stop=False)
+            pending = _pending_commands(state, include_stop=True)
             _save_state(state)
         except Exception as error:
             print(f"[remote] poll failed: {error}", file=sys.stderr)
@@ -466,12 +483,15 @@ def main() -> int:
             number, command, _issue = pending[0]
             _mark_seen(state, number)
             print(f"[remote] issue #{number}: {command}")
-            _execute(number, command, state, poll_seconds)
-            _publish_status(_idle_status(f"Last command finished: {command}"))
+            if command == STOP_COMMAND:
+                _publish_status(_idle_status("Stop requested, but no remote task is running"))
+            else:
+                _execute(number, command, state, poll_seconds)
             if args.once:
                 return 0
             continue
 
+        _heartbeat_status()
         if args.once:
             print("[remote] no pending command")
             return 0
