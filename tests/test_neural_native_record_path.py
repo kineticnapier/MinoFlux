@@ -78,6 +78,24 @@ def _record_buffers(game: Game, batch):
     )
 
 
+def _packed_record_buffers(game: Game, batch):
+    queue, normal, locked = _prefixes(game)
+    return _neural_native.encode_packed_record_group(
+        batch.rows or board_row_masks(game.board),
+        batch.packed,
+        game.current,
+        queue[0],
+        game.width,
+        game.height,
+        game.hidden_rows,
+        game.combo,
+        game.back_to_back,
+        game.b2b_chain,
+        normal,
+        locked,
+    )
+
+
 def _placement_buffers(game: Game, placements):
     queue, normal, locked = _prefixes(game)
     return _neural_native.encode_placement_group(
@@ -207,6 +225,10 @@ class NativeRecordPathTests(unittest.TestCase):
                 _record_buffers(game, raw_direct),
                 _placement_buffers(game, direct),
             )
+            self.assertEqual(
+                _packed_record_buffers(game, raw_direct),
+                _record_buffers(game, raw_direct),
+            )
             compared += len(direct)
             if held is not None and hold:
                 raw_hold = reachable_placement_records_native(held)
@@ -214,6 +236,10 @@ class NativeRecordPathTests(unittest.TestCase):
                 self.assertEqual(
                     _record_buffers(held, raw_hold),
                     _placement_buffers(held, hold),
+                )
+                self.assertEqual(
+                    _packed_record_buffers(held, raw_hold),
+                    _record_buffers(held, raw_hold),
                 )
                 compared += len(hold)
             if direct:

@@ -26,6 +26,8 @@ constexpr uint8_t kCollisionBlocked = 2;
 constexpr int kKickIndexBits = 3;
 constexpr int kKickIndexMask = (1 << kKickIndexBits) - 1;
 constexpr size_t kMaskBytes = 32;
+constexpr size_t kPlacementRecordInts = 7;
+constexpr size_t kPlacementRecordBytes = kPlacementRecordInts * sizeof(int32_t);
 
 struct Mask256 {
     std::array<uint64_t, 4> words{};
@@ -763,7 +765,7 @@ int register_table(
     return static_cast<int>(g_tables.size() - 1);
 }
 
-py::dict run(
+RunResult execute_run(
     int table_handle,
     const py::sequence& row_values,
     int start_x,
@@ -786,23 +788,12 @@ py::dict run(
         rows.push_back(py::cast<uint64_t>(value) & width_mask);
     }
 
-    RunResult native_result = profile
+    return profile
         ? run_native<true>(*table, rows, start_x, start_y, start_rotation, max_nodes)
         : run_native<false>(*table, rows, start_x, start_y, start_rotation, max_nodes);
+}
 
-    py::list placements;
-    for (const PlacementRecord& item : native_result.placements) {
-        placements.append(py::make_tuple(
-            item.x,
-            item.y,
-            item.rotation,
-            item.last_rotation,
-            item.kick_index,
-            item.rotation_from,
-            item.rotation_to
-        ));
-    }
-
+void add_run_metadata(py::dict& output, const RunResult& native_result) {
     py::dict counters;
     counters["bfsNodes"] = native_result.counters.bfs_nodes;
     counters["collisionChecks"] = native_result.counters.collision_checks;
@@ -822,10 +813,97 @@ py::dict run(
     timings["representativeSeconds"] = native_result.timings.representative_seconds;
     timings["placementSeconds"] = native_result.timings.placement_seconds;
 
-    py::dict output;
-    output["placements"] = placements;
     output["counters"] = counters;
     output["timings"] = timings;
+}
+
+void write_i32_le(char* dest, int32_t value) noexcept {
+    const uint32_t bits = static_cast<uint32_t>(value);
+    dest[0] = static_cast<char>(bits & 0xffU);
+    dest[1] = static_cast<char>((bits >> 8) & 0xffU);
+    dest[2] = static_cast<char>((bits >> 16) & 0xffU);
+    dest[3] = static_cast<char>((bits >> 24) & 0xffU);
+}
+
+py::dict run(
+    int table_handle,
+    const py::sequence& row_values,
+    int start_x,
+    int start_y,
+    int start_rotation,
+    int max_nodes,
+    bool profile
+) {
+    RunResult native_result = execute_run(
+        table_handle,
+        row_values,
+        start_x,
+        start_y,
+        start_rotation,
+        max_nodes,
+        profile
+    );
+
+    py::list placements;
+    for (const PlacementRecord& item : native_result.placements) {
+        placements.append(py::make_tuple(
+            item.x,
+            item.y,
+            item.rotation,
+            item.last_rotation,
+            item.kick_index,
+            item.rotation_from,
+            item.rotation_to
+        ));
+    }
+
+    py::dict output;
+    output["placements"] = placements;
+    add_run_metadata(output, native_result);
+    return output;
+}
+
+py::dict run_packed(
+    int table_handle,
+    const py::sequence& row_values,
+    int start_x,
+    int start_y,
+    int start_rotation,
+    int max_nodes,
+    bool profile
+) {
+    RunResult native_result = execute_run(
+        table_handle,
+        row_values,
+        start_x,
+        start_y,
+        start_rotation,
+        max_nodes,
+        profile
+    );
+
+    std::string packed(native_result.placements.size() * kPlacementRecordBytes, '\0');
+    char* dest = packed.data();
+    for (const PlacementRecord& item : native_result.placements) {
+        const std::array<int32_t, kPlacementRecordInts> fields = {
+            item.x,
+            item.y,
+            item.rotation,
+            item.last_rotation ? int32_t{1} : int32_t{0},
+            item.kick_index,
+            item.rotation_from,
+            item.rotation_to,
+        };
+        for (int32_t field : fields) {
+            write_i32_le(dest, field);
+            dest += sizeof(int32_t);
+        }
+    }
+
+    py::dict output;
+    output["placementsPacked"] = py::bytes(packed);
+    output["placementCount"] = native_result.placements.size();
+    add_run_metadata(output, native_result);
     return output;
 }
 
@@ -857,6 +935,17 @@ PYBIND11_MODULE(_reachability_native, module) {
     module.def(
         "run",
         &run,
+        py::arg("table_handle"),
+        py::arg("rows"),
+        py::arg("start_x"),
+        py::arg("start_y"),
+        py::arg("start_rotation"),
+        py::arg("max_nodes"),
+        py::arg("profile") = false
+    );
+    module.def(
+        "run_packed",
+        &run_packed,
         py::arg("table_handle"),
         py::arg("rows"),
         py::arg("start_x"),
