@@ -1,0 +1,132 @@
+name: Pathless BFS Long Compare
+
+on:
+  push:
+    branches:
+      - perf-pathless-bfs-20260905
+
+permissions:
+  contents: read
+
+jobs:
+  long-comparison:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout baseline
+        uses: actions/checkout@v4
+        with:
+          ref: 5c5c7fde2ee8002bc36e23b97dc20e2d74b47c70
+          path: baseline
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          ref: perf-pathless-bfs-20260905
+          path: candidate
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compare long deterministic exact-SRS run
+        shell: bash
+        run: |
+          cat > long_probe.py <<'PY'
+          from __future__ import annotations
+          import hashlib
+          import json
+          import time
+          from minoflux_ai.bitboard import board_row_masks, place_and_clear_row_masks
+          from minoflux_ai.features import max_height_and_holes_from_masks
+          from minoflux_ai.reachability import ReachabilityProfile, clear_reachability_cache, collect_reachability_profile
+          from minoflux_ai.search import SearchAction, SearchConfig, _branch_groups, apply_search_action
+          from minoflux_engine import Game
+
+          CFG = SearchConfig(allow_hold=True, lookahead_pieces=0, beam_width=4, srs_reachable=True, allow_180=False, reachability_node_limit=8000).normalized()
+
+          def payload(p):
+              return [p.piece, p.x, p.y, p.rotation, [list(c) for c in p.cells], p.last_move_was_rotation, p.rotation_kick_index, p.rotation_from, p.rotation_to]
+
+          def choose(branches):
+              best = None
+              best_key = None
+              for use_hold, game, placements in branches:
+                  if game is None:
+                      continue
+                  rows = board_row_masks(game.board)
+                  for order, p in enumerate(placements):
+                      after, lines, topped = place_and_clear_row_masks(rows, p, width=game.width)
+                      max_height, holes = max_height_and_holes_from_masks(after, width=game.width)
+                      key = (
+                          -int(topped),
+                          -holes,
+                          -max_height,
+                          lines,
+                          -int(use_hold),
+                          -order,
+                      )
+                      if best_key is None or key > best_key:
+                          best_key = key
+                          best = (use_hold, p)
+              return best
+
+          def run():
+              h = hashlib.sha256()
+              prof = ReachabilityProfile()
+              clear_reachability_cache()
+              started = time.perf_counter()
+              total_pieces = total_attack = topouts = completed = 0
+              with collect_reachability_profile(prof):
+                  for gi in range(20):
+                      seed = 8100001 + gi * 97
+                      game = Game(seed)
+                      for step in range(300):
+                          direct, held_game, held_ps = _branch_groups(game, CFG, include_paths=False)
+                          h.update(json.dumps([seed, step, False, [payload(p) for p in direct]], separators=(',', ':')).encode())
+                          h.update(b'\n')
+                          h.update(json.dumps([seed, step, True, [payload(p) for p in held_ps]], separators=(',', ':')).encode())
+                          h.update(b'\n')
+                          picked = choose(((False, game, direct), (True, held_game, held_ps)))
+                          if picked is None:
+                              break
+                          before_pieces = game.pieces_placed
+                          before_attack = game.attack
+                          apply_search_action(game, SearchAction(*picked))
+                          total_pieces += game.pieces_placed - before_pieces
+                          total_attack += game.attack - before_attack
+                          if game.game_over:
+                              break
+                      topouts += int(game.game_over)
+                      completed += int(not game.game_over and game.pieces_placed >= 300)
+              elapsed = time.perf_counter() - started
+              return {
+                  'signature': h.hexdigest(),
+                  'pieces': total_pieces,
+                  'attack': total_attack,
+                  'topouts': topouts,
+                  'completed': completed,
+                  'elapsedSeconds': elapsed,
+                  'piecesPerSecond': total_pieces / max(elapsed, 1e-9),
+                  'profile': prof.to_dict(),
+              }
+
+          print(json.dumps(run(), separators=(',', ':')))
+          PY
+          PYTHONPATH="$GITHUB_WORKSPACE/baseline/src" python long_probe.py > baseline.json
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python long_probe.py > candidate.json
+          python - <<'PY'
+          import json
+          b=json.load(open('baseline.json', encoding='utf-8'))
+          c=json.load(open('candidate.json', encoding='utf-8'))
+          assert b['signature'] == c['signature'], 'legal placement stream changed'
+          for key in ('pieces','attack','topouts','completed'):
+              assert b[key] == c[key], f'{key} changed'
+          counts=('calls','bfsNodes','collisionChecks','collisionEvaluations','collisionCacheHits','kickChecks','landingQueries','landingCacheHits','representativeNodes','representativeDuplicateSkips','placements','pathCalls','cacheHits','cacheMisses')
+          for key in counts:
+              assert b['profile'][key] == c['profile'][key], f'profile count {key} changed'
+          print('SEMANTICS: IDENTICAL')
+          print('summary:', {k:c[k] for k in ('pieces','attack','topouts','completed')})
+          print('elapsed:', b['elapsedSeconds'], '->', c['elapsedSeconds'])
+          print('pps:', b['piecesPerSecond'], '->', c['piecesPerSecond'])
+          for key in ('totalSeconds','bfsSeconds','rotationSeconds','landingSeconds','representativeSeconds','placementSeconds'):
+              print(key+':', b['profile'][key], '->', c['profile'][key])
+          print('counts:', {k:c['profile'][k] for k in counts})
+          PY
