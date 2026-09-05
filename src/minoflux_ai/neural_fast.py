@@ -8,6 +8,7 @@ from minoflux_engine.pieces import SHAPES
 
 from .bitboard import board_row_masks
 from .neural import NeuralValueEvaluator, _context_prefix
+from .reachability_native import NativePlacementRecords
 
 if TYPE_CHECKING:
     from typing import Any
@@ -24,6 +25,13 @@ _NATIVE_READY = False
 
 def native_neural_available() -> bool:
     return _native is not None
+
+
+def native_neural_fast_path_available() -> bool:
+    if _native is None:
+        return False
+    disabled = os.environ.get(_NATIVE_DISABLED_ENV, "").strip().lower()
+    return disabled not in {"1", "true", "yes", "on"}
 
 
 def _ensure_native_ready() -> bool:
@@ -62,11 +70,31 @@ def _score_packed_buffers(
     return tuple(values.detach().cpu().tolist())
 
 
+def _group_prefixes(evaluator: NeuralValueEvaluator, game: Game):
+    config = evaluator.config
+    source_queue = tuple(game.queue)
+    if len(source_queue) < config.queue_length + 1:
+        return None
+    locked_context_prefix = _context_prefix(
+        current=game.current,
+        hold_piece=game.hold_piece,
+        queue=source_queue,
+        config=config,
+    )
+    normal_context_prefix = _context_prefix(
+        current=source_queue[0],
+        hold_piece=game.hold_piece,
+        queue=source_queue[1:],
+        config=config,
+    )
+    return source_queue, normal_context_prefix, locked_context_prefix
+
+
 def _native_score_placement_groups(
     self: NeuralValueEvaluator,
     groups: Sequence[tuple[Game, Sequence[Placement]]],
 ) -> tuple[tuple[float, ...], ...]:
-    if os.environ.get(_NATIVE_DISABLED_ENV) or not _ensure_native_ready():
+    if not native_neural_fast_path_available() or not _ensure_native_ready():
         return _ORIGINAL_SCORE_PLACEMENT_GROUPS(self, groups)
 
     config = self.config
@@ -77,7 +105,6 @@ def _native_score_placement_groups(
     board_chunks: list[bytes] = []
     context_chunks: list[bytes] = []
     state_count = 0
-    queue_length = config.queue_length
 
     for game, placements in groups:
         size = len(placements)
@@ -85,23 +112,11 @@ def _native_score_placement_groups(
         if size == 0:
             continue
 
-        source_queue = tuple(game.queue)
-        if len(source_queue) < queue_length + 1:
+        prefixes = _group_prefixes(self, game)
+        if prefixes is None:
             return _ORIGINAL_SCORE_PLACEMENT_GROUPS(self, groups)
-
+        source_queue, normal_context_prefix, locked_context_prefix = prefixes
         source_rows = board_row_masks(game.board)
-        locked_context_prefix = _context_prefix(
-            current=game.current,
-            hold_piece=game.hold_piece,
-            queue=source_queue,
-            config=config,
-        )
-        normal_context_prefix = _context_prefix(
-            current=source_queue[0],
-            hold_piece=game.hold_piece,
-            queue=source_queue[1:],
-            config=config,
-        )
         board_chunk, context_chunk = _native.encode_placement_group(
             source_rows,
             placements,
@@ -132,5 +147,67 @@ def _native_score_placement_groups(
     return tuple(output)
 
 
+def _native_score_record_groups(
+    self: NeuralValueEvaluator,
+    groups: Sequence[tuple[Game, NativePlacementRecords]],
+) -> tuple[tuple[float, ...], ...]:
+    if not native_neural_fast_path_available() or not _ensure_native_ready():
+        raise RuntimeError("native neural record scoring is unavailable")
+
+    config = self.config
+    if config.board_width > 16 or config.board_height > 64:
+        raise RuntimeError("native neural record scoring does not support this board size")
+
+    sizes: list[int] = []
+    board_chunks: list[bytes] = []
+    context_chunks: list[bytes] = []
+    state_count = 0
+
+    for game, batch in groups:
+        size = len(batch)
+        sizes.append(size)
+        if size == 0:
+            continue
+        if batch.piece != game.current:
+            raise ValueError(
+                f"Native placement batch is for {batch.piece}, current piece is {game.current}"
+            )
+
+        prefixes = _group_prefixes(self, game)
+        if prefixes is None:
+            raise RuntimeError("native neural record scoring requires a full queue")
+        source_queue, normal_context_prefix, locked_context_prefix = prefixes
+        source_rows = board_row_masks(game.board)
+        board_chunk, context_chunk = _native.encode_record_group(
+            source_rows,
+            batch.records,
+            game.current,
+            source_queue[0],
+            game.width,
+            game.height,
+            game.hidden_rows,
+            game.combo,
+            game.back_to_back,
+            game.b2b_chain,
+            normal_context_prefix,
+            locked_context_prefix,
+        )
+        board_chunks.append(board_chunk)
+        context_chunks.append(context_chunk)
+        state_count += size
+
+    board_bytes = bytearray().join(board_chunks)
+    context_bytes = bytearray().join(context_chunks)
+    values = _score_packed_buffers(self, board_bytes, context_bytes, state_count)
+
+    output: list[tuple[float, ...]] = []
+    offset = 0
+    for size in sizes:
+        output.append(values[offset : offset + size])
+        offset += size
+    return tuple(output)
+
+
 def install_neural_fast_path() -> None:
     NeuralValueEvaluator.score_placement_groups = _native_score_placement_groups
+    NeuralValueEvaluator.score_native_record_groups = _native_score_record_groups

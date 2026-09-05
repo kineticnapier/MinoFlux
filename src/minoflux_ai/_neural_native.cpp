@@ -221,7 +221,7 @@ std::vector<float> float_prefix(const py::sequence& values) {
     return result;
 }
 
-py::tuple encode_placement_group(
+py::tuple encode_group(
     const py::sequence& source_rows_object,
     const py::sequence& placements,
     const std::string& piece_name,
@@ -233,7 +233,8 @@ py::tuple encode_placement_group(
     bool back_to_back_before,
     int b2b_chain_before,
     const py::sequence& normal_prefix_object,
-    const py::sequence& locked_prefix_object
+    const py::sequence& locked_prefix_object,
+    bool raw_records
 ) {
     if (piece_name.size() != 1 || next_piece_name.size() != 1) {
         throw std::runtime_error("piece names must be one character");
@@ -274,16 +275,33 @@ py::tuple encode_placement_group(
 
     for (size_t placement_index = 0; placement_index < count; ++placement_index) {
         py::handle placement = placements[static_cast<py::ssize_t>(placement_index)];
-        const std::string placement_piece = py::cast<std::string>(placement.attr("piece"));
-        if (placement_piece != piece_name) {
-            throw std::runtime_error("placement piece does not match group piece");
+        int x = 0;
+        int y = 0;
+        int rotation = 0;
+        bool last_rotation = false;
+        int kick_index = -1;
+        if (raw_records) {
+            py::sequence record = py::reinterpret_borrow<py::sequence>(placement);
+            if (py::len(record) < 5) {
+                throw std::runtime_error("native placement record must contain at least five fields");
+            }
+            x = py::cast<int>(record[0]);
+            y = py::cast<int>(record[1]);
+            rotation = py::cast<int>(record[2]) & 3;
+            last_rotation = py::cast<bool>(record[3]);
+            kick_index = py::cast<int>(record[4]);
+        } else {
+            const std::string placement_piece = py::cast<std::string>(placement.attr("piece"));
+            if (placement_piece != piece_name) {
+                throw std::runtime_error("placement piece does not match group piece");
+            }
+            x = py::cast<int>(placement.attr("x"));
+            y = py::cast<int>(placement.attr("y"));
+            rotation = py::cast<int>(placement.attr("rotation")) & 3;
+            last_rotation = py::cast<bool>(placement.attr("last_move_was_rotation"));
+            py::object kick_object = py::reinterpret_borrow<py::object>(placement.attr("rotation_kick_index"));
+            kick_index = kick_object.is_none() ? -1 : py::cast<int>(kick_object);
         }
-        const int x = py::cast<int>(placement.attr("x"));
-        const int y = py::cast<int>(placement.attr("y"));
-        const int rotation = py::cast<int>(placement.attr("rotation")) & 3;
-        const bool last_rotation = py::cast<bool>(placement.attr("last_move_was_rotation"));
-        py::object kick_object = py::reinterpret_borrow<py::object>(placement.attr("rotation_kick_index"));
-        const int kick_index = kick_object.is_none() ? -1 : py::cast<int>(kick_object);
 
         const int spin_kind = classify_t_spin(
             source_rows,
@@ -387,6 +405,68 @@ py::tuple encode_placement_group(
     return py::make_tuple(py::bytes(board_bytes), py::bytes(context_bytes));
 }
 
+py::tuple encode_placement_group(
+    const py::sequence& source_rows_object,
+    const py::sequence& placements,
+    const std::string& piece_name,
+    const std::string& next_piece_name,
+    int width,
+    int height,
+    int hidden_rows,
+    int combo_before,
+    bool back_to_back_before,
+    int b2b_chain_before,
+    const py::sequence& normal_prefix_object,
+    const py::sequence& locked_prefix_object
+) {
+    return encode_group(
+        source_rows_object,
+        placements,
+        piece_name,
+        next_piece_name,
+        width,
+        height,
+        hidden_rows,
+        combo_before,
+        back_to_back_before,
+        b2b_chain_before,
+        normal_prefix_object,
+        locked_prefix_object,
+        false
+    );
+}
+
+py::tuple encode_record_group(
+    const py::sequence& source_rows_object,
+    const py::sequence& records,
+    const std::string& piece_name,
+    const std::string& next_piece_name,
+    int width,
+    int height,
+    int hidden_rows,
+    int combo_before,
+    bool back_to_back_before,
+    int b2b_chain_before,
+    const py::sequence& normal_prefix_object,
+    const py::sequence& locked_prefix_object
+) {
+    return encode_group(
+        source_rows_object,
+        records,
+        piece_name,
+        next_piece_name,
+        width,
+        height,
+        hidden_rows,
+        combo_before,
+        back_to_back_before,
+        b2b_chain_before,
+        normal_prefix_object,
+        locked_prefix_object,
+        true
+    );
+}
+
 }  // namespace
 
 PYBIND11_MODULE(_neural_native, module) {
@@ -397,6 +477,22 @@ PYBIND11_MODULE(_neural_native, module) {
         &encode_placement_group,
         py::arg("source_rows"),
         py::arg("placements"),
+        py::arg("piece"),
+        py::arg("next_piece"),
+        py::arg("width"),
+        py::arg("height"),
+        py::arg("hidden_rows"),
+        py::arg("combo"),
+        py::arg("back_to_back"),
+        py::arg("b2b_chain"),
+        py::arg("normal_prefix"),
+        py::arg("locked_prefix")
+    );
+    module.def(
+        "encode_record_group",
+        &encode_record_group,
+        py::arg("source_rows"),
+        py::arg("records"),
         py::arg("piece"),
         py::arg("next_piece"),
         py::arg("width"),
