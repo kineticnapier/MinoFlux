@@ -1,0 +1,236 @@
+name: Rotation Hoist Screen
+
+on:
+  push:
+    branches: [perf-rotation-hotloop-20260905]
+
+jobs:
+  benchmark:
+    if: github.event.head_commit.message == 'Screen invariant T-branch hoist'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 815bab8b1a15510418604aca8ad5766c83cd6e2a
+          path: baseline
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build hoisted variants and compare
+        shell: bash
+        run: |
+          cp -a baseline hoist; cp -a baseline hoist_stripped
+          cat > patch.py <<'PY'
+          from pathlib import Path
+
+          PLAIN='''            rotation_info_base = (state_id & 3) << kick_index_bits
+            if piece_is_t:
+                for _command, kicks in rotation_transitions[state_id]:
+                    successful_state = no_state
+                    successful_kick = -1
+                    for target_state, kick_index in kicks:
+                        cached_collision = collision_cache[target_state]
+                        if cached_collision == collision_blocked:
+                            continue
+                        if cached_collision == collision_unknown:
+                            shape_mask = collision_masks[target_state]
+                            blocked = shape_mask < 0 or bool(board_bits & shape_mask)
+                            collision_cache[target_state] = (
+                                collision_blocked if blocked else collision_clear
+                            )
+                            if blocked:
+                                continue
+                        successful_state = target_state
+                        successful_kick = kick_index
+                        break
+                    if successful_state == no_state:
+                        continue
+                    adds_geometry = state_depths[successful_state] == no_state
+                    previous_rotation_depth = rotation_depths[successful_state]
+                    improves_rotation = (
+                        previous_rotation_depth == no_state
+                        or new_depth < previous_rotation_depth
+                    )
+                    if not improves_rotation and not adds_geometry:
+                        continue
+                    rotation_info = rotation_info_base | successful_kick
+                    if improves_rotation:
+                        if previous_rotation_depth == no_state:
+                            append_visited_rotation(successful_state)
+                        rotation_depths[successful_state] = new_depth
+                        rotation_kick_infos[successful_state] = rotation_info
+                        rotation_is_geometry[successful_state] = int(adds_geometry)
+                    if adds_geometry:
+                        state_depths[successful_state] = new_depth
+                        state_kick_infos[successful_state] = rotation_info
+                        append_visited_state(successful_state)
+                        reachable_count += 1
+                        append_frontier(successful_state)
+            else:
+                for _command, kicks in rotation_transitions[state_id]:
+                    successful_state = no_state
+                    successful_kick = -1
+                    for target_state, kick_index in kicks:
+                        cached_collision = collision_cache[target_state]
+                        if cached_collision == collision_blocked:
+                            continue
+                        if cached_collision == collision_unknown:
+                            shape_mask = collision_masks[target_state]
+                            blocked = shape_mask < 0 or bool(board_bits & shape_mask)
+                            collision_cache[target_state] = (
+                                collision_blocked if blocked else collision_clear
+                            )
+                            if blocked:
+                                continue
+                        successful_state = target_state
+                        successful_kick = kick_index
+                        break
+                    if successful_state == no_state or state_depths[successful_state] != no_state:
+                        continue
+                    rotation_info = rotation_info_base | successful_kick
+                    state_depths[successful_state] = new_depth
+                    state_kick_infos[successful_state] = rotation_info
+                    append_visited_state(successful_state)
+                    reachable_count += 1
+                    append_frontier(successful_state)
+'''
+          PROFILE='''            rotation_started = time.perf_counter()
+            rotation_info_base = (state_id & 3) << kick_index_bits
+            if piece_is_t:
+                for _command, kicks in rotation_transitions[state_id]:
+                    successful_state = no_state
+                    successful_kick = -1
+                    for target_state, kick_index in kicks:
+                        kick_checks += 1
+                        collision_checks += 1
+                        cached_collision = collision_cache[target_state]
+                        if cached_collision != collision_unknown:
+                            collision_cache_hits += 1
+                            if cached_collision == collision_blocked:
+                                continue
+                        else:
+                            shape_mask = collision_masks[target_state]
+                            blocked = shape_mask < 0 or bool(board_bits & shape_mask)
+                            collision_cache[target_state] = (
+                                collision_blocked if blocked else collision_clear
+                            )
+                            collision_evaluations += 1
+                            if blocked:
+                                continue
+                        successful_state = target_state
+                        successful_kick = kick_index
+                        break
+                    if successful_state == no_state:
+                        continue
+                    adds_geometry = state_depths[successful_state] == no_state
+                    previous_rotation_depth = rotation_depths[successful_state]
+                    improves_rotation = (
+                        previous_rotation_depth == no_state
+                        or new_depth < previous_rotation_depth
+                    )
+                    if not improves_rotation and not adds_geometry:
+                        continue
+                    rotation_info = rotation_info_base | successful_kick
+                    if improves_rotation:
+                        if previous_rotation_depth == no_state:
+                            append_visited_rotation(successful_state)
+                        rotation_depths[successful_state] = new_depth
+                        rotation_kick_infos[successful_state] = rotation_info
+                        rotation_is_geometry[successful_state] = int(adds_geometry)
+                    if adds_geometry:
+                        state_depths[successful_state] = new_depth
+                        state_kick_infos[successful_state] = rotation_info
+                        append_visited_state(successful_state)
+                        reachable_count += 1
+                        append_frontier(successful_state)
+            else:
+                for _command, kicks in rotation_transitions[state_id]:
+                    successful_state = no_state
+                    successful_kick = -1
+                    for target_state, kick_index in kicks:
+                        kick_checks += 1
+                        collision_checks += 1
+                        cached_collision = collision_cache[target_state]
+                        if cached_collision != collision_unknown:
+                            collision_cache_hits += 1
+                            if cached_collision == collision_blocked:
+                                continue
+                        else:
+                            shape_mask = collision_masks[target_state]
+                            blocked = shape_mask < 0 or bool(board_bits & shape_mask)
+                            collision_cache[target_state] = (
+                                collision_blocked if blocked else collision_clear
+                            )
+                            collision_evaluations += 1
+                            if blocked:
+                                continue
+                        successful_state = target_state
+                        successful_kick = kick_index
+                        break
+                    if successful_state == no_state or state_depths[successful_state] != no_state:
+                        continue
+                    rotation_info = rotation_info_base | successful_kick
+                    state_depths[successful_state] = new_depth
+                    state_kick_infos[successful_state] = rotation_info
+                    append_visited_state(successful_state)
+                    reachable_count += 1
+                    append_frontier(successful_state)
+            profile.rotation_seconds += time.perf_counter() - rotation_started
+'''
+          def apply(root):
+              p=Path(root)/'src/minoflux_ai/reachability_pathless.py'; s=p.read_text()
+              first=s.index('            for _command, kicks in rotation_transitions[state_id]:')
+              end=s.index('\n            if reachable_count > budget:', first)
+              s=s[:first]+PLAIN+s[end:]
+              prof_start=s.index('            rotation_started = time.perf_counter()', first+len(PLAIN))
+              prof_end=s.index('\n            if reachable_count > budget:', prof_start)
+              s=s[:prof_start]+PROFILE+s[prof_end:]
+              p.write_text(s)
+          def strip(root):
+              p=Path(root)/'src/minoflux_ai/reachability_pathless.py'; s=p.read_text(); s=s.replace('import time\n','import time\nfrom functools import cache\n')
+              marker='_REFERENCE_REACHABLE_PLACEMENTS = _reference.reachable_placements\n'; helper='''_REFERENCE_REACHABLE_PLACEMENTS = _reference.reachable_placements\n\n\n@cache\ndef _rotation_kick_groups(piece: str, allow_180: bool, width: int, height: int):\n    return tuple(tuple(kicks for _command, kicks in groups) for groups in _reference._rotation_transitions(piece, allow_180, width, height))\n'''; s=s.replace(marker,helper,1)
+              old='''    rotation_transitions = _reference._rotation_transitions(\n        piece,\n        normalized_allow_180,\n        width,\n        height,\n    )\n'''; new='''    rotation_transitions = _rotation_kick_groups(\n        piece,\n        normalized_allow_180,\n        width,\n        height,\n    )\n'''; s=s.replace(old,new,1); s=s.replace('for _command, kicks in rotation_transitions[state_id]:','for kicks in rotation_transitions[state_id]:'); p.write_text(s)
+          apply('hoist'); apply('hoist_stripped'); strip('hoist_stripped')
+          PY
+          python patch.py
+          cat > probe.py <<'PY'
+          import hashlib,json,time
+          from minoflux_ai.reachability import clear_reachability_cache,ReachabilityProfile,collect_reachability_profile
+          from minoflux_ai.search import SearchAction,SearchConfig,_branch_groups,apply_search_action
+          from minoflux_engine import Game
+          CFG=SearchConfig(allow_hold=True,lookahead_pieces=0,beam_width=4,srs_reachable=True,allow_180=False,reachability_node_limit=8000).normalized()
+          def payload(p): return [p.piece,p.x,p.y,p.rotation,[list(c) for c in p.cells],p.last_move_was_rotation,p.rotation_kick_index,p.rotation_from,p.rotation_to]
+          def run(profiled):
+              h=hashlib.sha256(); clear_reachability_cache(); prof=ReachabilityProfile() if profiled else None; ctx=collect_reachability_profile(prof) if profiled else None
+              if ctx: ctx.__enter__()
+              pieces=attack=topouts=completed=0; t=time.perf_counter()
+              try:
+                  for gi in range(20):
+                      seed=8100001+gi*97; g=Game(seed)
+                      for step in range(28):
+                          d,hg,hp=_branch_groups(g,CFG,include_paths=False)
+                          h.update(json.dumps([seed,step,[payload(p) for p in d],[payload(p) for p in hp]],separators=(',',':')).encode())
+                          cand=[(False,p) for p in d]; cand += ([(True,p) for p in hp] if hg else [])
+                          if not cand: break
+                          hold,p=cand[(seed*1315423911+step*2654435761)%len(cand)]; bp=g.pieces_placed; ba=g.attack; apply_search_action(g,SearchAction(hold,p)); pieces+=g.pieces_placed-bp; attack+=g.attack-ba
+                          if g.game_over: break
+                      topouts+=int(g.game_over); completed+=int(not g.game_over and g.pieces_placed>=28)
+              finally:
+                  elapsed=time.perf_counter()-t
+                  if ctx: ctx.__exit__(None,None,None)
+              r={'sig':h.hexdigest(),'pieces':pieces,'attack':attack,'topouts':topouts,'completed':completed,'elapsed':elapsed,'pps':pieces/elapsed}
+              if prof:r['profile']=prof.to_dict()
+              return r
+          print(json.dumps({'plain':run(False),'profile':run(True)},separators=(',',':')))
+          PY
+          for v in baseline hoist hoist_stripped; do for i in 1 2 3; do PYTHONPATH="$GITHUB_WORKSPACE/$v/src" python probe.py > "$v-$i.json"; done; done
+          python - <<'PY'
+          import json,statistics
+          ns=['baseline','hoist','hoist_stripped']; d={n:[json.load(open(f'{n}-{i}.json')) for i in (1,2,3)] for n in ns}; b=d['baseline'][0]; counts=('calls','bfsNodes','collisionChecks','collisionEvaluations','collisionCacheHits','kickChecks','landingQueries','landingCacheHits','representativeNodes','representativeDuplicateSkips','placements','pathCalls','cacheHits','cacheMisses')
+          for n in ns:
+              for r in d[n]:
+                  assert r['plain']['sig']==b['plain']['sig'] and r['profile']['sig']==b['profile']['sig']; assert tuple(r['plain'][k] for k in ('pieces','attack','topouts','completed'))==tuple(b['plain'][k] for k in ('pieces','attack','topouts','completed'))
+                  for k in counts: assert r['profile']['profile'][k]==b['profile']['profile'][k],(n,k)
+              pe=statistics.median(x['plain']['elapsed'] for x in d[n]); qe=statistics.median(x['profile']['elapsed'] for x in d[n]); bfs=statistics.median(x['profile']['profile']['bfsSeconds'] for x in d[n]); rot=statistics.median(x['profile']['profile']['rotationSeconds'] for x in d[n]); print(n,'plain',pe,'pps',d[n][1]['plain']['pieces']/pe,'profile',qe,'bfs',bfs,'rotation',rot)
+          print('SEMANTICS: IDENTICAL')
+          PY
