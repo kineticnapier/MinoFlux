@@ -3,6 +3,12 @@ from __future__ import annotations
 from argparse import ArgumentParser
 import json
 
+from minoflux_ai.human_placement import (
+    DEFAULT_HUMAN_PLACEMENT_LOG,
+    DEFAULT_HUMAN_RANKING_DATASET,
+    HumanDatasetConfig,
+    write_human_ranking_dataset,
+)
 from minoflux_ai.placement_teacher import (
     DEFAULT_PLACEMENT_TEACHER_WEIGHTS,
     PlacementTeacherConfig,
@@ -15,7 +21,7 @@ from minoflux_ai.placement_teacher import (
 def build_parser() -> ArgumentParser:
     parser = ArgumentParser(
         prog="minoflux-placement-v2",
-        description="Generate Placement Teacher v2 ranking data for neural distillation",
+        description="Generate Placement Teacher v2 and human ranking data for neural distillation",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -53,6 +59,23 @@ def build_parser() -> ArgumentParser:
         default=1,
         help="Parallel game workers; 0 uses available CPU cores",
     )
+
+    human = sub.add_parser(
+        "human-dataset",
+        help="Convert automatically recorded local play into neural ranking JSONL",
+    )
+    human.add_argument("--input", default=str(DEFAULT_HUMAN_PLACEMENT_LOG))
+    human.add_argument("--output", default=str(DEFAULT_HUMAN_RANKING_DATASET))
+    human.add_argument(
+        "--max-candidates",
+        type=int,
+        default=0,
+        help="Candidate cap per human placement; 0 keeps every exact-SRS legal action",
+    )
+    human.add_argument("--no-hold", action="store_true")
+    human.add_argument("--allow-180", action="store_true")
+    human.add_argument("--reachability-nodes", type=int, default=8_000)
+    human.add_argument("--sampling-seed", type=int, default=26_090_905)
     return parser
 
 
@@ -118,10 +141,28 @@ def _generate(args) -> int:
     return 0
 
 
+def _human_dataset(args) -> int:
+    result = write_human_ranking_dataset(
+        args.input,
+        args.output,
+        HumanDatasetConfig(
+            allow_hold=not args.no_hold,
+            allow_180=args.allow_180,
+            reachability_node_limit=args.reachability_nodes,
+            max_candidates=args.max_candidates,
+            random_seed=args.sampling_seed,
+        ),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "generate":
         return _generate(args)
+    if args.command == "human-dataset":
+        return _human_dataset(args)
     raise SystemExit(f"Unknown command: {args.command}")
 
 
