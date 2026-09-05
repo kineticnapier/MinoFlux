@@ -39,6 +39,8 @@ _NO_LANDING = -1
 _COLLISION_UNKNOWN = 0
 _COLLISION_CLEAR = 1
 _COLLISION_BLOCKED = 2
+_KICK_INDEX_BITS = 3
+_KICK_INDEX_MASK = (1 << _KICK_INDEX_BITS) - 1
 _X_MARGIN = 4
 _Y_MIN = -4
 _REACHABILITY_CACHE_MAXSIZE = 8_192
@@ -584,7 +586,7 @@ def reachable_placements(
             return result
 
     node_states: list[int] = [start_state]
-    parents: list[int] = [-1]
+    parents: list[int] = [-1] if normalized_include_paths else []
     commands: list[int] = [_CMD_NONE] if normalized_include_paths else []
     depths: list[int] = [0]
     kick_indices: list[int] = [-1]
@@ -643,8 +645,8 @@ def reachable_placements(
             if not blocked:
                 successor = len(node_states)
                 append_node_state(target_state)
-                append_parent(node_index)
                 if normalized_include_paths:
+                    append_parent(node_index)
                     commands.append(_CMD_LEFT)
                 append_depth(new_depth)
                 append_kick_index(-1)
@@ -673,8 +675,8 @@ def reachable_placements(
             if not blocked:
                 successor = len(node_states)
                 append_node_state(target_state)
-                append_parent(node_index)
                 if normalized_include_paths:
+                    append_parent(node_index)
                     commands.append(_CMD_RIGHT)
                 append_depth(new_depth)
                 append_kick_index(-1)
@@ -703,8 +705,8 @@ def reachable_placements(
             if not blocked:
                 successor = len(node_states)
                 append_node_state(target_state)
-                append_parent(node_index)
                 if normalized_include_paths:
+                    append_parent(node_index)
                     commands.append(_CMD_DOWN)
                 append_depth(new_depth)
                 append_kick_index(-1)
@@ -775,11 +777,13 @@ def reachable_placements(
 
             successor = len(node_states)
             append_node_state(successful_state)
-            append_parent(node_index)
             if normalized_include_paths:
+                append_parent(node_index)
                 commands.append(command)
             append_depth(new_depth)
-            append_kick_index(successful_kick)
+            append_kick_index(
+                ((state_id & 3) << _KICK_INDEX_BITS) | successful_kick
+            )
 
             if improves_rotation:
                 if previous_rotation == _NO_STATE:
@@ -852,13 +856,13 @@ def reachable_placements(
                 x = state_x[state_id]
                 landing_y = state_y[final_state]
                 rotation = state_id & 3
-                kick_index = kick_indices[node_index]
-                last_rotation = kick_index >= 0
-                parent = parents[node_index]
+                rotation_info = kick_indices[node_index]
+                last_rotation = rotation_info >= 0
+                kick_index = (
+                    rotation_info & _KICK_INDEX_MASK if last_rotation else -1
+                )
                 rotation_from = (
-                    (node_states[parent] & 3)
-                    if last_rotation and parent >= 0
-                    else -1
+                    rotation_info >> _KICK_INDEX_BITS if last_rotation else -1
                 )
                 best[key] = (
                     (0, 0, negative_depth),
@@ -868,7 +872,7 @@ def reachable_placements(
                     rotation,
                     node_index,
                     last_rotation,
-                    kick_index if last_rotation else -1,
+                    kick_index,
                     rotation_from,
                     rotation if last_rotation else -1,
                 )
@@ -898,12 +902,14 @@ def reachable_placements(
                         x = state_x[state_id]
                         landing_y = state_y[final_state]
                         rotation = state_id & 3
-                        kick_index = kick_indices[node_index]
-                        last_rotation = kick_index >= 0
-                        parent = parents[node_index]
+                        rotation_info = kick_indices[node_index]
+                        last_rotation = rotation_info >= 0
+                        kick_index = (
+                            rotation_info & _KICK_INDEX_MASK if last_rotation else -1
+                        )
                         rotation_from = (
-                            (node_states[parent] & 3)
-                            if last_rotation and parent >= 0
+                            rotation_info >> _KICK_INDEX_BITS
+                            if last_rotation
                             else -1
                         )
                         best[key] = (
@@ -914,7 +920,7 @@ def reachable_placements(
                             rotation,
                             node_index,
                             last_rotation,
-                            kick_index if last_rotation else -1,
+                            kick_index,
                             rotation_from,
                             rotation if last_rotation else -1,
                         )
@@ -953,8 +959,14 @@ def reachable_placements(
                 x = state_x[state_id]
                 landing_y = state_y[final_state]
                 rotation = state_id & 3
-                kick_index = kick_indices[node_index]
-                last_rotation = kick_index >= 0
+                rotation_info = kick_indices[node_index]
+                last_rotation = rotation_info >= 0
+                kick_index = (
+                    rotation_info & _KICK_INDEX_MASK if last_rotation else -1
+                )
+                rotation_from = (
+                    rotation_info >> _KICK_INDEX_BITS if last_rotation else -1
+                )
 
                 spin_kind: str | None = None
                 if last_rotation:
@@ -985,12 +997,6 @@ def reachable_placements(
                     or preference > previous[0]
                     or (preference == previous[0] and order_rank < previous[1])
                 ):
-                    parent = parents[node_index]
-                    rotation_from = (
-                        (node_states[parent] & 3)
-                        if last_rotation and parent >= 0
-                        else -1
-                    )
                     best[key] = (
                         preference,
                         order_rank,
@@ -999,7 +1005,7 @@ def reachable_placements(
                         rotation,
                         node_index,
                         last_rotation,
-                        kick_index if last_rotation else -1,
+                        kick_index,
                         rotation_from,
                         rotation if last_rotation else -1,
                     )
