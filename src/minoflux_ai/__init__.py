@@ -74,6 +74,12 @@ from .neural_fast import install_neural_fast_path as _install_neural_fast_path
 
 _install_neural_fast_path()
 
+from .neural_search_fast import (
+    install_neural_search_fast_path as _install_neural_search_fast_path,
+)
+
+_install_neural_search_fast_path()
+
 from .promotion import (
     PromotionConfig,
     PromotionResult,
