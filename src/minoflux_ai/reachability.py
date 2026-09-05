@@ -574,13 +574,12 @@ def reachable_placements(
 
     node_states: list[int] = [start_state]
     parents: list[int] = [-1]
-    commands: list[int] = [_CMD_NONE]
+    commands: list[int] = [_CMD_NONE] if normalized_include_paths else []
     depths: list[int] = [0]
     kick_indices: list[int] = [-1]
 
     append_node_state = node_states.append
     append_parent = parents.append
-    append_command = commands.append
     append_depth = depths.append
     append_kick_index = kick_indices.append
 
@@ -589,7 +588,7 @@ def reachable_placements(
     frontier_index = 0
 
     state_nodes = [_NO_STATE] * packed_count
-    rotation_nodes = [_NO_STATE] * packed_count
+    rotation_nodes = [_NO_STATE] * packed_count if piece_is_t else []
     state_nodes[start_state] = 0
     visited_state_ids: list[int] = [start_state]
     visited_rotation_ids: list[int] = []
@@ -622,7 +621,8 @@ def reachable_placements(
             successor = len(node_states)
             append_node_state(target_state)
             append_parent(node_index)
-            append_command(_CMD_LEFT)
+            if normalized_include_paths:
+                commands.append(_CMD_LEFT)
             append_depth(new_depth)
             append_kick_index(-1)
             state_nodes[target_state] = successor
@@ -639,7 +639,8 @@ def reachable_placements(
             successor = len(node_states)
             append_node_state(target_state)
             append_parent(node_index)
-            append_command(_CMD_RIGHT)
+            if normalized_include_paths:
+                commands.append(_CMD_RIGHT)
             append_depth(new_depth)
             append_kick_index(-1)
             state_nodes[target_state] = successor
@@ -656,7 +657,8 @@ def reachable_placements(
             successor = len(node_states)
             append_node_state(target_state)
             append_parent(node_index)
-            append_command(_CMD_DOWN)
+            if normalized_include_paths:
+                commands.append(_CMD_DOWN)
             append_depth(new_depth)
             append_kick_index(-1)
             state_nodes[target_state] = successor
@@ -680,19 +682,30 @@ def reachable_placements(
             if successful_state == _NO_STATE:
                 continue
 
-            previous_rotation = rotation_nodes[successful_state]
-            improves_rotation = (
-                previous_rotation == _NO_STATE
-                or new_depth < depths[previous_rotation]
-            )
             adds_geometry = state_nodes[successful_state] == _NO_STATE
+            if piece_is_t:
+                previous_rotation = rotation_nodes[successful_state]
+                improves_rotation = (
+                    previous_rotation == _NO_STATE
+                    or new_depth < depths[previous_rotation]
+                )
+            else:
+                previous_rotation = _NO_STATE
+                improves_rotation = False
+
+            # A separate rotation-ending representative can only change the
+            # selected placement for T pieces, where it may carry T-spin state.
+            # For every other piece the geometry BFS representative is already
+            # minimum-depth, wins equal-depth ordering, and has identical lock
+            # semantics, so materializing rotation-only nodes is wasted work.
             if not improves_rotation and not adds_geometry:
                 continue
 
             successor = len(node_states)
             append_node_state(successful_state)
             append_parent(node_index)
-            append_command(command)
+            if normalized_include_paths:
+                commands.append(command)
             append_depth(new_depth)
             append_kick_index(successful_kick)
 
