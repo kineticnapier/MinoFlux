@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 
+from minoflux_ai.human_placement import HumanPlacementRecorder
 from minoflux_engine import Game, HIDDEN_ROWS
 from minoflux_engine.pieces import SHAPES
 
@@ -153,6 +154,8 @@ def main() -> None:
     small = pygame.font.Font(None, 23)
     palette = Palette()
     game = Game()
+    recorder = HumanPlacementRecorder()
+    recorder.begin_game(game)
     settings = load_settings()
     key_codes = _key_codes(pygame, settings)
     handling = HandlingController()
@@ -234,6 +237,7 @@ def main() -> None:
                 action = key_codes.get(event.key)
                 if action == "restart":
                     game.reset()
+                    recorder.begin_game(game)
                     paused = False
                     game.paused = False
                     handling.clear()
@@ -265,7 +269,9 @@ def main() -> None:
                             skip_lock_advance = True
                             last_gravity = now
                     elif action == "hard_drop":
-                        game.hard_drop()
+                        choice = recorder.capture_choice(game, hard_drop=True)
+                        result = game.hard_drop()
+                        recorder.record_lock(choice, result, game)
                         skip_lock_advance = True
                         last_gravity = now
 
@@ -289,7 +295,14 @@ def main() -> None:
                 game.gravity_step()
                 last_gravity = now
             if not skip_lock_advance:
-                game.advance_time(delta_ms)
+                choice = (
+                    recorder.capture_choice(game, hard_drop=False)
+                    if game.is_grounded()
+                    else None
+                )
+                result = game.advance_time(delta_ms)
+                if result is not None and choice is not None:
+                    recorder.record_lock(choice, result, game)
         else:
             last_gravity = now
             last_frame = now
@@ -342,6 +355,7 @@ def main() -> None:
             f"Lines {game.lines}",
             f"Attack {game.attack}",
             f"Pieces {game.pieces_placed}",
+            f"Human REC {recorder.recorded}",
             f"Combo {max(0, game.combo)}",
             f"B2B {'ON' if game.back_to_back else 'OFF'}",
             f"Lock {int(game.lock_elapsed_ms)}/{int(game.lock_delay_ms)}",
