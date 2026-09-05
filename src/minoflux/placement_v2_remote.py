@@ -10,6 +10,7 @@ from typing import Any
 
 DATASET = Path("data/neural/placement-v2-ranking.jsonl")
 MODEL = Path("data/models/placement-v2.pt")
+RESULT_PATH = Path("data/remote/latest-placement-evaluation.json")
 
 
 def _run(label: str, *args: str) -> None:
@@ -127,43 +128,29 @@ def _summary_line(label: str, result: dict[str, Any]) -> str:
     )
 
 
-def _publish_evaluation(
+def _write_evaluation_result(
     *,
     command: str,
     placement_v2: dict[str, Any],
     baseline: dict[str, Any],
 ) -> None:
-    """Mirror the final structured result to GitHub's remote-status branch.
-
-    This gives ChatGPT and devices that cannot reach the Cloudflare Worker a stable,
-    GitHub-readable snapshot of the latest evaluation.
-    """
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    """Write the latest structured result locally for the CF relay to publish."""
     payload = {
-        "agentOnline": True,
-        "state": "done",
         "command": command,
-        "updatedAt": now,
-        "message": "Placement-v2 evaluation completed",
-        "result": {
-            "placementV2": placement_v2,
-            "baseline": baseline,
-        },
-        "logTail": [
-            _summary_line("placement-v2", placement_v2),
-            _summary_line("baseline", baseline),
-        ],
+        "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "placementV2": placement_v2,
+        "baseline": baseline,
     }
-    try:
-        # Reuse the existing remote-status worktree/push path. The import is kept
-        # local so normal Placement-v2 CLI use does not depend on the remote agent.
-        from tools.remote_agent import _publish_status
-
-        _publish_status(payload)
-        print("Published evaluation snapshot to remote-status/docs/remote/status.json", flush=True)
-    except Exception as error:
-        # Evaluation itself must still succeed even if GitHub publishing is unavailable.
-        print(f"warning: could not publish remote evaluation snapshot: {error}", file=sys.stderr, flush=True)
+    RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = RESULT_PATH.with_suffix(RESULT_PATH.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(RESULT_PATH)
+    print(_summary_line("placement-v2", placement_v2), flush=True)
+    print(_summary_line("baseline", baseline), flush=True)
+    print(f"Saved structured result: {RESULT_PATH}", flush=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -215,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in {"full", "evaluate"}:
         placement_v2 = _evaluate(MODEL, "placement-v2 evaluation")
         baseline = _evaluate(Path("data/models/neural-value-human.pt"), "current human-model baseline")
-        _publish_evaluation(
+        _write_evaluation_result(
             command=(
                 "placement-v2-full-50"
                 if args.command == "full"
