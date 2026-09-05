@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - self-improve
+      - perf-exact-srs-20260905
   pull_request:
     branches:
       - main
@@ -15,6 +16,125 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  exact-srs-parent-comparison:
+    if: github.ref == 'refs/heads/perf-exact-srs-20260905'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout harness branch
+        uses: actions/checkout@v4
+        with:
+          path: harness
+      - name: Checkout baseline
+        uses: actions/checkout@v4
+        with:
+          ref: b0f51b8b5b2bb8fc83554f9d6c399772cd8182f0
+          path: baseline
+      - name: Checkout candidate self-improve
+        uses: actions/checkout@v4
+        with:
+          ref: self-improve
+          path: candidate
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compare exact-SRS semantics and profile
+        shell: bash
+        run: |
+          cat > probe.py <<'PY'
+          from __future__ import annotations
+          import hashlib
+          import json
+          import time
+          from minoflux_ai.reachability import ReachabilityProfile, clear_reachability_cache, collect_reachability_profile, reachable_placements
+          from minoflux_ai.search import SearchAction, SearchConfig, _branch_groups, apply_search_action
+          from minoflux_engine import Game
+
+          def payload(p):
+              return [p.piece, p.x, p.y, p.rotation, [list(c) for c in p.cells], list(p.path), p.last_move_was_rotation, p.rotation_kick_index, p.rotation_from, p.rotation_to]
+
+          def add_group(h, seed, step, held, placements):
+              h.update(json.dumps([seed, step, held, [payload(p) for p in placements]], separators=(',', ':')).encode())
+              h.update(b'\n')
+
+          def profile_run():
+              cfg = SearchConfig(allow_hold=True, lookahead_pieces=0, beam_width=4, srs_reachable=True, allow_180=False, reachability_node_limit=8000).normalized()
+              h = hashlib.sha256()
+              prof = ReachabilityProfile()
+              pieces = attack = topouts = completed = 0
+              clear_reachability_cache()
+              started = time.perf_counter()
+              with collect_reachability_profile(prof):
+                  for gi in range(20):
+                      seed = 8100001 + gi * 97
+                      game = Game(seed)
+                      for step in range(300):
+                          direct, held_game, held_ps = _branch_groups(game, cfg, include_paths=False)
+                          add_group(h, seed, step, False, direct)
+                          add_group(h, seed, step, True, held_ps)
+                          candidates = [(False, p) for p in direct]
+                          if held_game is not None:
+                              candidates.extend((True, p) for p in held_ps)
+                          if not candidates:
+                              break
+                          use_hold, placement = candidates[(seed * 1315423911 + step * 2654435761) % len(candidates)]
+                          before_attack = game.attack
+                          before_pieces = game.pieces_placed
+                          apply_search_action(game, SearchAction(use_hold, placement))
+                          pieces += game.pieces_placed - before_pieces
+                          attack += game.attack - before_attack
+                          if game.game_over:
+                              break
+                      topouts += int(game.game_over)
+                      completed += int(not game.game_over and game.pieces_placed >= 300)
+              elapsed = time.perf_counter() - started
+              return {'signature': h.hexdigest(), 'pieces': pieces, 'attack': attack, 'topouts': topouts, 'completed': completed, 'elapsedSeconds': elapsed, 'piecesPerSecond': pieces / max(elapsed, 1e-9), 'profile': prof.to_dict()}
+
+          def path_run():
+              h = hashlib.sha256()
+              calls = placements_total = 0
+              clear_reachability_cache()
+              for seed in (1, 7, 97, 1234, 8100001, 8100098, 20260905):
+                  game = Game(seed)
+                  for step in range(36):
+                      ps = reachable_placements(game, allow_180=False, max_nodes=8000, include_paths=True)
+                      add_group(h, seed, step, False, ps)
+                      calls += 1
+                      placements_total += len(ps)
+                      if not ps:
+                          break
+                      game.place(ps[(seed * 17 + step * 13) % len(ps)])
+                      if game.game_over:
+                          break
+              return {'signature': h.hexdigest(), 'calls': calls, 'placements': placements_total}
+
+          print(json.dumps({'profileRun': profile_run(), 'pathRun': path_run()}, separators=(',', ':')))
+          PY
+          PYTHONPATH="$GITHUB_WORKSPACE/baseline/src" python probe.py > baseline.json
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python probe.py > candidate.json
+          python - <<'PY'
+          import json
+          b=json.load(open('baseline.json', encoding='utf-8'))
+          c=json.load(open('candidate.json', encoding='utf-8'))
+          assert b['profileRun']['signature'] == c['profileRun']['signature'], 'pathless legal-placement signature changed'
+          assert b['pathRun']['signature'] == c['pathRun']['signature'], 'pathful SRS/path signature changed'
+          for key in ('pieces','attack','topouts','completed'):
+              assert b['profileRun'][key] == c['profileRun'][key], f'{key} changed'
+          integer_metrics=('calls','bfsNodes','collisionChecks','collisionEvaluations','collisionCacheHits','kickChecks','landingQueries','landingCacheHits','representativeNodes','representativeDuplicateSkips','placements','pathCalls','cacheHits','cacheMisses')
+          for key in integer_metrics:
+              assert b['profileRun']['profile'][key] == c['profileRun']['profile'][key], f'profile count {key} changed'
+          bp=b['profileRun']['profile']; cp=c['profileRun']['profile']
+          print('SEMANTICS: IDENTICAL')
+          print('pathless signature:', c['profileRun']['signature'])
+          print('pathful signature:', c['pathRun']['signature'])
+          print('summary:', {k:c['profileRun'][k] for k in ('pieces','attack','topouts','completed')})
+          print('elapsed:', b['profileRun']['elapsedSeconds'], '->', c['profileRun']['elapsedSeconds'])
+          print('pps:', b['profileRun']['piecesPerSecond'], '->', c['profileRun']['piecesPerSecond'])
+          for key in ('totalSeconds','bfsSeconds','rotationSeconds','landingSeconds','representativeSeconds','placementSeconds'):
+              print(key+':', bp[key], '->', cp[key])
+          print('counts:', {k:cp[k] for k in integer_metrics})
+          PY
+
   fast-test:
     name: fast-test (${{ matrix.python-version }})
     strategy:
