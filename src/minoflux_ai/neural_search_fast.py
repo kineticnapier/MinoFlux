@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from functools import cache
 from heapq import nlargest
+import os
 import time
 from typing import Sequence
 
@@ -16,6 +20,45 @@ from .reachability_native import (
 
 
 _ORIGINAL_CHOOSE_SEARCH_ACTIONS_BATCH = _search.choose_search_actions_batch
+
+
+_NATIVE_THREADS_ENV = "MINOFLUX_NATIVE_REACHABILITY_THREADS"
+
+
+def _native_reachability_workers() -> int:
+    raw = os.environ.get(_NATIVE_THREADS_ENV, "1").strip()
+    try:
+        workers = int(raw)
+    except ValueError:
+        return 1
+    return max(1, min(32, workers))
+
+
+@cache
+def _native_reachability_executor(workers: int) -> ThreadPoolExecutor:
+    return ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix="minoflux-srs",
+    )
+
+
+def _submit_record_reachability(
+    executor: ThreadPoolExecutor,
+    game: Game,
+    *,
+    allow_180: bool,
+    max_nodes: int,
+    rows=None,
+):
+    context = copy_context()
+    return executor.submit(
+        context.run,
+        reachable_placement_records_native,
+        game,
+        allow_180=allow_180,
+        max_nodes=max_nodes,
+        rows=rows,
+    )
 
 
 def _scorer_config(scorer):
@@ -144,9 +187,10 @@ def choose_search_actions_batch(
     groups: list[tuple[Game, NativePlacementRecords]] = []
     group_keys: list[tuple[int, bool]] = []
 
-    for index, game in enumerate(games):
+    branch_games = []
+    for game in games:
         if game.game_over:
-            prepared.append((NativePlacementRecords.empty(game.current), None, None))
+            branch_games.append((game, None))
             continue
 
         # Short queues are rare near synthetic/test boundaries. Preserve the
@@ -167,29 +211,93 @@ def choose_search_actions_batch(
                 cfg,
                 scorer=scorer,
             )
+        branch_games.append((game, held))
 
-        direct = reachable_placement_records_native(
-            game,
-            allow_180=cfg.allow_180,
-            max_nodes=cfg.reachability_node_limit,
-        )
-        if direct is None:
-            return _ORIGINAL_CHOOSE_SEARCH_ACTIONS_BATCH(
-                games,
-                weights,
-                cfg,
-                scorer=scorer,
+    workers = _native_reachability_workers()
+    executor = _native_reachability_executor(workers) if workers > 1 else None
+
+    if executor is None:
+        direct_results = [
+            (
+                NativePlacementRecords.empty(game.current)
+                if game.game_over
+                else reachable_placement_records_native(
+                    game,
+                    allow_180=cfg.allow_180,
+                    max_nodes=cfg.reachability_node_limit,
+                )
             )
-        held_records = (
-            reachable_placement_records_native(
-                held,
-                allow_180=cfg.allow_180,
-                max_nodes=cfg.reachability_node_limit,
-                rows=direct.rows,
+            for game, _held in branch_games
+        ]
+    else:
+        direct_futures = [
+            (
+                None
+                if game.game_over
+                else _submit_record_reachability(
+                    executor,
+                    game,
+                    allow_180=cfg.allow_180,
+                    max_nodes=cfg.reachability_node_limit,
+                )
             )
-            if held is not None
-            else None
+            for game, _held in branch_games
+        ]
+        direct_results = [
+            (
+                NativePlacementRecords.empty(game.current)
+                if future is None
+                else future.result()
+            )
+            for (game, _held), future in zip(branch_games, direct_futures)
+        ]
+
+    if any(result is None for result in direct_results):
+        return _ORIGINAL_CHOOSE_SEARCH_ACTIONS_BATCH(
+            games,
+            weights,
+            cfg,
+            scorer=scorer,
         )
+
+    if executor is None:
+        held_results = [
+            (
+                reachable_placement_records_native(
+                    held,
+                    allow_180=cfg.allow_180,
+                    max_nodes=cfg.reachability_node_limit,
+                    rows=direct.rows,
+                )
+                if held is not None
+                else None
+            )
+            for (_game, held), direct in zip(branch_games, direct_results)
+        ]
+    else:
+        held_futures = [
+            (
+                _submit_record_reachability(
+                    executor,
+                    held,
+                    allow_180=cfg.allow_180,
+                    max_nodes=cfg.reachability_node_limit,
+                    rows=direct.rows,
+                )
+                if held is not None
+                else None
+            )
+            for (_game, held), direct in zip(branch_games, direct_results)
+        ]
+        held_results = [
+            future.result() if future is not None else None
+            for future in held_futures
+        ]
+
+    for held, held_records in zip(
+        (held for _game, held in branch_games),
+        held_results,
+    ):
         if held is not None and held_records is None:
             return _ORIGINAL_CHOOSE_SEARCH_ACTIONS_BATCH(
                 games,
@@ -198,6 +306,10 @@ def choose_search_actions_batch(
                 scorer=scorer,
             )
 
+    for index, ((game, held), direct, held_records) in enumerate(
+        zip(branch_games, direct_results, held_results)
+    ):
+        assert direct is not None
         prepared.append((direct, held, held_records))
         if direct:
             groups.append((game, direct))

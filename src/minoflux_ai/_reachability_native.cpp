@@ -788,9 +788,14 @@ RunResult execute_run(
         rows.push_back(py::cast<uint64_t>(value) & width_mask);
     }
 
-    return profile
-        ? run_native<true>(*table, rows, start_x, start_y, start_rotation, max_nodes)
-        : run_native<false>(*table, rows, start_x, start_y, start_rotation, max_nodes);
+    RunResult result;
+    {
+        py::gil_scoped_release release;
+        result = profile
+            ? run_native<true>(*table, rows, start_x, start_y, start_rotation, max_nodes)
+            : run_native<false>(*table, rows, start_x, start_y, start_rotation, max_nodes);
+    }
+    return result;
 }
 
 void add_run_metadata(py::dict& output, const RunResult& native_result) {
