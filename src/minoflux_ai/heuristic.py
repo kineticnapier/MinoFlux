@@ -23,6 +23,21 @@ class HeuristicWeights:
     hole_depth: float = -0.120000
     bumpiness: float = -0.184483
     wells: float = -0.060000
+    t_spin_slots: float = 1.200000
+    t_spin_slot_density: float = 0.280000
+    t_spin_slot_delta: float = 0.250000
+    t_spin_slot_height_quality: float = 0.700000
+    t_spin_slot_low_clean: float = 0.900000
+    t_spin_slot_supply_match: float = 0.550000
+    t_spin_slot_queue_match: float = 1.000000
+    t_spin_slot_urgency_clean: float = 1.000000
+    t_arrival_conversion: float = 1.000000
+    hold_t_supply_balance: float = 1.000000
+    center_garbage_resilience: float = 1.000000
+    center_garbage_worst_case: float = 1.000000
+    garbage_tspin_recovery: float = 1.000000
+    garbage_slot_supply_floor: float = 1.000000
+    garbage_slot_danger_survival: float = 1.000000
     new_holes: float = -1.200000
     lines: float = 0.760666
     attack: float = 0.850000
@@ -57,10 +72,20 @@ class PlacementFeatures:
     perfect_clear: bool
     game_over: bool
     spin: str | None = None
+    t_spin_slot_delta: int = 0
+    center_garbage_resilience: float = 0.0
+    center_garbage_worst_case: float = 0.0
+    garbage_tspin_recovery: float = 0.0
+    garbage_t_spin_slot_floor: int = 0
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = self.board.to_dict()
         value.update({
+            "t_spin_slot_delta": self.t_spin_slot_delta,
+            "center_garbage_resilience": self.center_garbage_resilience,
+            "center_garbage_worst_case": self.center_garbage_worst_case,
+            "garbage_tspin_recovery": self.garbage_tspin_recovery,
+            "garbage_t_spin_slot_floor": self.garbage_t_spin_slot_floor,
             "new_holes": self.new_holes,
             "lines": self.lines,
             "attack": self.attack,
@@ -81,6 +106,10 @@ class PlacementEvaluation:
 
 def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFAULT_WEIGHTS) -> float:
     board = features.board
+    t_spin_slot_height_quality = board.t_spin_slots / (1.0 + board.max_height / 6.0)
+    t_spin_slot_low_clean = board.t_spin_slots / (
+        1.0 + board.holes + board.max_height / 6.0
+    )
     return (
         board.aggregate_height * weights.aggregate_height
         + board.max_height * weights.max_height
@@ -88,6 +117,14 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
         + board.hole_depth * weights.hole_depth
         + board.bumpiness * weights.bumpiness
         + board.wells * weights.wells
+        + board.t_spin_slots * weights.t_spin_slots
+        + board.t_spin_slot_density * weights.t_spin_slot_density
+        + features.t_spin_slot_delta * weights.t_spin_slot_delta
+        + t_spin_slot_height_quality * weights.t_spin_slot_height_quality
+        + t_spin_slot_low_clean * weights.t_spin_slot_low_clean
+        + features.center_garbage_resilience * weights.center_garbage_resilience
+        + features.center_garbage_worst_case * weights.center_garbage_worst_case
+        + features.garbage_tspin_recovery * weights.garbage_tspin_recovery
         + features.new_holes * weights.new_holes
         + features.lines * weights.lines
         + features.attack * weights.attack
@@ -97,10 +134,201 @@ def score_features(features: PlacementFeatures, weights: HeuristicWeights = DEFA
     )
 
 
+def _next_t_distance(game: Game) -> int:
+    if game.current == "T":
+        return 0
+    for index, piece in enumerate(game.queue):
+        if piece == "T":
+            return index + 1
+        if index >= 5:
+            break
+    return 7
+
+
+def _t_supply_count(game: Game) -> int:
+    count = 1 if game.current == "T" else 0
+    for index, piece in enumerate(game.queue):
+        if index >= 6:
+            break
+        if piece == "T":
+            count += 1
+    return count
+
+
+def _t_spin_slot_supply_match(t_spin_slots: int, next_t_distance: int) -> float:
+    availability = max(0.0, (6.0 - next_t_distance) / 6.0)
+    excess_slots = max(0, t_spin_slots - 1)
+    return availability * min(1, t_spin_slots) - 0.35 * excess_slots * (1.0 - availability)
+
+
+def _t_spin_slot_queue_match_score(game: Game, t_spin_slots: int) -> float:
+    held_t = 1 if game.hold_piece == "T" else 0
+    supply = _t_supply_count(game) + held_t
+    matched = min(t_spin_slots, supply)
+    return 0.24 * matched - 0.22 * abs(t_spin_slots - supply)
+
+
+def _t_spin_slot_urgency_clean_score(game: Game, board: BoardFeatures) -> float:
+    next_t_distance = _next_t_distance(game)
+    urgency = max(0.0, (7.0 - next_t_distance) / 7.0)
+    return 0.34 * urgency * min(2, board.t_spin_slots) / (1.0 + board.holes)
+
+
+def _t_arrival_conversion_score(game: Game, features: PlacementFeatures) -> float:
+    if game.current != "T":
+        return 0.0
+    if features.spin_lines > 0:
+        return 1.20 * features.spin_lines + 0.20 * features.attack
+    slot_loss = max(0, -features.t_spin_slot_delta)
+    return -0.80 * slot_loss
+
+
+def _hold_t_supply_balance_score(game: Game, t_spin_slots: int) -> float:
+    if not game.hold_used:
+        return 0.0
+    held_t = 1 if game.hold_piece == "T" else 0
+    unmet_slots = max(0, t_spin_slots - (_t_supply_count(game) + held_t))
+    return -0.28 * unmet_slots + 0.12 * held_t * min(1, t_spin_slots)
+
+
+def _context_score(game: Game, features: PlacementFeatures, weights: HeuristicWeights) -> float:
+    supply_match = _t_spin_slot_supply_match(
+        features.board.t_spin_slots,
+        _next_t_distance(game),
+    )
+    queue_match = _t_spin_slot_queue_match_score(
+        game,
+        features.board.t_spin_slots,
+    )
+    urgency_clean = _t_spin_slot_urgency_clean_score(game, features.board)
+    arrival_conversion = _t_arrival_conversion_score(game, features)
+    hold_t_supply_balance = _hold_t_supply_balance_score(
+        game,
+        features.board.t_spin_slots,
+    )
+    garbage_slot_supply_floor = _garbage_slot_supply_floor_score(
+        game,
+        features.garbage_t_spin_slot_floor,
+    )
+    garbage_slot_danger_survival = _garbage_slot_danger_survival_score(
+        game,
+        features,
+    )
+    return (
+        supply_match * weights.t_spin_slot_supply_match
+        + queue_match * weights.t_spin_slot_queue_match
+        + urgency_clean * weights.t_spin_slot_urgency_clean
+        + arrival_conversion * weights.t_arrival_conversion
+        + hold_t_supply_balance * weights.hold_t_supply_balance
+        + garbage_slot_supply_floor * weights.garbage_slot_supply_floor
+        + garbage_slot_danger_survival * weights.garbage_slot_danger_survival
+    )
+
+
+def _garbage_t_spin_slot_floor(board: list[list[str | None]], width: int) -> int:
+    """Return the worst T-spin setup count after a four-line center garbage spike."""
+
+    holes = tuple(sorted({min(width - 1, max(0, hole)) for hole in (3, 4, 5, 6)}))
+    floors: list[int] = []
+    for hole in holes:
+        stressed = [row.copy() for row in board]
+        for _ in range(4):
+            stressed.pop(0)
+            garbage: list[str | None] = ["G"] * width
+            garbage[hole] = None
+            stressed.append(garbage)
+        floors.append(extract_board_features(stressed).t_spin_slots)
+    return min(floors, default=0)
+
+
+def _garbage_slot_supply_floor_score(game: Game, slot_floor: int) -> float:
+    supply = _t_supply_count(game) + int(game.hold_piece == "T")
+    matched = min(slot_floor, supply)
+    surplus = max(0, slot_floor - supply)
+    return 0.30 * matched - 0.22 * surplus
+
+
+def _garbage_slot_danger_survival_score(game: Game, features: PlacementFeatures) -> float:
+    """Prefer T supply that survives the worst center spike and penalize fragile setups."""
+
+    supply = _t_supply_count(game) + int(game.hold_piece == "T")
+    floor = features.garbage_t_spin_slot_floor
+    matched = min(floor, supply)
+    unmatched = max(0, floor - supply)
+    danger = max(0.0, -features.center_garbage_worst_case)
+    fragile_slots = max(0, features.board.t_spin_slots - floor)
+    return 0.34 * matched - 0.28 * unmatched - 0.05 * danger * fragile_slots
+
+
+def _center_garbage_resilience_score(board: list[list[str | None]], width: int) -> float:
+    """Score the post-placement board after a representative four-line center garbage spike."""
+
+    stressed = [row.copy() for row in board]
+    hole = min(width - 1, width // 2 - 1)
+    for _ in range(4):
+        stressed.pop(0)
+        garbage: list[str | None] = ["G"] * width
+        garbage[hole] = None
+        stressed.append(garbage)
+    features = extract_board_features(stressed)
+    return -(
+        0.075 * features.holes
+        + 0.018 * features.hole_depth
+        + 0.025 * features.max_height
+    )
+
+
+def _center_garbage_worst_case_score(board: list[list[str | None]], width: int) -> float:
+    """Penalize the worst four-line spike among nearby center garbage holes."""
+
+    holes = tuple(sorted({min(width - 1, max(0, hole)) for hole in (3, 4, 5, 6)}))
+    dangers: list[float] = []
+    for hole in holes:
+        stressed = [row.copy() for row in board]
+        for _ in range(4):
+            stressed.pop(0)
+            garbage: list[str | None] = ["G"] * width
+            garbage[hole] = None
+            stressed.append(garbage)
+        features = extract_board_features(stressed)
+        dangers.append(
+            2.2 * features.holes
+            + 0.26 * features.hole_depth
+            + 0.72 * features.max_height
+            + 0.08 * features.bumpiness
+        )
+    return -0.15 * max(dangers, default=0.0)
+
+
+def _garbage_tspin_recovery_score(board: list[list[str | None]], width: int) -> float:
+    """Reward boards that keep clean T-spin recovery options across likely garbage-hole positions."""
+
+    holes = (0, min(width - 1, 3), min(width - 1, 6), width - 1)
+    slot_quality_total = 0.0
+    board_quality_total = 0.0
+    for hole in holes:
+        stressed = [row.copy() for row in board]
+        for _ in range(4):
+            stressed.pop(0)
+            garbage: list[str | None] = ["G"] * width
+            garbage[hole] = None
+            stressed.append(garbage)
+        features = extract_board_features(stressed)
+        slot_quality_total += features.t_spin_slots / (
+            1.0 + features.holes + features.max_height / 6.0
+        )
+        board_quality_total -= (
+            0.080 * features.holes
+            + 0.020 * features.hole_depth
+            + 0.030 * features.max_height
+        )
+    count = float(len(holes))
+    return 1.10 * slot_quality_total / count + 0.20 * board_quality_total / count
+
+
 def _placement_features_fast(game: Game, placement: Placement, before: BoardFeatures) -> PlacementFeatures:
-    board = [row.copy() for row in game.board]
     spin_kind = classify_t_spin(
-        board,
+        game.board,
         piece=placement.piece,
         x=placement.x,
         y=placement.y,
@@ -108,11 +336,16 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
         last_move_was_rotation=placement.last_move_was_rotation,
         rotation_kick_index=placement.rotation_kick_index,
     )
+    board = list(game.board)
+    copied_rows: set[int] = set()
     topped_out = False
     for cell_x, cell_y in placement.cells:
         if cell_y < 0:
             topped_out = True
         else:
+            if cell_y not in copied_rows:
+                board[cell_y] = game.board[cell_y].copy()
+                copied_rows.add(cell_y)
             board[cell_y][cell_x] = placement.piece
 
     full_rows = [index for index, row in enumerate(board) if all(cell is not None for cell in row)]
@@ -142,6 +375,10 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
 
     hidden_occupied = any(cell is not None for row in board[: game.hidden_rows] for cell in row)
     after = extract_board_features(board)
+    center_garbage_resilience = _center_garbage_resilience_score(board, game.width)
+    center_garbage_worst_case = _center_garbage_worst_case_score(board, game.width)
+    garbage_tspin_recovery = _garbage_tspin_recovery_score(board, game.width)
+    garbage_t_spin_slot_floor = _garbage_t_spin_slot_floor(board, game.width)
     return PlacementFeatures(
         board=after,
         new_holes=max(0, after.holes - before.holes),
@@ -151,6 +388,11 @@ def _placement_features_fast(game: Game, placement: Placement, before: BoardFeat
         perfect_clear=perfect_clear,
         game_over=topped_out or hidden_occupied,
         spin=spin,
+        t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
+        center_garbage_resilience=center_garbage_resilience,
+        center_garbage_worst_case=center_garbage_worst_case,
+        garbage_tspin_recovery=garbage_tspin_recovery,
+        garbage_t_spin_slot_floor=garbage_t_spin_slot_floor,
     )
 
 
@@ -163,7 +405,7 @@ def evaluate_placement(
     placement_features = _placement_features_fast(game, placement, before)
     return PlacementEvaluation(
         placement=placement,
-        score=score_features(placement_features, weights),
+        score=score_features(placement_features, weights) + _context_score(game, placement_features, weights),
         features=placement_features,
     )
 
@@ -193,7 +435,7 @@ def rank_placements(
     evaluated = [
         PlacementEvaluation(
             placement=placement,
-            score=score_features(features, weights),
+            score=score_features(features, weights) + _context_score(game, features, weights),
             features=features,
         )
         for placement in source

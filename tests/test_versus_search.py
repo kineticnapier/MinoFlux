@@ -5,11 +5,58 @@ import unittest
 from minoflux_ai import (
     SearchConfig,
     VersusSearchConfig,
+    apply_search_action,
     choose_versus_action,
     clone_versus_match,
     run_versus_benchmark,
 )
+from minoflux_ai.features import extract_board_features, max_height_and_holes
 from minoflux_engine import VersusMatch
+from minoflux_ai.search import rank_search_actions
+from minoflux_ai.versus_search import _simulate_action
+
+
+class _CountingScorer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def score_many(self, game, evaluations):
+        self.calls += 1
+        return tuple(float(index) for index, _evaluation in enumerate(evaluations))
+
+
+class _GroupedCountingScorer:
+    def __init__(self) -> None:
+        self.group_calls = 0
+        self.placement_calls = 0
+
+    @staticmethod
+    def _values(placements):
+        return tuple(float(index) for index, _placement in enumerate(placements))
+
+    def score_placement_groups(self, groups):
+        self.group_calls += 1
+        return tuple(self._values(placements) for _game, placements in groups)
+
+    def score_placements(self, game, placements):
+        self.placement_calls += 1
+        return self._values(placements)
+
+    def score_many(self, game, evaluations):
+        self.placement_calls += 1
+        return tuple(float(index) for index, _evaluation in enumerate(evaluations))
+
+
+class _BatchStateScorer:
+    def __init__(self) -> None:
+        self.batch_sizes: list[int] = []
+
+    def score_matches(self, entries):
+        self.batch_sizes.append(len(entries))
+        return (0.0,) * len(entries)
+
+    def score_match(self, match, root_side, to_move=None):
+        raise AssertionError("batch hook should be used")
 
 
 class VersusSearchTests(unittest.TestCase):
@@ -35,6 +82,18 @@ class VersusSearchTests(unittest.TestCase):
         self.assertIsNone(match.ai.game.board[-1][0])
         self.assertEqual(cloned.player.pending.pending_lines, 2)
 
+    def test_lightweight_height_and_holes_match_full_features(self) -> None:
+        match = VersusMatch(321)
+        board = match.player.game.board
+        board[-1][0] = "G"
+        board[-2][0] = "G"
+        board[-3][0] = "G"
+        board[-1][1] = "G"
+        board[-3][1] = "G"
+        board[-1][4] = "G"
+        full = extract_board_features(board)
+        self.assertEqual(max_height_and_holes(board), (full.max_height, full.holes))
+
     def test_choice_reads_pending_and_does_not_mutate_match(self) -> None:
         match = VersusMatch(7)
         match.ai.pending.enqueue(5, 4)
@@ -46,6 +105,77 @@ class VersusSearchTests(unittest.TestCase):
         self.assertEqual(match.ai.pending.pending_lines, before_pending)
         assert choice is not None
         self.assertEqual(choice.action.placement.piece, match.ai.game.current)
+
+    def test_one_side_simulation_matches_full_clone(self) -> None:
+        match = VersusMatch(1701)
+        match.player.pending.enqueue(3, 4)
+        before_player = match.player.game.snapshot()
+        before_ai = match.ai.game.snapshot()
+        ranked = rank_search_actions(
+            match.player.game,
+            config=self.config.placement_search,
+            limit=1,
+        )
+        self.assertTrue(ranked)
+        action = ranked[0][0]
+
+        expected = clone_versus_match(match)
+        expected_lock = apply_search_action(expected.player.game, action)
+        expected_resolution = expected.resolve_lock("player", expected_lock)
+        actual, actual_resolution = _simulate_action(match, "player", action)
+
+        self.assertEqual(actual_resolution, expected_resolution)
+        self.assertEqual(actual.player.game.snapshot(), expected.player.game.snapshot())
+        self.assertEqual(actual.ai.game.snapshot(), expected.ai.game.snapshot())
+        self.assertEqual(tuple(actual.player.pending.packets), tuple(expected.player.pending.packets))
+        self.assertEqual(tuple(actual.ai.pending.packets), tuple(expected.ai.pending.packets))
+        self.assertEqual(actual._garbage_rng.getstate(), expected._garbage_rng.getstate())
+        self.assertEqual(match.player.game.snapshot(), before_player)
+        self.assertEqual(match.ai.game.snapshot(), before_ai)
+
+    def test_neural_scorer_is_used_for_root_and_reply_candidates(self) -> None:
+        match = VersusMatch(71)
+        root = _CountingScorer()
+        reply = _CountingScorer()
+        choice = choose_versus_action(
+            match,
+            "ai",
+            config=self.config,
+            scorer=root,
+            opponent_scorer=reply,
+        )
+        self.assertIsNotNone(choice)
+        self.assertGreater(root.calls, 0)
+        self.assertGreater(reply.calls, 0)
+
+    def test_grouped_reply_scorer_batches_all_root_candidates(self) -> None:
+        match = VersusMatch(71)
+        config = VersusSearchConfig(
+            placement_search=SearchConfig(
+                allow_hold=False,
+                lookahead_pieces=0,
+                beam_width=1,
+                srs_reachable=False,
+            ),
+            candidate_width=3,
+            opponent_reply_width=2,
+        )
+        root = _GroupedCountingScorer()
+        reply = _GroupedCountingScorer()
+        state = _BatchStateScorer()
+        choice = choose_versus_action(
+            match,
+            "ai",
+            config=config,
+            scorer=root,
+            opponent_scorer=reply,
+            state_scorer=state,
+        )
+        self.assertIsNotNone(choice)
+        self.assertEqual(root.group_calls, 1)
+        self.assertEqual(reply.group_calls, 1)
+        self.assertEqual(reply.placement_calls, 0)
+        self.assertEqual(state.batch_sizes, [3, 6])
 
     def test_small_headless_benchmark_is_deterministic(self) -> None:
         first = run_versus_benchmark(
@@ -65,6 +195,9 @@ class VersusSearchTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first.games, 1)
         self.assertLessEqual(first.per_game[0].turns, 8)
+        result = first.to_dict()
+        self.assertIn("playerSentPerPiece", result)
+        self.assertIn("playerMeanCanceled", result)
 
 
 if __name__ == "__main__":

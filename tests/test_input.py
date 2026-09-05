@@ -16,12 +16,14 @@ class RepeatTimerTests(unittest.TestCase):
         self.assertEqual(timer.poll(1.100, 20).count, 1)
         self.assertEqual(timer.poll(1.160, 20).count, 3)
 
-    def test_zero_interval_emits_one_instant_batch(self) -> None:
+    def test_zero_interval_stays_instant_while_held(self) -> None:
         timer = RepeatTimer()
         timer.press(2.0, 50)
         self.assertFalse(timer.poll(2.049, 0).instant)
         self.assertTrue(timer.poll(2.050, 0).instant)
-        self.assertFalse(timer.poll(3.0, 0).instant)
+        self.assertTrue(timer.poll(3.0, 0).instant)
+        timer.release()
+        self.assertFalse(timer.poll(3.1, 0).instant)
 
     def test_last_pressed_horizontal_direction_wins(self) -> None:
         handling = HandlingController()

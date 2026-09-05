@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=75", "pybind11>=3.0,<4"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,16 +13,37 @@ dependencies = []
 [project.optional-dependencies]
 game = ["pygame-ce>=2.5.7,<3"]
 ui = ["gradio>=6.14,<7", "pygame-ce>=2.5.7,<3"]
+review = ["pygame-ce>=2.5.7,<3", "tqdm>=4.67,<5"]
 rl = ["gymnasium>=1.2,<2", "numpy>=2,<3"]
-ml = ["torch>=2.7"]
+ml = [
+  "numpy>=2,<3",
+  "torch>=2.7",
+  "tqdm>=4.67,<5",
+  "triton-windows>=3.7,<3.8; sys_platform == 'win32'",
+]
 dev = ["pytest>=8,<10"]
 
 [project.scripts]
 minoflux = "minoflux.cli:main"
 minoflux-game = "minoflux.game:main"
 minoflux-lab = "minoflux.lab:main"
+minoflux-neural = "minoflux.neural_cli:main"
+minoflux-neural-dagger = "minoflux.neural_dagger_cli:main"
+minoflux-neural-mix = "minoflux.neural_mix_cli:main"
+minoflux-placement-v2 = "minoflux.placement_v2_cli:main"
 minoflux-replay = "minoflux.replay:main"
 minoflux-versus = "minoflux.versus_ai:main"
+minoflux-versus-neural = "minoflux.versus_neural_cli:main"
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
