@@ -494,41 +494,15 @@ def reachable_placements(
     collision_cache_hits = 0
     kick_checks = 0
 
-    if profile is None:
-
-        def collides_state(state_id: int) -> bool:
-            if state_id < 0 or state_id >= packed_count:
-                return True
-            cached_collision = collision_cache[state_id]
-            if cached_collision != _COLLISION_UNKNOWN:
-                return cached_collision == _COLLISION_BLOCKED
-            shape_mask = collision_masks[state_id]
-            blocked = shape_mask < 0 or bool(board_bits & shape_mask)
-            collision_cache[state_id] = (
-                _COLLISION_BLOCKED if blocked else _COLLISION_CLEAR
-            )
-            return blocked
-
-    else:
-
-        def collides_state(state_id: int) -> bool:
-            nonlocal collision_checks, collision_evaluations, collision_cache_hits
-            collision_checks += 1
-            if state_id < 0 or state_id >= packed_count:
-                return True
-            cached_collision = collision_cache[state_id]
-            if cached_collision != _COLLISION_UNKNOWN:
-                collision_cache_hits += 1
-                return cached_collision == _COLLISION_BLOCKED
-            shape_mask = collision_masks[state_id]
-            blocked = shape_mask < 0 or bool(board_bits & shape_mask)
-            collision_cache[state_id] = (
-                _COLLISION_BLOCKED if blocked else _COLLISION_CLEAR
-            )
-            collision_evaluations += 1
-            return blocked
-
-    if collides_state(start_state):
+    if profile is not None:
+        collision_checks += 1
+        collision_evaluations += 1
+    shape_mask = collision_masks[start_state]
+    start_blocked = shape_mask < 0 or bool(board_bits & shape_mask)
+    collision_cache[start_state] = (
+        _COLLISION_BLOCKED if start_blocked else _COLLISION_CLEAR
+    )
+    if start_blocked:
         if profile is not None:
             profile.collision_checks += collision_checks
             profile.collision_evaluations += collision_evaluations
@@ -547,7 +521,19 @@ def reachable_placements(
             current_id = state_id
             while True:
                 target_id = down_state[current_id]
-                if target_id == _NO_STATE or collides_state(target_id):
+                if target_id == _NO_STATE:
+                    result = current_id
+                    break
+                cached_collision = collision_cache[target_id]
+                if cached_collision == _COLLISION_UNKNOWN:
+                    shape_mask = collision_masks[target_id]
+                    blocked = shape_mask < 0 or bool(board_bits & shape_mask)
+                    collision_cache[target_id] = (
+                        _COLLISION_BLOCKED if blocked else _COLLISION_CLEAR
+                    )
+                else:
+                    blocked = cached_collision == _COLLISION_BLOCKED
+                if blocked:
                     result = current_id
                     break
                 current_id = target_id
@@ -563,11 +549,27 @@ def reachable_placements(
     else:
 
         def compute_landing_state(state_id: int) -> int:
+            nonlocal collision_checks, collision_evaluations, collision_cache_hits
             trail: list[int] = [state_id]
             current_id = state_id
             while True:
                 target_id = down_state[current_id]
-                if target_id == _NO_STATE or collides_state(target_id):
+                if target_id == _NO_STATE:
+                    result = current_id
+                    break
+                collision_checks += 1
+                cached_collision = collision_cache[target_id]
+                if cached_collision == _COLLISION_UNKNOWN:
+                    shape_mask = collision_masks[target_id]
+                    blocked = shape_mask < 0 or bool(board_bits & shape_mask)
+                    collision_cache[target_id] = (
+                        _COLLISION_BLOCKED if blocked else _COLLISION_CLEAR
+                    )
+                    collision_evaluations += 1
+                else:
+                    collision_cache_hits += 1
+                    blocked = cached_collision == _COLLISION_BLOCKED
+                if blocked:
                     result = current_id
                     break
                 current_id = target_id
@@ -622,58 +624,94 @@ def reachable_placements(
         new_depth = depth + 1
 
         target_state = left_state[state_id]
-        if (
-            target_state != _NO_STATE
-            and state_nodes[target_state] == _NO_STATE
-            and not collides_state(target_state)
-        ):
-            successor = len(node_states)
-            append_node_state(target_state)
-            append_parent(node_index)
-            if normalized_include_paths:
-                commands.append(_CMD_LEFT)
-            append_depth(new_depth)
-            append_kick_index(-1)
-            state_nodes[target_state] = successor
-            append_visited_state(target_state)
-            reachable_count += 1
-            append_frontier(successor)
+        if target_state != _NO_STATE and state_nodes[target_state] == _NO_STATE:
+            if profile is not None:
+                collision_checks += 1
+            cached_collision = collision_cache[target_state]
+            if cached_collision == _COLLISION_UNKNOWN:
+                shape_mask = collision_masks[target_state]
+                blocked = shape_mask < 0 or bool(board_bits & shape_mask)
+                collision_cache[target_state] = (
+                    _COLLISION_BLOCKED if blocked else _COLLISION_CLEAR
+                )
+                if profile is not None:
+                    collision_evaluations += 1
+            else:
+                blocked = cached_collision == _COLLISION_BLOCKED
+                if profile is not None:
+                    collision_cache_hits += 1
+            if not blocked:
+                successor = len(node_states)
+                append_node_state(target_state)
+                append_parent(node_index)
+                if normalized_include_paths:
+                    commands.append(_CMD_LEFT)
+                append_depth(new_depth)
+                append_kick_index(-1)
+                state_nodes[target_state] = successor
+                append_visited_state(target_state)
+                reachable_count += 1
+                append_frontier(successor)
 
         target_state = right_state[state_id]
-        if (
-            target_state != _NO_STATE
-            and state_nodes[target_state] == _NO_STATE
-            and not collides_state(target_state)
-        ):
-            successor = len(node_states)
-            append_node_state(target_state)
-            append_parent(node_index)
-            if normalized_include_paths:
-                commands.append(_CMD_RIGHT)
-            append_depth(new_depth)
-            append_kick_index(-1)
-            state_nodes[target_state] = successor
-            append_visited_state(target_state)
-            reachable_count += 1
-            append_frontier(successor)
+        if target_state != _NO_STATE and state_nodes[target_state] == _NO_STATE:
+            if profile is not None:
+                collision_checks += 1
+            cached_collision = collision_cache[target_state]
+            if cached_collision == _COLLISION_UNKNOWN:
+                shape_mask = collision_masks[target_state]
+                blocked = shape_mask < 0 or bool(board_bits & shape_mask)
+                collision_cache[target_state] = (
+                    _COLLISION_BLOCKED if blocked else _COLLISION_CLEAR
+                )
+                if profile is not None:
+                    collision_evaluations += 1
+            else:
+                blocked = cached_collision == _COLLISION_BLOCKED
+                if profile is not None:
+                    collision_cache_hits += 1
+            if not blocked:
+                successor = len(node_states)
+                append_node_state(target_state)
+                append_parent(node_index)
+                if normalized_include_paths:
+                    commands.append(_CMD_RIGHT)
+                append_depth(new_depth)
+                append_kick_index(-1)
+                state_nodes[target_state] = successor
+                append_visited_state(target_state)
+                reachable_count += 1
+                append_frontier(successor)
 
         target_state = down_state[state_id]
-        if (
-            target_state != _NO_STATE
-            and state_nodes[target_state] == _NO_STATE
-            and not collides_state(target_state)
-        ):
-            successor = len(node_states)
-            append_node_state(target_state)
-            append_parent(node_index)
-            if normalized_include_paths:
-                commands.append(_CMD_DOWN)
-            append_depth(new_depth)
-            append_kick_index(-1)
-            state_nodes[target_state] = successor
-            append_visited_state(target_state)
-            reachable_count += 1
-            append_frontier(successor)
+        if target_state != _NO_STATE and state_nodes[target_state] == _NO_STATE:
+            if profile is not None:
+                collision_checks += 1
+            cached_collision = collision_cache[target_state]
+            if cached_collision == _COLLISION_UNKNOWN:
+                shape_mask = collision_masks[target_state]
+                blocked = shape_mask < 0 or bool(board_bits & shape_mask)
+                collision_cache[target_state] = (
+                    _COLLISION_BLOCKED if blocked else _COLLISION_CLEAR
+                )
+                if profile is not None:
+                    collision_evaluations += 1
+            else:
+                blocked = cached_collision == _COLLISION_BLOCKED
+                if profile is not None:
+                    collision_cache_hits += 1
+            if not blocked:
+                successor = len(node_states)
+                append_node_state(target_state)
+                append_parent(node_index)
+                if normalized_include_paths:
+                    commands.append(_CMD_DOWN)
+                append_depth(new_depth)
+                append_kick_index(-1)
+                state_nodes[target_state] = successor
+                append_visited_state(target_state)
+                reachable_count += 1
+                append_frontier(successor)
 
         rotation_started = time.perf_counter() if profiling else 0.0
         for command, kicks in rotation_transitions[state_id]:
