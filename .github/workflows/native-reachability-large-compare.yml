@@ -1,0 +1,136 @@
+name: Native Reachability Large Compare
+
+on:
+  push:
+    branches: [perf-native-pathless-srs-20260905]
+
+jobs:
+  compare:
+    if: github.event.head_commit.message == 'Run million-node native exact-SRS comparison'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: '3.13'
+      - run: uv sync --extra dev
+      - name: Compare deterministic multi-game corpus
+        shell: bash
+        run: |
+          cat > /tmp/native_compare.py <<'PY'
+          from __future__ import annotations
+          import hashlib
+          import json
+          import os
+          import time
+          from contextlib import nullcontext
+          from unittest.mock import patch
+
+          from minoflux_ai.bitboard import board_row_masks, place_and_clear_row_masks
+          from minoflux_ai.features import max_height_and_holes_from_masks
+          from minoflux_ai.reachability import ReachabilityProfile, clear_reachability_cache, collect_reachability_profile
+          from minoflux_ai.search import SearchAction, SearchConfig, _branch_groups, apply_search_action
+          from minoflux_engine import Game
+
+          CFG = SearchConfig(
+              allow_hold=True,
+              lookahead_pieces=0,
+              beam_width=4,
+              srs_reachable=True,
+              allow_180=False,
+              reachability_node_limit=8000,
+          ).normalized()
+
+          def payload(p):
+              return [
+                  p.piece, p.x, p.y, p.rotation, [list(c) for c in p.cells], list(p.path),
+                  p.last_move_was_rotation, p.rotation_kick_index, p.rotation_from, p.rotation_to,
+              ]
+
+          def choose(branches):
+              best = None
+              best_key = None
+              for use_hold, game, placements in branches:
+                  if game is None:
+                      continue
+                  rows = board_row_masks(game.board)
+                  for order, placement in enumerate(placements):
+                      after, lines, topped_out = place_and_clear_row_masks(rows, placement, width=game.width)
+                      max_height, holes = max_height_and_holes_from_masks(after, width=game.width)
+                      key = (-int(topped_out), -holes, -max_height, lines, -int(use_hold), -order)
+                      if best_key is None or key > best_key:
+                          best_key = key
+                          best = (use_hold, placement)
+              return best
+
+          def run(*, native, profiled):
+              h = hashlib.sha256()
+              profile = ReachabilityProfile() if profiled else None
+              clear_reachability_cache()
+              pieces = attack = topouts = completed = 0
+              disable = nullcontext() if native else patch.dict(os.environ, {'MINOFLUX_DISABLE_NATIVE_REACHABILITY': '1'})
+              collect = collect_reachability_profile(profile) if profiled else nullcontext()
+              started = time.perf_counter()
+              with disable, collect:
+                  for game_index in range(20):
+                      seed = 8100001 + game_index * 97
+                      game = Game(seed)
+                      for step in range(300):
+                          direct, hold_game, hold_placements = _branch_groups(game, CFG, include_paths=False)
+                          h.update(json.dumps([seed, step, False, [payload(p) for p in direct]], separators=(',', ':')).encode())
+                          h.update(b'\n')
+                          h.update(json.dumps([seed, step, True, [payload(p) for p in hold_placements]], separators=(',', ':')).encode())
+                          h.update(b'\n')
+                          picked = choose(((False, game, direct), (True, hold_game, hold_placements)))
+                          if picked is None:
+                              break
+                          before_pieces = game.pieces_placed
+                          before_attack = game.attack
+                          apply_search_action(game, SearchAction(*picked))
+                          pieces += game.pieces_placed - before_pieces
+                          attack += game.attack - before_attack
+                          if game.game_over:
+                              break
+                      topouts += int(game.game_over)
+                      completed += int(not game.game_over and game.pieces_placed >= 300)
+              elapsed = time.perf_counter() - started
+              result = {
+                  'signature': h.hexdigest(), 'pieces': pieces, 'attack': attack,
+                  'topouts': topouts, 'completed': completed,
+                  'elapsed': elapsed, 'pps': pieces / elapsed,
+              }
+              if profile is not None:
+                  result['profile'] = profile.to_dict()
+              return result
+
+          python_profile = run(native=False, profiled=True)
+          native_profile = run(native=True, profiled=True)
+          counts = (
+              'calls','bfsNodes','collisionChecks','collisionEvaluations','collisionCacheHits','kickChecks',
+              'landingQueries','landingCacheHits','representativeNodes','representativeDuplicateSkips',
+              'placements','pathCalls','cacheHits','cacheMisses',
+          )
+          assert python_profile['signature'] == native_profile['signature'], 'ordered placement stream changed'
+          for key in ('pieces','attack','topouts','completed'):
+              assert python_profile[key] == native_profile[key], key
+          for key in counts:
+              assert python_profile['profile'][key] == native_profile['profile'][key], key
+
+          plain_python = [run(native=False, profiled=False) for _ in range(3)]
+          plain_native = [run(native=True, profiled=False) for _ in range(3)]
+          assert all(r['signature'] == python_profile['signature'] for r in plain_python + plain_native)
+          import statistics
+          p_med = statistics.median(r['elapsed'] for r in plain_python)
+          n_med = statistics.median(r['elapsed'] for r in plain_native)
+          print('SEMANTICS: IDENTICAL')
+          print('summary:', {k:native_profile[k] for k in ('pieces','attack','topouts','completed')})
+          print('signature:', native_profile['signature'])
+          print('counts:', {k:native_profile['profile'][k] for k in counts})
+          print('profile elapsed:', python_profile['elapsed'], '->', native_profile['elapsed'])
+          for key in ('totalSeconds','bfsSeconds','rotationSeconds','landingSeconds','representativeSeconds','placementSeconds'):
+              print(key+':', python_profile['profile'][key], '->', native_profile['profile'][key])
+          print('plain median:', p_med, '->', n_med)
+          print('plain PPS:', plain_python[1]['pieces']/p_med, '->', plain_native[1]['pieces']/n_med)
+          print('plain speedup:', p_med/n_med)
+          PY
+          uv run --no-sync python /tmp/native_compare.py
