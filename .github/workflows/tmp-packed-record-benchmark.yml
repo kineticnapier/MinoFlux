@@ -1,0 +1,68 @@
+name: Temporary Packed Record Benchmark
+
+on:
+  push:
+    branches:
+      - perf-search-pipeline-20260905
+
+permissions:
+  contents: write
+
+jobs:
+  benchmark:
+    if: github.event.head_commit.message != 'Pack native placement records for neural search'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: '3.13'
+      - run: uv sync --extra ml --extra dev
+      - name: Baseline benchmark
+        run: uv run --no-sync python tools/_tmp_search_pipeline_benchmark.py > /tmp/before.json
+      - name: Apply packed-record patch
+        run: uv run --no-sync python tools/_tmp_patch_packed_records.py
+      - name: Rebuild native extensions
+        run: uv sync --extra ml --extra dev --reinstall-package minoflux
+      - name: Focused differential tests
+        run: >-
+          uv run --no-sync python -m pytest -q
+          tests/test_reachability_native.py
+          tests/test_neural_native_record_path.py
+          tests/test_neural_native_record_profile.py
+          tests/test_neural_native_encoding.py
+          tests/test_neural_game_batch.py
+          tests/test_neural_search_fastpath.py
+      - name: Full tests
+        run: uv run --no-sync python -m pytest -q
+      - name: Optimized benchmark
+        run: uv run --no-sync python tools/_tmp_search_pipeline_benchmark.py > /tmp/after.json
+      - name: Compare results
+        shell: bash
+        run: |
+          echo '=== BEFORE ==='; cat /tmp/before.json
+          echo '=== AFTER ==='; cat /tmp/after.json
+          python - <<'PY'
+          import json
+          a=json.load(open('/tmp/before.json')); b=json.load(open('/tmp/after.json'))
+          assert a['profile']['signature'] == b['profile']['signature']
+          for k in ('pieces','attack','topouts','completed'):
+              assert a['profile'][k] == b['profile'][k], (k,a['profile'][k],b['profile'][k])
+          ra=a['profile']['reachability']; rb=b['profile']['reachability']
+          for k in ('bfsNodes','collisionChecks','collisionEvaluations','collisionCacheHits','kickChecks','landingQueries','landingCacheHits','representativeNodes','representativeDuplicateSkips','placements'):
+              assert ra[k] == rb[k], (k,ra[k],rb[k])
+          print('median speedup', a['median']/b['median'])
+          print('reachability speedup', ra['totalSeconds']/rb['totalSeconds'])
+          print('board mask before/after', ra['boardMaskSeconds'], rb['boardMaskSeconds'])
+          print('unaccounted before/after', ra['unaccountedSeconds'], rb['unaccountedSeconds'])
+          PY
+      - name: Commit optimized sources
+        shell: bash
+        run: |
+          git config user.name 'Kinetic Napier'
+          git config user.email 'u61819269@gmail.com'
+          git add src/minoflux_ai/_reachability_native.cpp src/minoflux_ai/_neural_native.cpp src/minoflux_ai/reachability_native.py src/minoflux_ai/neural_fast.py src/minoflux_ai/neural_search_fast.py tests/test_neural_native_record_path.py
+          git commit -m 'Pack native placement records for neural search'
+          git push origin HEAD:perf-search-pipeline-20260905
