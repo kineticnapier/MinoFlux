@@ -9,13 +9,25 @@ import random
 from typing import Callable, Iterable, Mapping, Sequence
 
 from minoflux_engine import Game, LockResult
-from minoflux_engine.spin import is_difficult_clear
+from minoflux_engine.b2b import resolve_b2b_charging
+from minoflux_engine.spin import base_attack, is_difficult_clear, t_spin_event
 
-from .features import BoardFeatures, extract_board_features
+from .bitboard import (
+    board_row_masks,
+    classify_t_spin_row_masks,
+    collides_row_masks,
+    hidden_rows_occupied,
+    place_and_clear_row_masks,
+)
+from .features import (
+    BoardFeatures,
+    extract_teacher_board_features,
+    extract_teacher_board_features_from_masks,
+)
 from .neural import NeuralValueConfig, encode_game_state
 from .neural_dataset import NEURAL_DATASET_FORMAT, pack_board_rows
 from .reachability import reachable_placements
-from .search import SearchAction, apply_search_action, clone_game
+from .search import SearchAction, _held_search_game, apply_search_action, clone_game
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +74,7 @@ DEFAULT_PLACEMENT_TEACHER_WEIGHTS = PlacementTeacherWeights()
 
 @dataclass(frozen=True, slots=True)
 class PlacementTeacherConfig:
-    """Search settings for the slow, offline-only placement teacher.
+    """Search settings for the exact, offline-only placement teacher.
 
     ``depth`` counts the root placement. depth=1 is an immediate objective;
     depth=2 evaluates one future placement, and so on. Every legal root action
@@ -208,26 +220,43 @@ def _ranking_key(score: PlacementTeacherScore) -> tuple[object, ...]:
 def _legal_actions(
     game: Game,
     config: PlacementTeacherConfig,
+    *,
+    include_paths: bool = True,
 ) -> tuple[SearchAction, ...]:
     """Enumerate exact-SRS root actions without heuristic filtering."""
 
-    cfg = config.normalized()
+    return _legal_actions_normalized(game, config.normalized(), include_paths=include_paths)
+
+
+def _legal_actions_normalized(
+    game: Game,
+    cfg: PlacementTeacherConfig,
+    *,
+    include_paths: bool = True,
+) -> tuple[SearchAction, ...]:
     direct = reachable_placements(
         game,
         allow_180=cfg.allow_180,
         max_nodes=cfg.reachability_node_limit,
-        include_paths=True,
+        include_paths=include_paths,
     )
     actions: list[SearchAction] = [SearchAction(False, placement) for placement in direct]
 
     if cfg.allow_hold and not game.hold_used and not game.game_over and not game.paused:
-        held = clone_game(game)
-        if held.hold():
+        # The search view shares occupancy/RNG read-only. Unusual empty queues
+        # (or custom engine subclasses) need the real engine's refill/hold.
+        if type(game) is not Game or (game.hold_piece is None and not game.queue):
+            held = clone_game(game)
+            if not held.hold():
+                held = None
+        else:
+            held = _held_search_game(game)
+        if held is not None:
             held_placements = reachable_placements(
                 held,
                 allow_180=cfg.allow_180,
                 max_nodes=cfg.reachability_node_limit,
-                include_paths=True,
+                include_paths=include_paths,
             )
             actions.extend(SearchAction(True, placement) for placement in held_placements)
 
@@ -250,9 +279,23 @@ def placement_teacher_transition_score(
 ) -> PlacementTeacherBreakdown:
     """Score one actual engine transition without mutating either game."""
 
-    cfg = config.normalized()
-    before_board = before_features or extract_board_features(before.board)
-    after_board = extract_board_features(after.board)
+    return _transition_score_normalized(
+        before, after, result, weights, config.normalized(),
+        before_features=before_features,
+    )
+
+
+def _transition_score_normalized(
+    before: Game,
+    after: Game,
+    result: LockResult,
+    weights: PlacementTeacherWeights,
+    cfg: PlacementTeacherConfig,
+    *,
+    before_features: BoardFeatures | None = None,
+) -> PlacementTeacherBreakdown:
+    before_board = before_features or extract_teacher_board_features(before.board)
+    after_board = extract_teacher_board_features(after.board)
     new_holes = max(0, after_board.holes - before_board.holes)
     difficult = is_difficult_clear(result.lines, result.spin)
     b2b_growth = max(0, int(after.b2b_chain) - int(before.b2b_chain))
@@ -309,7 +352,7 @@ def _simulate_action(
 ) -> tuple[Game, PlacementTeacherBreakdown]:
     child = clone_game(game)
     result = apply_search_action(child, action)
-    breakdown = placement_teacher_transition_score(
+    breakdown = _transition_score_normalized(
         game,
         child,
         result,
@@ -318,6 +361,99 @@ def _simulate_action(
         before_features=before_features,
     )
     return child, breakdown
+
+
+def _leaf_action_score(
+    game: Game,
+    action: SearchAction,
+    weights: PlacementTeacherWeights,
+    config: PlacementTeacherConfig,
+    *,
+    source_rows: Sequence[int],
+    before_features: BoardFeatures,
+) -> float:
+    """Exact immediate objective for an already-legal final-ply action.
+
+    No child, bag, or RNG is needed: the next piece is already in the queue.
+    Keep the engine fallback for custom Game implementations and short queues
+    that require bag draws before the next spawn. Only occupancy and the lock
+    outcome affect the teacher; score/telemetry/queue updates are unobserved.
+    """
+
+    next_index = int(action.use_hold and game.hold_piece is None)
+    if type(game) is not Game or len(game.queue) <= next_index:
+        return _simulate_action(
+            game, action, weights, config, before_features=before_features,
+        )[1].total
+
+    placement = action.placement
+    spin_kind = classify_t_spin_row_masks(
+        source_rows,
+        piece=placement.piece,
+        x=placement.x,
+        y=placement.y,
+        rotation=placement.rotation,
+        last_move_was_rotation=placement.last_move_was_rotation,
+        rotation_kick_index=placement.rotation_kick_index,
+        width=game.width,
+    )
+    after_rows, lines, topped_out = place_and_clear_row_masks(
+        source_rows, placement, width=game.width,
+    )
+    spin = t_spin_event(spin_kind, lines)
+    perfect_clear = not any(after_rows)
+    difficult = is_difficult_clear(lines, spin)
+    b2b = resolve_b2b_charging(
+        active=game.back_to_back,
+        chain=game.b2b_chain,
+        difficult=difficult,
+        lines=lines,
+        perfect_clear=perfect_clear and lines > 0,
+    )
+    attack = base_attack(lines, spin) + b2b.attack_bonus
+    combo = game.combo + 1 if lines else -1
+    if lines and combo > 0:
+        attack += min(4, combo // 2 + 1)
+    if perfect_clear and lines:
+        attack += 10
+    # split_surge only partitions this integer; the engine's total is its sum.
+    attack += b2b.released
+    game_over = (
+        topped_out
+        or hidden_rows_occupied(after_rows, game.hidden_rows)
+        or collides_row_masks(
+            after_rows, game.queue[next_index], 3, 1, 0, width=game.width,
+        )
+    )
+    board = extract_teacher_board_features_from_masks(after_rows, width=game.width)
+    new_holes = max(0, board.holes - before_features.holes)
+    b2b_growth = max(0, int(b2b.chain) - int(game.b2b_chain))
+    b2b_broken = bool(game.back_to_back and lines > 0 and not b2b.active)
+    high_stack = max(0, board.max_height - config.high_stack_height)
+    spin_lines = int(lines) if spin is not None else 0
+
+    # Preserve the exact float conversions, grouping and addition order of
+    # PlacementTeacherBreakdown.total. Reassociation changes dataset labels.
+    positive = (
+        float(attack) * weights.attack
+        + float(lines) * weights.lines
+        + float(difficult) * weights.difficult_clear
+        + float(spin_lines) * weights.spin_lines
+        + float(b2b_growth) * weights.b2b_chain_growth
+        + float(max(0, int(combo))) * weights.combo
+        + float(perfect_clear) * weights.perfect_clear
+    )
+    negative = (
+        float(b2b_broken) * weights.b2b_break_penalty
+        + float(new_holes) * weights.new_holes_penalty
+        + float(board.holes) * weights.holes_penalty
+        + float(board.hole_depth) * weights.hole_depth_penalty
+        + float(board.max_height) * weights.max_height_penalty
+        + float(high_stack * high_stack) * weights.high_stack_penalty
+        + float(board.bumpiness) * weights.bumpiness_penalty
+        + float(bool(game_over)) * weights.topout_penalty
+    )
+    return positive - negative
 
 
 def _future_value(
@@ -329,10 +465,21 @@ def _future_value(
     if remaining_depth <= 0 or game.game_over:
         return 0.0
 
-    actions = _legal_actions(game, config)
+    actions = _legal_actions_normalized(game, config, include_paths=remaining_depth > 1)
     if not actions:
         return 0.0
-    before_features = extract_board_features(game.board)
+    source_rows = board_row_masks(game.board)
+    before_features = extract_teacher_board_features_from_masks(source_rows, width=game.width)
+    if remaining_depth == 1:
+        # No child survives a leaf: evaluate all legal actions, retaining just
+        # the scalar maximum. beam_width cannot affect this value.
+        return max(
+            _leaf_action_score(
+                game, action, weights, config,
+                source_rows=source_rows, before_features=before_features,
+            )
+            for action in actions
+        )
     immediate_nodes: list[tuple[float, SearchAction, Game]] = []
     for action in actions:
         child, breakdown = _simulate_action(
@@ -355,9 +502,6 @@ def _future_value(
         reverse=True,
     )
     frontier = immediate_nodes[: config.beam_width]
-
-    if remaining_depth == 1:
-        return frontier[0][0]
 
     best: float | None = None
     for immediate, _action, child in frontier:
@@ -382,10 +526,10 @@ def rank_placement_teacher_actions(
     """Score every legal root action with the non-heuristic offline teacher."""
 
     cfg = config.normalized()
-    actions = _legal_actions(game, cfg)
+    actions = _legal_actions_normalized(game, cfg)
     if not actions:
         return ()
-    before_features = extract_board_features(game.board)
+    before_features = extract_teacher_board_features(game.board)
     scored: list[PlacementTeacherScore] = []
     for action in actions:
         child, breakdown = _simulate_action(

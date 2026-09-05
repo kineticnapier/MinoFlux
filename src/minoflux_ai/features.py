@@ -247,6 +247,65 @@ def extract_board_features_from_masks(
     )
 
 
+def extract_teacher_board_features_from_masks(
+    rows: Sequence[int],
+    *,
+    width: int,
+) -> BoardFeatures:
+    """Extract only the exact stack terms consumed by Placement Teacher.
+
+    This specialized result must not be used for general placement evaluation:
+    aggregate_height, wells, t_spin_slots and occupied_cells are deliberately
+    zero.  The teacher objective only reads max_height, holes, hole_depth and
+    bumpiness.  Their definitions match ``extract_board_features_from_masks``.
+    """
+
+    if not rows:
+        return BoardFeatures(0, 0, 0, 0, 0, 0, 0, 0)
+    height = len(rows)
+    row_limit = (1 << width) - 1
+    normalized = tuple(int(row) & row_limit for row in rows)
+    full_height_mask = (1 << height) - 1
+    heights: list[int] = []
+    holes = 0
+    hole_depth = 0
+    for bits in _column_masks(normalized, width):
+        if not bits:
+            heights.append(0)
+            continue
+        top = (bits & -bits).bit_length() - 1
+        heights.append(height - top)
+        below_top = full_height_mask ^ ((1 << top) - 1)
+        pending = below_top & ~bits & full_height_mask
+        holes += pending.bit_count()
+        while pending:
+            bit = pending & -pending
+            # bit - 1 selects every cell above this hole in the column.
+            hole_depth += (bits & (bit - 1)).bit_count()
+            pending ^= bit
+    return BoardFeatures(
+        aggregate_height=0,
+        max_height=max(heights, default=0),
+        holes=holes,
+        hole_depth=hole_depth,
+        bumpiness=sum(abs(left - right) for left, right in zip(heights, heights[1:])),
+        wells=0,
+        t_spin_slots=0,
+        occupied_cells=0,
+    )
+
+
+def extract_teacher_board_features(board: Board) -> BoardFeatures:
+    """Board wrapper for the Placement Teacher's specialized stack features."""
+
+    if not board:
+        return BoardFeatures(0, 0, 0, 0, 0, 0, 0, 0)
+    width = len(board[0])
+    if any(len(row) != width for row in board):
+        raise ValueError("Board rows must have equal width")
+    return extract_teacher_board_features_from_masks(board_row_masks(board), width=width)
+
+
 def extract_board_features(board: Board) -> BoardFeatures:
     """Extract deterministic stack features from a board after line clears."""
 
