@@ -1,0 +1,95 @@
+name: Validate Commandless Rotation Candidate
+
+on:
+  push:
+    branches: [perf-rotation-hotloop-20260905]
+
+jobs:
+  validate:
+    if: github.event.head_commit.message == 'Validate clean commandless rotation candidate'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 815bab8b1a15510418604aca8ad5766c83cd6e2a
+          path: baseline
+      - uses: actions/checkout@v4
+        with:
+          ref: 55ae74f117281fac1cb741543d2b8a85e5abc4a6
+          path: candidate
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compare exact SRS placement stream and counters
+        shell: bash
+        run: |
+          cat > probe.py <<'PY'
+          from __future__ import annotations
+          import hashlib, json, time
+          from minoflux_ai.reachability import ReachabilityProfile, clear_reachability_cache, collect_reachability_profile, reachable_placements
+          from minoflux_ai.search import SearchAction, SearchConfig, _branch_groups, apply_search_action
+          from minoflux_engine import Game
+
+          CFG = SearchConfig(allow_hold=True, lookahead_pieces=0, beam_width=4, srs_reachable=True, allow_180=False, reachability_node_limit=8000).normalized()
+
+          def payload(p):
+              return [p.piece,p.x,p.y,p.rotation,[list(c) for c in p.cells],list(p.path),p.last_move_was_rotation,p.rotation_kick_index,p.rotation_from,p.rotation_to]
+
+          def add(h, seed, step, held, ps):
+              h.update(json.dumps([seed,step,held,[payload(p) for p in ps]],separators=(',',':')).encode()); h.update(b'\n')
+
+          def pathless():
+              h=hashlib.sha256(); prof=ReachabilityProfile(); clear_reachability_cache(); pieces=attack=topouts=completed=0
+              started=time.perf_counter()
+              with collect_reachability_profile(prof):
+                  for gi in range(20):
+                      seed=8100001+gi*97; g=Game(seed)
+                      for step in range(300):
+                          direct,hg,hps=_branch_groups(g,CFG,include_paths=False)
+                          add(h,seed,step,False,direct); add(h,seed,step,True,hps)
+                          cand=[(False,p) for p in direct]
+                          if hg is not None: cand.extend((True,p) for p in hps)
+                          if not cand: break
+                          hold,p=cand[(seed*1315423911+step*2654435761)%len(cand)]
+                          bp=g.pieces_placed; ba=g.attack
+                          apply_search_action(g,SearchAction(hold,p))
+                          pieces+=g.pieces_placed-bp; attack+=g.attack-ba
+                          if g.game_over: break
+                      topouts+=int(g.game_over); completed+=int(not g.game_over and g.pieces_placed>=300)
+              elapsed=time.perf_counter()-started
+              return {'signature':h.hexdigest(),'pieces':pieces,'attack':attack,'topouts':topouts,'completed':completed,'elapsed':elapsed,'pps':pieces/elapsed,'profile':prof.to_dict()}
+
+          def pathful():
+              h=hashlib.sha256(); clear_reachability_cache(); total=0
+              for seed in (1,7,97,1234,8100001,8100098,20260905):
+                  g=Game(seed)
+                  for step in range(36):
+                      ps=reachable_placements(g,allow_180=False,max_nodes=8000,include_paths=True)
+                      add(h,seed,step,False,ps); total+=len(ps)
+                      if not ps: break
+                      g.place(ps[(seed*17+step*13)%len(ps)])
+                      if g.game_over: break
+              return {'signature':h.hexdigest(),'placements':total}
+
+          print(json.dumps({'pathless':pathless(),'pathful':pathful()},separators=(',',':')))
+          PY
+          PYTHONPATH="$GITHUB_WORKSPACE/baseline/src" python probe.py > baseline.json
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python probe.py > candidate.json
+          python - <<'PY'
+          import json
+          b=json.load(open('baseline.json')); c=json.load(open('candidate.json'))
+          assert b['pathless']['signature']==c['pathless']['signature'], 'pathless placement stream changed'
+          assert b['pathful']['signature']==c['pathful']['signature'], 'pathful placement/path stream changed'
+          for k in ('pieces','attack','topouts','completed'): assert b['pathless'][k]==c['pathless'][k], k
+          counts=('calls','bfsNodes','collisionChecks','collisionEvaluations','collisionCacheHits','kickChecks','landingQueries','landingCacheHits','representativeNodes','representativeDuplicateSkips','placements','pathCalls','cacheHits','cacheMisses')
+          for k in counts: assert b['pathless']['profile'][k]==c['pathless']['profile'][k], k
+          print('SEMANTICS: IDENTICAL')
+          print('pathless signature:',c['pathless']['signature'])
+          print('pathful signature:',c['pathful']['signature'])
+          print('summary:',{k:c['pathless'][k] for k in ('pieces','attack','topouts','completed')})
+          print('elapsed:',b['pathless']['elapsed'],'->',c['pathless']['elapsed'])
+          print('pps:',b['pathless']['pps'],'->',c['pathless']['pps'])
+          for k in ('totalSeconds','bfsSeconds','rotationSeconds','landingSeconds','representativeSeconds','placementSeconds'):
+              print(k+':',b['pathless']['profile'][k],'->',c['pathless']['profile'][k])
+          print('counts:',{k:c['pathless']['profile'][k] for k in counts})
+          PY
