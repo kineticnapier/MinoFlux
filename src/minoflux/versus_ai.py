@@ -224,10 +224,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         model_name = f"{model_name} + {value_path.name}"
 
+    # One-piece lookahead is part of the emergency preset. A greedy 0-ply
+    # scorer can create locally clean but unrecoverable surfaces; the existing
+    # exact-SRS beam search eliminates that failure mode while remaining far
+    # faster than the live 2.5 PPS target.
+    placement_lookahead = max(1, args.ai_lookahead) if festival_safe else args.ai_lookahead
+    placement_beam = max(4, args.ai_beam) if festival_safe else args.ai_beam
     placement_config = SearchConfig(
         allow_hold=True,
-        lookahead_pieces=args.ai_lookahead,
-        beam_width=args.ai_beam,
+        lookahead_pieces=placement_lookahead,
+        beam_width=placement_beam,
         discount=0.9,
         srs_reachable=True,
         allow_180=False,
