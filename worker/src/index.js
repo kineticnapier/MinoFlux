@@ -105,18 +105,34 @@ export class RemoteHub {
 
     const seenMs = lastAgentSeen ? Date.parse(lastAgentSeen) : Number.NaN;
     const agentOnline = Number.isFinite(seenMs) && Date.now() - seenMs < 40_000;
+    const currentState = status?.state || "idle";
+    const currentLogTail = Array.isArray(status?.logTail) ? status.logTail : [];
+    const lastLogTail = Array.isArray(status?.lastLogTail) ? status.lastLogTail : [];
+    const logTail = currentState === "idle" && currentLogTail.length === 0
+      ? lastLogTail
+      : currentLogTail;
+    const defaultMessage = agentOnline ? "Waiting for a command" : "Agent offline";
+    let message = status?.message || defaultMessage;
+    if (currentState === "idle" && status?.lastState) {
+      const lastSummary = status.lastMessage || status.lastCommand || "completed";
+      message = `${status?.message || defaultMessage} · last ${status.lastState}: ${lastSummary}`;
+    }
 
     return json({
       agentOnline,
-      state: status?.state || "idle",
+      state: currentState,
       command: status?.command || null,
       pid: status?.pid ?? null,
-      message: status?.message || (agentOnline ? "Waiting for a command" : "Agent offline"),
-      logTail: Array.isArray(status?.logTail) ? status.logTail : [],
+      message,
+      logTail,
       updatedAt: status?.updatedAt || lastAgentSeen || null,
       lastAgentSeen: lastAgentSeen || null,
       queuedCommand: pending?.command || null,
       queuedCommandId: pending?.id || null,
+      lastCommand: status?.lastCommand || null,
+      lastState: status?.lastState || null,
+      lastMessage: status?.lastMessage || null,
+      lastFinishedAt: status?.lastFinishedAt || null,
     });
   }
 
@@ -213,15 +229,27 @@ export class RemoteHub {
     }
 
     const now = new Date().toISOString();
+    const previous = await this.state.storage.get("status");
+    const state = typeof body?.state === "string" ? body.state : "idle";
+    const command = typeof body?.command === "string" ? body.command : null;
+    const message = typeof body?.message === "string" ? body.message : "";
+    const logTail = Array.isArray(body?.logTail)
+      ? body.logTail.filter((line) => typeof line === "string").slice(-24)
+      : [];
+    const terminal = ["done", "error", "stopped"].includes(state);
+
     const status = {
-      state: typeof body?.state === "string" ? body.state : "idle",
-      command: typeof body?.command === "string" ? body.command : null,
+      state,
+      command,
       pid: Number.isInteger(body?.pid) ? body.pid : null,
-      message: typeof body?.message === "string" ? body.message : "",
-      logTail: Array.isArray(body?.logTail)
-        ? body.logTail.filter((line) => typeof line === "string").slice(-24)
-        : [],
+      message,
+      logTail,
       updatedAt: now,
+      lastCommand: terminal ? command : (previous?.lastCommand || null),
+      lastState: terminal ? state : (previous?.lastState || null),
+      lastMessage: terminal ? message : (previous?.lastMessage || null),
+      lastLogTail: terminal ? logTail : (Array.isArray(previous?.lastLogTail) ? previous.lastLogTail : []),
+      lastFinishedAt: terminal ? now : (previous?.lastFinishedAt || null),
     };
 
     await Promise.all([
