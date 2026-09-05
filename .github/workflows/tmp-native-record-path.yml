@@ -1,0 +1,45 @@
+name: Temporary Native Record Path
+
+on:
+  push:
+    branches:
+      - perf-native-record-path-20260905
+
+jobs:
+  linux-profile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: '3.13'
+      - run: uv sync --extra ml --extra dev
+      - name: Focused differential tests
+        run: >-
+          uv run --no-sync python -m pytest -q
+          tests/test_neural_native_record_path.py
+          tests/test_neural_native_encoding.py
+          tests/test_reachability_native.py
+          tests/test_neural_game_batch.py
+          tests/test_neural_search_fastpath.py
+      - name: CPU deterministic benchmark
+        run: uv run --no-sync python tools/_tmp_native_record_benchmark.py
+
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --extra game --extra dev
+      - name: Verify native imports
+        run: >-
+          uv run --no-sync python -c
+          "from minoflux_ai.reachability_native import native_pathless_available; from minoflux_ai.neural_fast import native_neural_available; assert native_pathless_available() and native_neural_available(); print('native loaded')"
+      - name: Record path differential tests
+        run: uv run --no-sync python -m pytest -q tests/test_neural_native_record_path.py tests/test_neural_native_encoding.py tests/test_reachability_native.py
