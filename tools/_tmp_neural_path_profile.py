@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from array import array
-import statistics
 import time
 
 from minoflux_ai import _neural_native
@@ -12,6 +11,10 @@ from minoflux_ai.neural import (
     _context_prefix,
     _encode_placement_result_compact,
     build_neural_value_model,
+)
+from minoflux_ai.neural_fast import (
+    _ORIGINAL_SCORE_PLACEMENT_GROUPS,
+    install_neural_fast_path,
 )
 from minoflux_ai.search import SearchAction, SearchConfig, _branch_groups, apply_search_action
 from minoflux_engine import Game
@@ -27,6 +30,7 @@ CFG = SearchConfig(
 ).normalized()
 NCFG = NeuralValueConfig().normalized()
 _neural_native.register_shapes(SHAPES)
+install_neural_fast_path()
 
 
 def prefixes(game):
@@ -118,7 +122,8 @@ def main():
     candidate_count = 0
     python_encode_pack_seconds = 0.0
     native_encode_seconds = 0.0
-    score_seconds = 0.0
+    old_score_seconds = 0.0
+    new_score_seconds = 0.0
     score_states = 0
     compared_states = 0
 
@@ -138,24 +143,28 @@ def main():
             pick = direct[0] if direct else (hold[0] if hold else None)
             chosen.append((game, SearchAction(False if direct else True, pick) if pick is not None else None))
 
+        batch_tuple = tuple(batch)
         started = time.perf_counter()
-        states = encode_batch(tuple(batch))
+        states = encode_batch(batch_tuple)
         python_board, python_context = old_pack(states)
         python_encode_pack_seconds += time.perf_counter() - started
 
         started = time.perf_counter()
-        native_board, native_context = native_encode_batch(tuple(batch))
+        native_board, native_context = native_encode_batch(batch_tuple)
         native_encode_seconds += time.perf_counter() - started
-
         assert python_board == native_board
         assert python_context == native_context
         compared_states += len(states)
 
-        if step < 10:
+        if step < 30:
             score_states += sum(len(p) for _g, p in batch)
             started = time.perf_counter()
-            evaluator.score_placement_groups(tuple(batch))
-            score_seconds += time.perf_counter() - started
+            old_scores = _ORIGINAL_SCORE_PLACEMENT_GROUPS(evaluator, batch_tuple)
+            old_score_seconds += time.perf_counter() - started
+            started = time.perf_counter()
+            new_scores = evaluator.score_placement_groups(batch_tuple)
+            new_score_seconds += time.perf_counter() - started
+            assert old_scores == new_scores
 
         for game, action in chosen:
             if action is not None and not game.game_over:
@@ -166,8 +175,11 @@ def main():
     print("python_encode_pack_seconds", python_encode_pack_seconds)
     print("native_encode_seconds", native_encode_seconds)
     print("native_encode_speedup", python_encode_pack_seconds / native_encode_seconds)
-    print("score_10_batches_states", score_states)
-    print("score_10_batches_seconds", score_seconds)
+    print("score_compare_states", score_states)
+    print("old_score_seconds", old_score_seconds)
+    print("new_score_seconds", new_score_seconds)
+    print("scorer_speedup", old_score_seconds / new_score_seconds)
+    print("SCORES: BIT-IDENTICAL")
 
 
 if __name__ == "__main__":
