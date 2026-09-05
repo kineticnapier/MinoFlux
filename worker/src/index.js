@@ -8,8 +8,11 @@ const ALLOWED_COMMANDS = new Set([
   "placement-v2-generate-50",
   "placement-v2-train",
   "placement-v2-evaluate",
+  "placement-baseline-100",
   "stop",
 ]);
+
+const FULL_LOG_CHUNK_CHARS = 24_000;
 
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
@@ -83,6 +86,9 @@ export class RemoteHub {
     if (url.pathname === "/api/result" && request.method === "GET") {
       return this.getResult();
     }
+    if (url.pathname === "/api/log" && request.method === "GET") {
+      return this.getFullLog();
+    }
     if (url.pathname === "/api/command" && request.method === "POST") {
       return this.enqueueCommand(request);
     }
@@ -100,10 +106,11 @@ export class RemoteHub {
   }
 
   async getStatus() {
-    const [status, lastAgentSeen, pending] = await Promise.all([
+    const [status, lastAgentSeen, pending, fullLogMeta] = await Promise.all([
       this.state.storage.get("status"),
       this.state.storage.get("lastAgentSeen"),
       this.state.storage.get("pending"),
+      this.state.storage.get("fullLogMeta"),
     ]);
 
     const seenMs = lastAgentSeen ? Date.parse(lastAgentSeen) : Number.NaN;
@@ -137,6 +144,9 @@ export class RemoteHub {
       lastMessage: status?.lastMessage || null,
       lastFinishedAt: status?.lastFinishedAt || null,
       latestResult: status?.lastResult || null,
+      fullLogAvailable: Boolean(fullLogMeta?.chunks),
+      fullLogCommand: fullLogMeta?.command || null,
+      fullLogUpdatedAt: fullLogMeta?.updatedAt || null,
     });
   }
 
@@ -147,6 +157,52 @@ export class RemoteHub {
       lastCommand: status?.lastCommand || null,
       lastState: status?.lastState || null,
       lastFinishedAt: status?.lastFinishedAt || null,
+    });
+  }
+
+  async getFullLog() {
+    const meta = await this.state.storage.get("fullLogMeta");
+    const chunkCount = Number.isInteger(meta?.chunks) ? meta.chunks : 0;
+    if (chunkCount <= 0) {
+      return json({ log: null, command: null, updatedAt: null, length: 0 });
+    }
+    const chunks = await Promise.all(
+      Array.from({ length: chunkCount }, (_, index) => this.state.storage.get(`fullLog:${index}`)),
+    );
+    const log = chunks.map((chunk) => typeof chunk === "string" ? chunk : "").join("");
+    return json({
+      log,
+      command: meta.command || null,
+      updatedAt: meta.updatedAt || null,
+      length: log.length,
+    });
+  }
+
+  async storeFullLog(log, command, updatedAt) {
+    const previous = await this.state.storage.get("fullLogMeta");
+    const previousCount = Number.isInteger(previous?.chunks) ? previous.chunks : 0;
+    const chunks = [];
+    for (let offset = 0; offset < log.length; offset += FULL_LOG_CHUNK_CHARS) {
+      chunks.push(log.slice(offset, offset + FULL_LOG_CHUNK_CHARS));
+    }
+    if (chunks.length === 0) chunks.push("");
+
+    await Promise.all(
+      chunks.map((chunk, index) => this.state.storage.put(`fullLog:${index}`, chunk)),
+    );
+    if (previousCount > chunks.length) {
+      await Promise.all(
+        Array.from(
+          { length: previousCount - chunks.length },
+          (_, index) => this.state.storage.delete(`fullLog:${chunks.length + index}`),
+        ),
+      );
+    }
+    await this.state.storage.put("fullLogMeta", {
+      command,
+      updatedAt,
+      chunks: chunks.length,
+      length: log.length,
     });
   }
 
@@ -254,6 +310,11 @@ export class RemoteHub {
       ? body.result
       : null;
     const terminal = ["done", "error", "stopped"].includes(state);
+    const fullLog = terminal && typeof body?.fullLog === "string" ? body.fullLog : null;
+
+    if (fullLog !== null) {
+      await this.storeFullLog(fullLog, command, now);
+    }
 
     const status = {
       state,
