@@ -39,6 +39,7 @@ def test_local_human_play_converts_to_exact_ranking_sample(tmp_path, use_hold: b
     assert summary["records"] == 1
     assert summary["samples"] == 1
     assert summary["skipped"] == {}
+    assert summary["expertMatches"] == {"exact": 1, "geometry": 0}
 
     record = _read_one(dataset)
     assert record["format"] == NEURAL_DATASET_FORMAT
@@ -49,6 +50,43 @@ def test_local_human_play_converts_to_exact_ranking_sample(tmp_path, use_hold: b
     expert = record["candidates"][record["expertIndex"]]
     assert bool(expert["move"][0]) is use_hold
     assert expert["samplingBucket"] == "human-expert"
+
+    actual = encode_game_state(game)
+    assert expert["rows"] == list(pack_board_rows(actual.board))
+    assert expert["context"] == pytest.approx(actual.context)
+
+
+def test_human_geometry_alias_matches_reachability_representative(tmp_path) -> None:
+    raw = tmp_path / "human.jsonl"
+    dataset = tmp_path / "ranking.jsonl"
+    game = Game(24680)
+    game.current = "I"
+    game.x, game.y, game.rotation = 3, 1, 0
+    game.hold_used = False
+    game.last_move_was_rotation = False
+    game.last_rotation_kick_index = None
+    game.last_rotation_from = None
+    game.last_rotation_to = None
+
+    recorder = HumanPlacementRecorder(raw, session_id=999)
+    recorder.begin_game(game)
+
+    assert game.rotate_180()
+    choice = recorder.capture_choice(game, hard_drop=True)
+    assert choice["rotation"] == 2
+    result = game.hard_drop()
+    recorder.record_lock(choice, result, game)
+
+    summary = write_human_ranking_dataset(raw, dataset)
+    assert summary["records"] == 1
+    assert summary["samples"] == 1
+    assert summary["skipped"] == {}
+    assert summary["expertMatches"] == {"exact": 0, "geometry": 1}
+
+    record = _read_one(dataset)
+    expert = record["candidates"][record["expertIndex"]]
+    assert expert["samplingBucket"] == "human-expert"
+    assert expert["move"][1] == "I"
 
     actual = encode_game_state(game)
     assert expert["rows"] == list(pack_board_rows(actual.board))
