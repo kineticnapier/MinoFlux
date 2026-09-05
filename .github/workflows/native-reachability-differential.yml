@@ -1,0 +1,17 @@
+name: Native Reachability Differential
+
+on:
+  push:
+    branches: [perf-native-pathless-srs-20260905]
+
+jobs:
+  differential:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: '3.13'
+      - run: uv sync --extra dev
+      - name: Run native differential tests
+        run: uv run --no-sync python -m pytest -q tests/test_reachability_native.py -x -vv
