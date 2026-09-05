@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 import time
 
-from minoflux_ai import NeuralValueEvaluator, SearchConfig, apply_search_action
+from minoflux_ai import (
+    DEFAULT_WEIGHTS,
+    FESTIVAL_SAFE_MODEL,
+    FESTIVAL_SAFE_SCORER,
+    NeuralValueEvaluator,
+    SearchConfig,
+    apply_search_action,
+)
 from minoflux_ai.versus_neural import VersusValueEvaluator
 from minoflux_ai.versus_search import (
     VersusChoice,
@@ -52,7 +59,10 @@ def build_parser() -> ArgumentParser:
         default=DEFAULT_AI_PPS,
         help=f"AI placements per second (default: {DEFAULT_AI_PPS}; adjust live with [ / ])",
     )
-    parser.add_argument("--ai-model")
+    parser.add_argument(
+        "--ai-model",
+        help=f"Heuristic model path, or {FESTIVAL_SAFE_MODEL!r} for the emergency no-neural fallback",
+    )
     parser.add_argument(
         "--ai-neural-model",
         default=None,
@@ -172,13 +182,22 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings()
     key_codes = _key_codes(pygame, settings)
     handling = HandlingController()
-    weights, model_name = _load_ai_weights(args.ai_model)
+
+    festival_safe = (args.ai_model or "").strip().lower() == FESTIVAL_SAFE_MODEL
+    if festival_safe:
+        # Emergency mode is intentionally self-contained: selecting the preset
+        # disables both neural scorers even when default checkpoints are present.
+        weights = DEFAULT_WEIGHTS
+        model_name = FESTIVAL_SAFE_MODEL
+        scorer = FESTIVAL_SAFE_SCORER
+    else:
+        weights, model_name = _load_ai_weights(args.ai_model)
+        scorer = None
 
     neural_path = _resolve_neural_model(
         args.ai_neural_model,
-        disabled=args.no_ai_neural,
+        disabled=args.no_ai_neural or festival_safe,
     )
-    scorer = None
     if neural_path is not None:
         if not neural_path.is_file():
             raise SystemExit(f"Neural model not found: {neural_path}")
@@ -193,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     state_scorer = None
     value_path = _resolve_versus_value_model(
         args.ai_versus_value_model,
-        disabled=args.no_ai_versus_value,
+        disabled=args.no_ai_versus_value or festival_safe,
     )
     if value_path is not None:
         if not value_path.is_file():
@@ -386,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
                 small=small,
                 elapsed=elapsed,
             )
-            neural_label = neural_path.name if scorer is not None and neural_path is not None else "neural OFF"
+            neural_label = neural_path.name if neural_path is not None else "neural OFF"
             value_label = value_path.name if value_path is not None else "versus-value OFF"
             footer = (
                 f"[ / ] AI speed    replies {versus_config.opponent_reply_width}    "
