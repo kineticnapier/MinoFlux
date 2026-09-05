@@ -15,6 +15,7 @@ from minoflux_ai.neural import (
 )
 from minoflux_ai.search import SearchAction, SearchConfig, _branch_groups, apply_search_action
 from minoflux_engine import Game
+from minoflux_engine.pieces import SHAPES
 
 CFG = SearchConfig(
     allow_hold=True,
@@ -25,29 +26,35 @@ CFG = SearchConfig(
     reachability_node_limit=8000,
 ).normalized()
 NCFG = NeuralValueConfig().normalized()
+_neural_native.register_shapes(SHAPES)
+
+
+def prefixes(game):
+    source_queue = tuple(game.queue)
+    locked = _context_prefix(
+        current=game.current,
+        hold_piece=game.hold_piece,
+        queue=source_queue,
+        config=NCFG,
+    )
+    normal = (
+        _context_prefix(
+            current=source_queue[0],
+            hold_piece=game.hold_piece,
+            queue=source_queue[1:],
+            config=NCFG,
+        )
+        if len(source_queue) >= NCFG.queue_length + 1
+        else None
+    )
+    return source_queue, normal, locked
 
 
 def encode_batch(batch):
     states = []
     for game, placements in batch:
         source_rows = board_row_masks(game.board)
-        source_queue = tuple(game.queue)
-        locked = _context_prefix(
-            current=game.current,
-            hold_piece=game.hold_piece,
-            queue=source_queue,
-            config=NCFG,
-        )
-        normal = (
-            _context_prefix(
-                current=source_queue[0],
-                hold_piece=game.hold_piece,
-                queue=source_queue[1:],
-                config=NCFG,
-            )
-            if len(source_queue) >= NCFG.queue_length + 1
-            else None
-        )
+        source_queue, normal, locked = prefixes(game)
         for placement in placements:
             state = _encode_placement_result_compact(
                 game,
@@ -73,24 +80,34 @@ def old_pack(states):
     extend = contexts.extend
     for state in states:
         extend(state.context)
-    return board, contexts
+    return bytes(board), contexts.tobytes()
 
 
-def row_array_pack(states):
-    rows = array("H")
-    contexts = array("f")
-    extend_rows = rows.extend
-    extend_context = contexts.extend
-    for state in states:
-        extend_rows(state.rows)
-        extend_context(state.context)
-    return rows, contexts
-
-
-def native_pack(states):
-    rows, contexts = row_array_pack(states)
-    board = _neural_native.expand_row_masks(rows, NCFG.board_width)
-    return board, contexts
+def native_encode_batch(batch):
+    board_chunks = []
+    context_chunks = []
+    for game, placements in batch:
+        source_rows = board_row_masks(game.board)
+        source_queue, normal, locked = prefixes(game)
+        if normal is None:
+            raise RuntimeError("temporary benchmark expects full queue")
+        board, context = _neural_native.encode_placement_group(
+            source_rows,
+            placements,
+            game.current,
+            source_queue[0],
+            game.width,
+            game.height,
+            game.hidden_rows,
+            game.combo,
+            game.back_to_back,
+            game.b2b_chain,
+            normal,
+            locked,
+        )
+        board_chunks.append(board)
+        context_chunks.append(context)
+    return b"".join(board_chunks), b"".join(context_chunks)
 
 
 def main():
@@ -98,13 +115,14 @@ def main():
     model = build_neural_value_model(NCFG)
     evaluator = NeuralValueEvaluator(model, NCFG, device="cpu", precision="float32")
 
-    all_states = []
     candidate_count = 0
-    encode_seconds = 0.0
+    python_encode_pack_seconds = 0.0
+    native_encode_seconds = 0.0
     score_seconds = 0.0
     score_states = 0
+    compared_states = 0
 
-    for step in range(40):
+    for step in range(80):
         batch = []
         chosen = []
         for game in games:
@@ -122,8 +140,16 @@ def main():
 
         started = time.perf_counter()
         states = encode_batch(tuple(batch))
-        encode_seconds += time.perf_counter() - started
-        all_states.extend(states)
+        python_board, python_context = old_pack(states)
+        python_encode_pack_seconds += time.perf_counter() - started
+
+        started = time.perf_counter()
+        native_board, native_context = native_encode_batch(tuple(batch))
+        native_encode_seconds += time.perf_counter() - started
+
+        assert python_board == native_board
+        assert python_context == native_context
+        compared_states += len(states)
 
         if step < 10:
             score_states += sum(len(p) for _g, p in batch)
@@ -135,30 +161,11 @@ def main():
             if action is not None and not game.game_over:
                 apply_search_action(game, action)
 
-    print("candidates", candidate_count, "states", len(all_states), "encode", encode_seconds)
-
-    old_times = []
-    row_times = []
-    native_times = []
-    for _ in range(9):
-        started = time.perf_counter()
-        old_board, old_context = old_pack(all_states)
-        old_times.append(time.perf_counter() - started)
-        started = time.perf_counter()
-        row_array_pack(all_states)
-        row_times.append(time.perf_counter() - started)
-        started = time.perf_counter()
-        new_board, new_context = native_pack(all_states)
-        native_times.append(time.perf_counter() - started)
-        assert bytes(old_board) == new_board
-        assert old_context.tobytes() == new_context.tobytes()
-    old_median = statistics.median(old_times)
-    row_median = statistics.median(row_times)
-    native_median = statistics.median(native_times)
-    print("old_pack_median", old_median)
-    print("row_array_pack_median", row_median)
-    print("native_pack_median", native_median)
-    print("native_pack_speedup", old_median / native_median)
+    print("candidates", candidate_count)
+    print("compared_states", compared_states)
+    print("python_encode_pack_seconds", python_encode_pack_seconds)
+    print("native_encode_seconds", native_encode_seconds)
+    print("native_encode_speedup", python_encode_pack_seconds / native_encode_seconds)
     print("score_10_batches_states", score_states)
     print("score_10_batches_seconds", score_seconds)
 
