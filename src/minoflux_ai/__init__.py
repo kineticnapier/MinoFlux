@@ -1,3 +1,10 @@
+from .reachability import reachable_placements
+from .reachability_pathless import (
+    install_pathless_search_fast_path as _install_pathless_search_fast_path,
+)
+
+_install_pathless_search_fast_path()
+
 from .benchmark import (
     BenchmarkGame,
     BenchmarkResult,
@@ -66,7 +73,6 @@ from .promotion import (
     compare_candidate_to_champion,
     evaluate_and_promote_model,
 )
-from .reachability import reachable_placements
 from .replay import (
     LEGACY_REPLAY_FORMAT,
     LEGACY_REPLAY_FORMAT_V2,
