@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+from dataclasses import dataclass
 from functools import cache
 import os
 import time
@@ -20,6 +22,24 @@ except (ImportError, OSError):  # Optional extension: pure-Python installs remai
 _PYTHON_PATHLESS = _pathless.reachable_placements_pathless
 _NATIVE_MASK_BYTES = 32
 _NATIVE_DISABLE_ENV = "MINOFLUX_DISABLE_NATIVE_REACHABILITY"
+_NATIVE_RECORD_CACHE_MAXSIZE = 8_192
+
+
+@dataclass(frozen=True, slots=True)
+class NativePlacementRecords:
+    """One ordered native reachability result without Python Placement materialization."""
+
+    piece: str
+    records: Sequence[Sequence[object]]
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def materialize(self, index: int) -> Placement:
+        return _materialize_record(self.piece, self.records[index])
+
+
+_NATIVE_RECORD_CACHE: OrderedDict[tuple[object, ...], NativePlacementRecords] = OrderedDict()
 
 
 def native_pathless_available() -> bool:
@@ -90,6 +110,148 @@ def _native_table_handle(
             rotation_transitions,
         )
     )
+
+
+def _materialize_record(piece: str, record: Sequence[object]) -> Placement:
+    x = int(record[0])
+    y = int(record[1])
+    rotation = int(record[2])
+    kick_index = int(record[4])
+    rotation_from = int(record[5])
+    rotation_to = int(record[6])
+    return Placement(
+        piece=piece,
+        x=x,
+        y=y,
+        rotation=rotation,
+        cells=placement_cells(piece, x, y, rotation),
+        path=(),
+        last_move_was_rotation=bool(record[3]),
+        rotation_kick_index=kick_index if kick_index >= 0 else None,
+        rotation_from=rotation_from if rotation_from >= 0 else None,
+        rotation_to=rotation_to if rotation_to >= 0 else None,
+    )
+
+
+def _record_native_profile(
+    profile,
+    native_result,
+    *,
+    python_setup_elapsed: float,
+    placement_count: int,
+) -> None:
+    counters = native_result["counters"]
+    timings = native_result["timings"]
+    profile.bfs_nodes += int(counters["bfsNodes"])
+    profile.collision_checks += int(counters["collisionChecks"])
+    profile.collision_evaluations += int(counters["collisionEvaluations"])
+    profile.collision_cache_hits += int(counters["collisionCacheHits"])
+    profile.kick_checks += int(counters["kickChecks"])
+    profile.landing_queries += int(counters["landingQueries"])
+    profile.landing_cache_hits += int(counters["landingCacheHits"])
+    profile.representative_nodes += int(counters["representativeNodes"])
+    profile.representative_duplicate_skips += int(
+        counters["representativeDuplicateSkips"]
+    )
+    profile.setup_seconds += python_setup_elapsed + float(timings["setupSeconds"])
+    profile.bfs_seconds += float(timings["bfsSeconds"])
+    profile.rotation_seconds += float(timings["rotationSeconds"])
+    profile.landing_seconds += float(timings["landingSeconds"])
+    profile.representative_seconds += float(timings["representativeSeconds"])
+    profile.placement_seconds += float(timings["placementSeconds"])
+    profile.placements += placement_count
+
+
+def clear_native_record_cache() -> None:
+    _NATIVE_RECORD_CACHE.clear()
+
+
+def reachable_placement_records_native(
+    game: Game,
+    *,
+    allow_180: bool = False,
+    max_nodes: int = 8_000,
+) -> NativePlacementRecords | None:
+    """Return ordered native records, or None when the native fast path is unavailable."""
+
+    if not native_pathless_available() or not _native_board_supported(game.width, game.height):
+        return None
+
+    profile = _reference._ACTIVE_REACHABILITY_PROFILE.get()
+    profiling = profile is not None
+    profile_started = time.perf_counter() if profiling else 0.0
+    if profile is not None:
+        profile.calls += 1
+
+    if game.game_over or game.paused:
+        result = NativePlacementRecords(game.current, ())
+        if profile is not None:
+            profile.total_seconds += time.perf_counter() - profile_started
+        return result
+
+    board_mask_started = time.perf_counter() if profiling else 0.0
+    rows = board_row_masks(game.board)
+    if profile is not None:
+        profile.board_mask_seconds += time.perf_counter() - board_mask_started
+
+    normalized_allow_180 = bool(allow_180)
+    normalized_max_nodes = max(1, int(max_nodes))
+    cache_key = (
+        rows,
+        game.current,
+        game.x,
+        game.y,
+        game.rotation & 3,
+        game.width,
+        game.height,
+        normalized_allow_180,
+        normalized_max_nodes,
+        False,
+    )
+    cached = _NATIVE_RECORD_CACHE.pop(cache_key, None)
+    if cached is not None:
+        _NATIVE_RECORD_CACHE[cache_key] = cached
+        if profile is not None:
+            profile.cache_hits += 1
+            profile.placements += len(cached)
+            profile.total_seconds += time.perf_counter() - profile_started
+        return cached
+    if profile is not None:
+        profile.cache_misses += 1
+
+    setup_started = time.perf_counter() if profiling else 0.0
+    table_handle = _native_table_handle(
+        game.current,
+        normalized_allow_180,
+        game.width,
+        game.height,
+    )
+    python_setup_elapsed = time.perf_counter() - setup_started if profiling else 0.0
+
+    native_result = _native.run(
+        table_handle,
+        rows,
+        game.x,
+        game.y,
+        game.rotation & 3,
+        normalized_max_nodes,
+        profiling,
+    )
+    result = NativePlacementRecords(game.current, native_result["placements"])
+
+    if profile is not None:
+        _record_native_profile(
+            profile,
+            native_result,
+            python_setup_elapsed=python_setup_elapsed,
+            placement_count=len(result),
+        )
+        profile.total_seconds += time.perf_counter() - profile_started
+
+    _NATIVE_RECORD_CACHE[cache_key] = result
+    if len(_NATIVE_RECORD_CACHE) > _NATIVE_RECORD_CACHE_MAXSIZE:
+        _NATIVE_RECORD_CACHE.popitem(last=False)
+    return result
 
 
 def reachable_placements_pathless_python(
@@ -184,46 +346,17 @@ def reachable_placements_pathless_native(
 
     placement_started = time.perf_counter() if profiling else 0.0
     piece = game.current
-    placements = tuple(
-        Placement(
-            piece=piece,
-            x=int(record[0]),
-            y=int(record[1]),
-            rotation=int(record[2]),
-            cells=placement_cells(piece, int(record[0]), int(record[1]), int(record[2])),
-            path=(),
-            last_move_was_rotation=bool(record[3]),
-            rotation_kick_index=int(record[4]) if int(record[4]) >= 0 else None,
-            rotation_from=int(record[5]) if int(record[5]) >= 0 else None,
-            rotation_to=int(record[6]) if int(record[6]) >= 0 else None,
-        )
-        for record in native_result["placements"]
-    )
+    placements = tuple(_materialize_record(piece, record) for record in native_result["placements"])
     python_placement_elapsed = time.perf_counter() - placement_started if profiling else 0.0
 
     if profile is not None:
-        counters = native_result["counters"]
-        timings = native_result["timings"]
-        profile.bfs_nodes += int(counters["bfsNodes"])
-        profile.collision_checks += int(counters["collisionChecks"])
-        profile.collision_evaluations += int(counters["collisionEvaluations"])
-        profile.collision_cache_hits += int(counters["collisionCacheHits"])
-        profile.kick_checks += int(counters["kickChecks"])
-        profile.landing_queries += int(counters["landingQueries"])
-        profile.landing_cache_hits += int(counters["landingCacheHits"])
-        profile.representative_nodes += int(counters["representativeNodes"])
-        profile.representative_duplicate_skips += int(
-            counters["representativeDuplicateSkips"]
+        _record_native_profile(
+            profile,
+            native_result,
+            python_setup_elapsed=python_setup_elapsed,
+            placement_count=len(placements),
         )
-        profile.setup_seconds += python_setup_elapsed + float(timings["setupSeconds"])
-        profile.bfs_seconds += float(timings["bfsSeconds"])
-        profile.rotation_seconds += float(timings["rotationSeconds"])
-        profile.landing_seconds += float(timings["landingSeconds"])
-        profile.representative_seconds += float(timings["representativeSeconds"])
-        profile.placement_seconds += (
-            float(timings["placementSeconds"]) + python_placement_elapsed
-        )
-        profile.placements += len(placements)
+        profile.placement_seconds += python_placement_elapsed
         profile.total_seconds += time.perf_counter() - profile_started
 
     return _reference._cache_reachability_result(cache_key, placements)
