@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 DATASET = Path("data/neural/placement-v2-ranking.jsonl")
 MODEL = Path("data/models/placement-v2.pt")
@@ -128,13 +131,50 @@ def _summary_line(label: str, result: dict[str, Any]) -> str:
     )
 
 
+def _publish_cloudflare_result(payload: dict[str, Any]) -> None:
+    """Publish structured results directly to the Worker when run by the CF agent."""
+    base_url = os.environ.get("MINOFLUX_CF_REMOTE_URL", "").strip().rstrip("/")
+    token = os.environ.get("MINOFLUX_CF_AGENT_TOKEN", "").strip()
+    if not base_url or not token:
+        return
+
+    body = {
+        "state": "done",
+        "command": payload.get("command"),
+        "message": "Placement-v2 evaluation completed",
+        "logTail": [
+            _summary_line("placement-v2", payload["placementV2"]),
+            _summary_line("baseline", payload["baseline"]),
+        ],
+        "result": payload,
+    }
+    request = Request(
+        base_url + "/api/agent/status",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "authorization": f"Bearer {token}",
+            "content-type": "application/json",
+            "accept": "application/json",
+            "user-agent": "MinoFlux-Placement-v2-Remote",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            response.read()
+    except (HTTPError, URLError, TimeoutError) as error:
+        print(f"warning: could not publish result to Cloudflare: {error}", file=sys.stderr, flush=True)
+        return
+    print("Published structured result directly to Cloudflare", flush=True)
+
+
 def _write_evaluation_result(
     *,
     command: str,
     placement_v2: dict[str, Any],
     baseline: dict[str, Any],
 ) -> None:
-    """Write the latest structured result locally for the CF relay to publish."""
+    """Save locally and, for remote runs, publish directly through Cloudflare."""
     payload = {
         "command": command,
         "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -151,6 +191,7 @@ def _write_evaluation_result(
     print(_summary_line("placement-v2", placement_v2), flush=True)
     print(_summary_line("baseline", baseline), flush=True)
     print(f"Saved structured result: {RESULT_PATH}", flush=True)
+    _publish_cloudflare_result(payload)
 
 
 def build_parser() -> argparse.ArgumentParser:
