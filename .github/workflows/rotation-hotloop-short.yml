@@ -1,0 +1,75 @@
+name: Rotation Hot Loop Short
+
+on:
+  push:
+    branches: [perf-rotation-hotloop-20260905]
+
+jobs:
+  benchmark:
+    if: github.event.head_commit.message == 'Add short rotation hot-loop screening'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 815bab8b1a15510418604aca8ad5766c83cd6e2a
+          path: baseline
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Screen variants
+        shell: bash
+        run: |
+          cp -a baseline boolcmp; cp -a baseline stripped; cp -a baseline combined
+          python - <<'PY'
+          from pathlib import Path
+          def boolcmp(root):
+              p=Path(root)/'src/minoflux_ai/reachability_pathless.py'; s=p.read_text(); s=s.replace('bool(board_bits & shape_mask)','(board_bits & shape_mask) != 0'); p.write_text(s)
+          def stripped(root):
+              p=Path(root)/'src/minoflux_ai/reachability_pathless.py'; s=p.read_text(); s=s.replace('import time\n','import time\nfrom functools import cache\n')
+              marker='_REFERENCE_REACHABLE_PLACEMENTS = _reference.reachable_placements\n'
+              helper='''_REFERENCE_REACHABLE_PLACEMENTS = _reference.reachable_placements\n\n\n@cache\ndef _rotation_kick_groups(piece: str, allow_180: bool, width: int, height: int):\n    return tuple(tuple(kicks for _command, kicks in groups) for groups in _reference._rotation_transitions(piece, allow_180, width, height))\n'''
+              s=s.replace(marker,helper,1)
+              old='''    rotation_transitions = _reference._rotation_transitions(\n        piece,\n        normalized_allow_180,\n        width,\n        height,\n    )\n'''; new='''    rotation_transitions = _rotation_kick_groups(\n        piece,\n        normalized_allow_180,\n        width,\n        height,\n    )\n'''
+              s=s.replace(old,new,1); s=s.replace('for _command, kicks in rotation_transitions[state_id]:','for kicks in rotation_transitions[state_id]:'); p.write_text(s)
+          boolcmp('boolcmp'); stripped('stripped'); boolcmp('combined'); stripped('combined')
+          PY
+          cat > probe.py <<'PY'
+          import hashlib,json,time
+          from minoflux_ai.reachability import clear_reachability_cache,ReachabilityProfile,collect_reachability_profile
+          from minoflux_ai.search import SearchAction,SearchConfig,_branch_groups,apply_search_action
+          from minoflux_engine import Game
+          CFG=SearchConfig(allow_hold=True,lookahead_pieces=0,beam_width=4,srs_reachable=True,allow_180=False,reachability_node_limit=8000).normalized()
+          def payload(p): return [p.piece,p.x,p.y,p.rotation,[list(c) for c in p.cells],p.last_move_was_rotation,p.rotation_kick_index,p.rotation_from,p.rotation_to]
+          def run(profiled):
+              h=hashlib.sha256(); clear_reachability_cache(); prof=ReachabilityProfile() if profiled else None; ctx=collect_reachability_profile(prof) if profiled else None
+              if ctx: ctx.__enter__()
+              pieces=attack=topouts=completed=0; t=time.perf_counter()
+              try:
+                  for gi in range(20):
+                      seed=8100001+gi*97; g=Game(seed)
+                      for step in range(28):
+                          d,hg,hp=_branch_groups(g,CFG,include_paths=False)
+                          h.update(json.dumps([seed,step,[payload(p) for p in d],[payload(p) for p in hp]],separators=(',',':')).encode())
+                          cand=[(False,p) for p in d]; cand += ([(True,p) for p in hp] if hg else [])
+                          if not cand: break
+                          hold,p=cand[(seed*1315423911+step*2654435761)%len(cand)]; bp=g.pieces_placed; ba=g.attack; apply_search_action(g,SearchAction(hold,p)); pieces+=g.pieces_placed-bp; attack+=g.attack-ba
+                          if g.game_over: break
+                      topouts+=int(g.game_over); completed+=int(not g.game_over and g.pieces_placed>=28)
+              finally:
+                  elapsed=time.perf_counter()-t
+                  if ctx: ctx.__exit__(None,None,None)
+              r={'sig':h.hexdigest(),'pieces':pieces,'attack':attack,'topouts':topouts,'completed':completed,'elapsed':elapsed,'pps':pieces/elapsed}
+              if prof:r['profile']=prof.to_dict()
+              return r
+          print(json.dumps({'plain':run(False),'profile':run(True)},separators=(',',':')))
+          PY
+          for v in baseline boolcmp stripped combined; do PYTHONPATH="$GITHUB_WORKSPACE/$v/src" python probe.py > "$v.json"; done
+          python - <<'PY'
+          import json
+          ns=['baseline','boolcmp','stripped','combined']; d={n:json.load(open(n+'.json')) for n in ns}; b=d['baseline']; counts=('calls','bfsNodes','collisionChecks','collisionEvaluations','collisionCacheHits','kickChecks','landingQueries','landingCacheHits','representativeNodes','representativeDuplicateSkips','placements','pathCalls','cacheHits','cacheMisses')
+          for n in ns:
+              r=d[n]; assert r['plain']['sig']==b['plain']['sig'] and r['profile']['sig']==b['profile']['sig']; assert tuple(r['plain'][k] for k in ('pieces','attack','topouts','completed'))==tuple(b['plain'][k] for k in ('pieces','attack','topouts','completed'))
+              for k in counts: assert r['profile']['profile'][k]==b['profile']['profile'][k],(n,k)
+              print(n,'plain',r['plain']['elapsed'],'pps',r['plain']['pps'],'profile',r['profile']['elapsed'],'bfs',r['profile']['profile']['bfsSeconds'],'rotation',r['profile']['profile']['rotationSeconds'])
+          print('SEMANTICS: IDENTICAL')
+          PY
