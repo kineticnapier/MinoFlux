@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 import subprocess
 import sys
+from typing import Any
 
 DATASET = Path("data/neural/placement-v2-ranking.jsonl")
 MODEL = Path("data/models/placement-v2.pt")
@@ -13,6 +16,28 @@ def _run(label: str, *args: str) -> None:
     print(f"\n=== {label} ===", flush=True)
     print("$ " + " ".join((str(sys.executable), *args)), flush=True)
     subprocess.run([sys.executable, *args], check=True)
+
+
+def _run_json(label: str, *args: str) -> dict[str, Any]:
+    """Run a child command, preserve stderr progress, and parse its JSON stdout."""
+    print(f"\n=== {label} ===", flush=True)
+    print("$ " + " ".join((str(sys.executable), *args)), flush=True)
+    completed = subprocess.run(
+        [sys.executable, *args],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    raw = completed.stdout.strip()
+    if raw:
+        print(raw, flush=True)
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"{label} did not return JSON on stdout") from error
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label} returned non-object JSON")
+    return value
 
 
 def _generate(*, games: int, max_pieces: int, teacher_depth: int, teacher_beam: int, workers: int) -> None:
@@ -69,10 +94,10 @@ def _train(*, epochs: int) -> None:
     )
 
 
-def _evaluate(model: Path, label: str) -> None:
+def _evaluate(model: Path, label: str) -> dict[str, Any]:
     if not model.is_file():
         raise SystemExit(f"Model not found: {model}")
-    _run(
+    return _run_json(
         label,
         "-m",
         "minoflux.neural_cli",
@@ -92,6 +117,53 @@ def _evaluate(model: Path, label: str) -> None:
         "--device",
         "auto",
     )
+
+
+def _summary_line(label: str, result: dict[str, Any]) -> str:
+    return (
+        f"{label}: pieces={result.get('pieces')} attack={result.get('attack')} "
+        f"APP={result.get('attackPerPiece')} topouts={result.get('topouts')} "
+        f"completed={result.get('completed')}"
+    )
+
+
+def _publish_evaluation(
+    *,
+    command: str,
+    placement_v2: dict[str, Any],
+    baseline: dict[str, Any],
+) -> None:
+    """Mirror the final structured result to GitHub's remote-status branch.
+
+    This gives ChatGPT and devices that cannot reach the Cloudflare Worker a stable,
+    GitHub-readable snapshot of the latest evaluation.
+    """
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    payload = {
+        "agentOnline": True,
+        "state": "done",
+        "command": command,
+        "updatedAt": now,
+        "message": "Placement-v2 evaluation completed",
+        "result": {
+            "placementV2": placement_v2,
+            "baseline": baseline,
+        },
+        "logTail": [
+            _summary_line("placement-v2", placement_v2),
+            _summary_line("baseline", baseline),
+        ],
+    }
+    try:
+        # Reuse the existing remote-status worktree/push path. The import is kept
+        # local so normal Placement-v2 CLI use does not depend on the remote agent.
+        from tools.remote_agent import _publish_status
+
+        _publish_status(payload)
+        print("Published evaluation snapshot to remote-status/docs/remote/status.json", flush=True)
+    except Exception as error:
+        # Evaluation itself must still succeed even if GitHub publishing is unavailable.
+        print(f"warning: could not publish remote evaluation snapshot: {error}", file=sys.stderr, flush=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -141,8 +213,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     if args.command in {"full", "evaluate"}:
-        _evaluate(MODEL, "placement-v2 evaluation")
-        _evaluate(Path("data/models/neural-value-human.pt"), "current human-model baseline")
+        placement_v2 = _evaluate(MODEL, "placement-v2 evaluation")
+        baseline = _evaluate(Path("data/models/neural-value-human.pt"), "current human-model baseline")
+        _publish_evaluation(
+            command=(
+                "placement-v2-full-50"
+                if args.command == "full"
+                else "placement-v2-evaluate"
+            ),
+            placement_v2=placement_v2,
+            baseline=baseline,
+        )
         return 0
 
     raise SystemExit(f"Unknown command: {args.command}")
