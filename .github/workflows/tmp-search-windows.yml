@@ -1,0 +1,30 @@
+name: Temporary Search Windows Validation
+
+on:
+  push:
+    branches:
+      - perf-search-pipeline-20260905
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --extra game --extra dev
+      - name: Verify native imports
+        run: >-
+          uv run --no-sync python -c
+          "from minoflux_ai.reachability_native import native_pathless_available; from minoflux_ai.neural_fast import native_neural_available; assert native_pathless_available() and native_neural_available()"
+      - name: Differential tests
+        run: >-
+          uv run --no-sync python -m pytest -q
+          tests/test_reachability_native.py
+          tests/test_neural_native_record_path.py
+          tests/test_neural_native_encoding.py
