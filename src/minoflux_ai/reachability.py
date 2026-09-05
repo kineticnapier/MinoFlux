@@ -489,6 +489,10 @@ def reachable_placements(
 
     board_bits = _rows_to_board_bits(rows, width)
     collision_cache = bytearray(packed_count)
+    collision_checks = 0
+    collision_evaluations = 0
+    collision_cache_hits = 0
+    kick_checks = 0
 
     if profile is None:
 
@@ -508,23 +512,28 @@ def reachable_placements(
     else:
 
         def collides_state(state_id: int) -> bool:
-            profile.collision_checks += 1
+            nonlocal collision_checks, collision_evaluations, collision_cache_hits
+            collision_checks += 1
             if state_id < 0 or state_id >= packed_count:
                 return True
             cached_collision = collision_cache[state_id]
             if cached_collision != _COLLISION_UNKNOWN:
-                profile.collision_cache_hits += 1
+                collision_cache_hits += 1
                 return cached_collision == _COLLISION_BLOCKED
             shape_mask = collision_masks[state_id]
             blocked = shape_mask < 0 or bool(board_bits & shape_mask)
             collision_cache[state_id] = (
                 _COLLISION_BLOCKED if blocked else _COLLISION_CLEAR
             )
-            profile.collision_evaluations += 1
+            collision_evaluations += 1
             return blocked
 
     if collides_state(start_state):
         if profile is not None:
+            profile.collision_checks += collision_checks
+            profile.collision_evaluations += collision_evaluations
+            profile.collision_cache_hits += collision_cache_hits
+            profile.kick_checks += kick_checks
             profile.setup_seconds += time.perf_counter() - setup_started
             profile.total_seconds += time.perf_counter() - profile_started
         return _cache_reachability_result(cache_key, ())
@@ -672,9 +681,34 @@ def reachable_placements(
             successful_kick = -1
             for target_state, kick_index in kicks:
                 if profile is not None:
-                    profile.kick_checks += 1
-                if collides_state(target_state):
-                    continue
+                    kick_checks += 1
+                    collision_checks += 1
+                    cached_collision = collision_cache[target_state]
+                    if cached_collision != _COLLISION_UNKNOWN:
+                        collision_cache_hits += 1
+                        if cached_collision == _COLLISION_BLOCKED:
+                            continue
+                    else:
+                        shape_mask = collision_masks[target_state]
+                        blocked = shape_mask < 0 or bool(board_bits & shape_mask)
+                        collision_cache[target_state] = (
+                            _COLLISION_BLOCKED if blocked else _COLLISION_CLEAR
+                        )
+                        collision_evaluations += 1
+                        if blocked:
+                            continue
+                else:
+                    cached_collision = collision_cache[target_state]
+                    if cached_collision == _COLLISION_BLOCKED:
+                        continue
+                    if cached_collision == _COLLISION_UNKNOWN:
+                        shape_mask = collision_masks[target_state]
+                        blocked = shape_mask < 0 or bool(board_bits & shape_mask)
+                        collision_cache[target_state] = (
+                            _COLLISION_BLOCKED if blocked else _COLLISION_CLEAR
+                        )
+                        if blocked:
+                            continue
                 successful_state = target_state
                 successful_kick = kick_index
                 break
@@ -886,6 +920,10 @@ def reachable_placements(
     placements.sort(key=lambda item: (item.rotation, item.x, item.y, len(item.path)))
 
     if profile is not None:
+        profile.collision_checks += collision_checks
+        profile.collision_evaluations += collision_evaluations
+        profile.collision_cache_hits += collision_cache_hits
+        profile.kick_checks += kick_checks
         profile.placement_seconds += time.perf_counter() - placement_started
         profile.placements += len(placements)
         profile.total_seconds += time.perf_counter() - profile_started
