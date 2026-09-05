@@ -146,7 +146,7 @@ def choose_search_actions_batch(
 
     for index, game in enumerate(games):
         if game.game_over:
-            prepared.append((NativePlacementRecords(game.current, ()), None, None))
+            prepared.append((NativePlacementRecords.empty(game.current), None, None))
             continue
 
         # Short queues are rare near synthetic/test boundaries. Preserve the
@@ -185,6 +185,7 @@ def choose_search_actions_batch(
                 held,
                 allow_180=cfg.allow_180,
                 max_nodes=cfg.reachability_node_limit,
+                rows=direct.rows,
             )
             if held is not None
             else None

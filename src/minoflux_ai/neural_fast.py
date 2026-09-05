@@ -177,10 +177,10 @@ def _native_score_record_groups(
         if prefixes is None:
             raise RuntimeError("native neural record scoring requires a full queue")
         source_queue, normal_context_prefix, locked_context_prefix = prefixes
-        source_rows = board_row_masks(game.board)
-        board_chunk, context_chunk = _native.encode_record_group(
+        source_rows = batch.rows or board_row_masks(game.board)
+        board_chunk, context_chunk = _native.encode_packed_record_group(
             source_rows,
-            batch.records,
+            batch.packed,
             game.current,
             source_queue[0],
             game.width,

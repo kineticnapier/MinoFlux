@@ -14,6 +14,18 @@ namespace py = pybind11;
 
 namespace {
 
+constexpr size_t kPackedRecordInts = 7;
+constexpr size_t kPackedRecordBytes = kPackedRecordInts * sizeof(int32_t);
+
+int32_t read_i32_le(const char* ptr) noexcept {
+    const uint32_t bits =
+        static_cast<uint32_t>(static_cast<unsigned char>(ptr[0])) |
+        (static_cast<uint32_t>(static_cast<unsigned char>(ptr[1])) << 8) |
+        (static_cast<uint32_t>(static_cast<unsigned char>(ptr[2])) << 16) |
+        (static_cast<uint32_t>(static_cast<unsigned char>(ptr[3])) << 24);
+    return static_cast<int32_t>(bits);
+}
+
 struct Cell {
     int dx = 0;
     int dy = 0;
@@ -223,7 +235,7 @@ std::vector<float> float_prefix(const py::sequence& values) {
 
 py::tuple encode_group(
     const py::sequence& source_rows_object,
-    const py::sequence& placements,
+    const py::object& placements_object,
     const std::string& piece_name,
     const std::string& next_piece_name,
     int width,
@@ -234,7 +246,7 @@ py::tuple encode_group(
     int b2b_chain_before,
     const py::sequence& normal_prefix_object,
     const py::sequence& locked_prefix_object,
-    bool raw_records
+    int record_mode
 ) {
     if (piece_name.size() != 1 || next_piece_name.size() != 1) {
         throw std::runtime_error("piece names must be one character");
@@ -265,7 +277,24 @@ py::tuple encode_group(
         throw std::runtime_error("normal and locked context prefixes must have equal length");
     }
     const size_t prefix_size = normal_prefix.size();
-    const size_t count = static_cast<size_t>(py::len(placements));
+    py::sequence placements;
+    const char* packed_records = nullptr;
+    size_t count = 0;
+    if (record_mode == 2) {
+        char* packed_ptr = nullptr;
+        Py_ssize_t packed_size = 0;
+        if (PyBytes_AsStringAndSize(placements_object.ptr(), &packed_ptr, &packed_size) != 0) {
+            throw py::error_already_set();
+        }
+        if (packed_size < 0 || static_cast<size_t>(packed_size) % kPackedRecordBytes != 0) {
+            throw std::runtime_error("packed placement record byte length mismatch");
+        }
+        packed_records = packed_ptr;
+        count = static_cast<size_t>(packed_size) / kPackedRecordBytes;
+    } else {
+        placements = py::reinterpret_borrow<py::sequence>(placements_object);
+        count = static_cast<size_t>(py::len(placements));
+    }
     const size_t context_size = prefix_size + 9;
     std::string board_bytes(count * static_cast<size_t>(height) * static_cast<size_t>(width), '\0');
     std::string context_bytes(count * context_size * sizeof(float), '\0');
@@ -274,33 +303,42 @@ py::tuple encode_group(
     const uint16_t full_row = static_cast<uint16_t>((uint32_t{1} << width) - 1U);
 
     for (size_t placement_index = 0; placement_index < count; ++placement_index) {
-        py::handle placement = placements[static_cast<py::ssize_t>(placement_index)];
         int x = 0;
         int y = 0;
         int rotation = 0;
         bool last_rotation = false;
         int kick_index = -1;
-        if (raw_records) {
-            py::sequence record = py::reinterpret_borrow<py::sequence>(placement);
-            if (py::len(record) < 5) {
-                throw std::runtime_error("native placement record must contain at least five fields");
-            }
-            x = py::cast<int>(record[0]);
-            y = py::cast<int>(record[1]);
-            rotation = py::cast<int>(record[2]) & 3;
-            last_rotation = py::cast<bool>(record[3]);
-            kick_index = py::cast<int>(record[4]);
+        if (record_mode == 2) {
+            const char* record = packed_records + placement_index * kPackedRecordBytes;
+            x = read_i32_le(record);
+            y = read_i32_le(record + 4);
+            rotation = read_i32_le(record + 8) & 3;
+            last_rotation = read_i32_le(record + 12) != 0;
+            kick_index = read_i32_le(record + 16);
         } else {
-            const std::string placement_piece = py::cast<std::string>(placement.attr("piece"));
-            if (placement_piece != piece_name) {
-                throw std::runtime_error("placement piece does not match group piece");
+            py::handle placement = placements[static_cast<py::ssize_t>(placement_index)];
+            if (record_mode == 1) {
+                py::sequence record = py::reinterpret_borrow<py::sequence>(placement);
+                if (py::len(record) < 5) {
+                    throw std::runtime_error("native placement record must contain at least five fields");
+                }
+                x = py::cast<int>(record[0]);
+                y = py::cast<int>(record[1]);
+                rotation = py::cast<int>(record[2]) & 3;
+                last_rotation = py::cast<bool>(record[3]);
+                kick_index = py::cast<int>(record[4]);
+            } else {
+                const std::string placement_piece = py::cast<std::string>(placement.attr("piece"));
+                if (placement_piece != piece_name) {
+                    throw std::runtime_error("placement piece does not match group piece");
+                }
+                x = py::cast<int>(placement.attr("x"));
+                y = py::cast<int>(placement.attr("y"));
+                rotation = py::cast<int>(placement.attr("rotation")) & 3;
+                last_rotation = py::cast<bool>(placement.attr("last_move_was_rotation"));
+                py::object kick_object = py::reinterpret_borrow<py::object>(placement.attr("rotation_kick_index"));
+                kick_index = kick_object.is_none() ? -1 : py::cast<int>(kick_object);
             }
-            x = py::cast<int>(placement.attr("x"));
-            y = py::cast<int>(placement.attr("y"));
-            rotation = py::cast<int>(placement.attr("rotation")) & 3;
-            last_rotation = py::cast<bool>(placement.attr("last_move_was_rotation"));
-            py::object kick_object = py::reinterpret_borrow<py::object>(placement.attr("rotation_kick_index"));
-            kick_index = kick_object.is_none() ? -1 : py::cast<int>(kick_object);
         }
 
         const int spin_kind = classify_t_spin(
@@ -432,7 +470,7 @@ py::tuple encode_placement_group(
         b2b_chain_before,
         normal_prefix_object,
         locked_prefix_object,
-        false
+        0
     );
 }
 
@@ -463,7 +501,38 @@ py::tuple encode_record_group(
         b2b_chain_before,
         normal_prefix_object,
         locked_prefix_object,
-        true
+        1
+    );
+}
+
+py::tuple encode_packed_record_group(
+    const py::sequence& source_rows_object,
+    const py::bytes& records,
+    const std::string& piece_name,
+    const std::string& next_piece_name,
+    int width,
+    int height,
+    int hidden_rows,
+    int combo_before,
+    bool back_to_back_before,
+    int b2b_chain_before,
+    const py::sequence& normal_prefix_object,
+    const py::sequence& locked_prefix_object
+) {
+    return encode_group(
+        source_rows_object,
+        records,
+        piece_name,
+        next_piece_name,
+        width,
+        height,
+        hidden_rows,
+        combo_before,
+        back_to_back_before,
+        b2b_chain_before,
+        normal_prefix_object,
+        locked_prefix_object,
+        2
     );
 }
 
@@ -491,6 +560,22 @@ PYBIND11_MODULE(_neural_native, module) {
     module.def(
         "encode_record_group",
         &encode_record_group,
+        py::arg("source_rows"),
+        py::arg("records"),
+        py::arg("piece"),
+        py::arg("next_piece"),
+        py::arg("width"),
+        py::arg("height"),
+        py::arg("hidden_rows"),
+        py::arg("combo"),
+        py::arg("back_to_back"),
+        py::arg("b2b_chain"),
+        py::arg("normal_prefix"),
+        py::arg("locked_prefix")
+    );
+    module.def(
+        "encode_packed_record_group",
+        &encode_packed_record_group,
         py::arg("source_rows"),
         py::arg("records"),
         py::arg("piece"),

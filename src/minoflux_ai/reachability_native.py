@@ -4,6 +4,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from functools import cache
 import os
+import struct
 import time
 from typing import Sequence
 
@@ -23,20 +24,43 @@ _PYTHON_PATHLESS = _pathless.reachable_placements_pathless
 _NATIVE_MASK_BYTES = 32
 _NATIVE_DISABLE_ENV = "MINOFLUX_DISABLE_NATIVE_REACHABILITY"
 _NATIVE_RECORD_CACHE_MAXSIZE = 8_192
+_NATIVE_RECORD_STRUCT = struct.Struct("<7i")
 
 
 @dataclass(frozen=True, slots=True)
 class NativePlacementRecords:
-    """One ordered native reachability result without Python Placement materialization."""
+    """Ordered native reachability records kept packed until a winner is needed."""
 
     piece: str
-    records: Sequence[Sequence[object]]
+    packed: bytes
+    count: int
+    rows: tuple[int, ...] = ()
+
+    @classmethod
+    def empty(cls, piece: str, rows: Sequence[int] = ()) -> "NativePlacementRecords":
+        return cls(piece, b"", 0, tuple(rows))
 
     def __len__(self) -> int:
-        return len(self.records)
+        return self.count
+
+    def record(self, index: int) -> tuple[int, int, int, int, int, int, int]:
+        if index < 0:
+            index += self.count
+        if index < 0 or index >= self.count:
+            raise IndexError(index)
+        return _NATIVE_RECORD_STRUCT.unpack_from(
+            self.packed,
+            index * _NATIVE_RECORD_STRUCT.size,
+        )
+
+    @property
+    def records(self) -> tuple[tuple[int, int, int, int, int, int, int], ...]:
+        """Compatibility view; neural fast paths intentionally do not call this."""
+
+        return tuple(self.record(index) for index in range(self.count))
 
     def materialize(self, index: int) -> Placement:
-        return _materialize_record(self.piece, self.records[index])
+        return _materialize_record(self.piece, self.record(index))
 
 
 _NATIVE_RECORD_CACHE: OrderedDict[tuple[object, ...], NativePlacementRecords] = OrderedDict()
@@ -171,6 +195,7 @@ def reachable_placement_records_native(
     *,
     allow_180: bool = False,
     max_nodes: int = 8_000,
+    rows: Sequence[int] | None = None,
 ) -> NativePlacementRecords | None:
     """Return ordered native records, or None when the native fast path is unavailable."""
 
@@ -184,15 +209,21 @@ def reachable_placement_records_native(
         profile.calls += 1
 
     if game.game_over or game.paused:
-        result = NativePlacementRecords(game.current, ())
+        result = NativePlacementRecords.empty(game.current)
         if profile is not None:
             profile.total_seconds += time.perf_counter() - profile_started
         return result
 
-    board_mask_started = time.perf_counter() if profiling else 0.0
-    rows = board_row_masks(game.board)
-    if profile is not None:
-        profile.board_mask_seconds += time.perf_counter() - board_mask_started
+    if rows is None:
+        board_mask_started = time.perf_counter() if profiling else 0.0
+        resolved_rows = board_row_masks(game.board)
+        if profile is not None:
+            profile.board_mask_seconds += time.perf_counter() - board_mask_started
+    else:
+        resolved_rows = tuple(int(row) for row in rows)
+        if len(resolved_rows) != game.height:
+            raise ValueError("precomputed board row count does not match game height")
+    rows = resolved_rows
 
     normalized_allow_180 = bool(allow_180)
     normalized_max_nodes = max(1, int(max_nodes))
@@ -228,7 +259,7 @@ def reachable_placement_records_native(
     )
     python_setup_elapsed = time.perf_counter() - setup_started if profiling else 0.0
 
-    native_result = _native.run(
+    native_result = _native.run_packed(
         table_handle,
         rows,
         game.x,
@@ -237,7 +268,11 @@ def reachable_placement_records_native(
         normalized_max_nodes,
         profiling,
     )
-    result = NativePlacementRecords(game.current, native_result["placements"])
+    packed = native_result["placementsPacked"]
+    count = int(native_result["placementCount"])
+    if len(packed) != count * _NATIVE_RECORD_STRUCT.size:
+        raise RuntimeError("native packed placement record length mismatch")
+    result = NativePlacementRecords(game.current, packed, count, rows)
 
     if profile is not None:
         _record_native_profile(
