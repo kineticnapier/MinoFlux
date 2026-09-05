@@ -2,7 +2,11 @@ from .reachability import reachable_placements
 from .reachability_pathless import (
     install_pathless_search_fast_path as _install_pathless_search_fast_path,
 )
+from .reachability_native import (
+    install_native_pathless_search_fast_path as _install_native_pathless_search_fast_path,
+)
 
+_install_native_pathless_search_fast_path()
 _install_pathless_search_fast_path()
 
 from .benchmark import (
