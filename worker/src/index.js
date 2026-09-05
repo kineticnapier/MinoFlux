@@ -80,6 +80,9 @@ export class RemoteHub {
     if (url.pathname === "/api/status" && request.method === "GET") {
       return this.getStatus();
     }
+    if (url.pathname === "/api/result" && request.method === "GET") {
+      return this.getResult();
+    }
     if (url.pathname === "/api/command" && request.method === "POST") {
       return this.enqueueCommand(request);
     }
@@ -132,6 +135,17 @@ export class RemoteHub {
       lastCommand: status?.lastCommand || null,
       lastState: status?.lastState || null,
       lastMessage: status?.lastMessage || null,
+      lastFinishedAt: status?.lastFinishedAt || null,
+      latestResult: status?.lastResult || null,
+    });
+  }
+
+  async getResult() {
+    const status = await this.state.storage.get("status");
+    return json({
+      result: status?.lastResult || null,
+      lastCommand: status?.lastCommand || null,
+      lastState: status?.lastState || null,
       lastFinishedAt: status?.lastFinishedAt || null,
     });
   }
@@ -236,6 +250,9 @@ export class RemoteHub {
     const logTail = Array.isArray(body?.logTail)
       ? body.logTail.filter((line) => typeof line === "string").slice(-24)
       : [];
+    const result = body?.result && typeof body.result === "object" && !Array.isArray(body.result)
+      ? body.result
+      : null;
     const terminal = ["done", "error", "stopped"].includes(state);
 
     const status = {
@@ -250,6 +267,7 @@ export class RemoteHub {
       lastMessage: terminal ? message : (previous?.lastMessage || null),
       lastLogTail: terminal ? logTail : (Array.isArray(previous?.lastLogTail) ? previous.lastLogTail : []),
       lastFinishedAt: terminal ? now : (previous?.lastFinishedAt || null),
+      lastResult: result || previous?.lastResult || null,
     };
 
     await Promise.all([
