@@ -11,7 +11,13 @@ setup(
             ["src/minoflux_ai/_reachability_native.cpp"],
             cxx_std=17,
             optional=True,
-        )
+        ),
+        Pybind11Extension(
+            "minoflux_ai._neural_native",
+            ["src/minoflux_ai/_neural_native.cpp"],
+            cxx_std=17,
+            optional=True,
+        ),
     ],
     cmdclass={"build_ext": build_ext},
 )
