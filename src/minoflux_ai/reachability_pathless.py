@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from functools import cache
 
 from minoflux_engine import Game, Placement
 
@@ -13,6 +14,21 @@ from . import reachability as _reference
 
 
 _REFERENCE_REACHABLE_PLACEMENTS = _reference.reachable_placements
+
+
+@cache
+def _rotation_kick_groups(
+    piece: str,
+    allow_180: bool,
+    width: int,
+    height: int,
+) -> tuple[tuple[tuple[tuple[int, int], ...], ...], ...]:
+    """Drop path commands from cached SRS transitions for pathless search."""
+
+    return tuple(
+        tuple(kicks for _command, kicks in groups)
+        for groups in _reference._rotation_transitions(piece, allow_180, width, height)
+    )
 
 
 def reachable_placements_pathless(
@@ -83,7 +99,7 @@ def reachable_placements_pathless(
     down_state = tables.down_state
     collision_masks = tables.collision_mask
     geometry_masks = tables.geometry_mask
-    rotation_transitions = _reference._rotation_transitions(
+    rotation_transitions = _rotation_kick_groups(
         piece,
         normalized_allow_180,
         width,
@@ -295,7 +311,7 @@ def reachable_placements_pathless(
                     reachable_count += 1
                     append_frontier(target_state)
 
-            for _command, kicks in rotation_transitions[state_id]:
+            for kicks in rotation_transitions[state_id]:
                 successful_state = no_state
                 successful_kick = -1
                 for target_state, kick_index in kicks:
@@ -422,7 +438,7 @@ def reachable_placements_pathless(
                     append_frontier(target_state)
 
             rotation_started = time.perf_counter()
-            for _command, kicks in rotation_transitions[state_id]:
+            for kicks in rotation_transitions[state_id]:
                 successful_state = no_state
                 successful_kick = -1
                 for target_state, kick_index in kicks:
