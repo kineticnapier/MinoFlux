@@ -61,3 +61,4 @@ jobs:
           git commit -m 'Strip unused commands from pathless rotation transitions'
           git push --force origin HEAD:refs/heads/perf-rotation-commandless-clean
           git rev-parse HEAD
+# trigger clean candidate build
