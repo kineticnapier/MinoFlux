@@ -4,6 +4,7 @@ from array import array
 import statistics
 import time
 
+from minoflux_ai import _neural_native
 from minoflux_ai.bitboard import ROW_OCCUPANCY_BYTES, board_row_masks
 from minoflux_ai.neural import (
     NeuralValueConfig,
@@ -86,6 +87,12 @@ def row_array_pack(states):
     return rows, contexts
 
 
+def native_pack(states):
+    rows, contexts = row_array_pack(states)
+    board = _neural_native.expand_row_masks(rows, NCFG.board_width)
+    return board, contexts
+
+
 def main():
     games = [Game(8100001 + i * 97) for i in range(20)]
     model = build_neural_value_model(NCFG)
@@ -132,18 +139,26 @@ def main():
 
     old_times = []
     row_times = []
-    for _ in range(7):
+    native_times = []
+    for _ in range(9):
         started = time.perf_counter()
-        old_pack(all_states)
+        old_board, old_context = old_pack(all_states)
         old_times.append(time.perf_counter() - started)
         started = time.perf_counter()
         row_array_pack(all_states)
         row_times.append(time.perf_counter() - started)
+        started = time.perf_counter()
+        new_board, new_context = native_pack(all_states)
+        native_times.append(time.perf_counter() - started)
+        assert bytes(old_board) == new_board
+        assert old_context.tobytes() == new_context.tobytes()
     old_median = statistics.median(old_times)
     row_median = statistics.median(row_times)
+    native_median = statistics.median(native_times)
     print("old_pack_median", old_median)
     print("row_array_pack_median", row_median)
-    print("python_pack_speedup_if_native_expand_free", old_median / row_median)
+    print("native_pack_median", native_median)
+    print("native_pack_speedup", old_median / native_median)
     print("score_10_batches_states", score_states)
     print("score_10_batches_seconds", score_seconds)
 
