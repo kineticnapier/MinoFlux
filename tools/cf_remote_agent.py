@@ -24,6 +24,9 @@ from remote_agent import (
     _terminate_process_tree,
 )
 
+RESULT_PATH = PROJECT_ROOT / "data" / "remote" / "latest-placement-evaluation.json"
+RESULT_COMMANDS = {"placement-v2-evaluate", "placement-v2-full-50"}
+
 
 @dataclass
 class ActiveTask:
@@ -31,6 +34,14 @@ class ActiveTask:
     process: subprocess.Popen[Any]
     log_path: Path
     log_handle: Any
+
+
+def _load_latest_result() -> dict[str, Any] | None:
+    try:
+        value = json.loads(RESULT_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 class CloudflareRemoteAgent:
@@ -89,17 +100,21 @@ class CloudflareRemoteAgent:
         pid: int | None = None,
         message: str = "",
         log_tail: list[str] | None = None,
+        result: dict[str, Any] | None = None,
     ) -> None:
+        payload: dict[str, Any] = {
+            "state": state,
+            "command": command,
+            "pid": pid,
+            "message": message,
+            "logTail": log_tail or [],
+        }
+        if result is not None:
+            payload["result"] = result
         self._request_json(
             "/api/agent/status",
             method="POST",
-            payload={
-                "state": state,
-                "command": command,
-                "pid": pid,
-                "message": message,
-                "logTail": log_tail or [],
-            },
+            payload=payload,
             timeout=15.0,
         )
         self.last_status_publish = time.monotonic()
@@ -129,6 +144,11 @@ class CloudflareRemoteAgent:
         _sync_code()
         python = _python_executable()
         LOG_DIR.mkdir(parents=True, exist_ok=True)
+        if command in RESULT_COMMANDS:
+            try:
+                RESULT_PATH.unlink()
+            except FileNotFoundError:
+                pass
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         log_path = LOG_DIR / f"{stamp}-cf-{command}.log"
         log_handle = log_path.open("wb")
@@ -186,11 +206,17 @@ class CloudflareRemoteAgent:
         log_tail = _tail_log(task.log_path)
         state = "done" if exit_code == 0 else "error"
         message = "Completed successfully" if exit_code == 0 else f"Process exited with code {exit_code}"
+        result = (
+            _load_latest_result()
+            if exit_code == 0 and task.command in RESULT_COMMANDS
+            else None
+        )
         self.publish_status(
             state,
             command=task.command,
             message=message,
             log_tail=log_tail,
+            result=result,
         )
         print(f"[cf-remote] {task.command} finished; exit={exit_code}")
         self.active = None
