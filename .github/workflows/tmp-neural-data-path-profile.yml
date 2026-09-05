@@ -14,4 +14,6 @@ jobs:
         with:
           python-version: '3.13'
       - run: uv sync --extra ml --extra dev
+      - run: uv run --no-sync python -m pytest -q tests/test_neural_native_encoding.py tests/test_neural_game_batch.py tests/test_neural_search_fastpath.py
       - run: uv run --no-sync python tools/_tmp_neural_path_profile.py
+      - run: uv run --no-sync python tools/_tmp_neural_action_compare.py
