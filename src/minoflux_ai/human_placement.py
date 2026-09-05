@@ -9,6 +9,7 @@ import time
 from typing import Mapping, Sequence
 
 from minoflux_engine import Game, LockResult
+from minoflux_engine.pieces import SHAPES
 
 from .bitboard import board_row_masks
 from .neural import NeuralValueConfig, encode_placement_result
@@ -256,6 +257,27 @@ def _action_key(action: SearchAction) -> tuple[object, ...]:
     )
 
 
+def _choice_geometry_key(choice: Mapping[str, object]) -> tuple[object, ...]:
+    piece = str(choice.get("piece", "")).upper()
+    shapes = SHAPES.get(piece)
+    if shapes is None:
+        raise ValueError("choice.piece is invalid")
+    x = int(choice.get("x", 0))
+    y = int(choice.get("y", 0))
+    rotation = int(choice.get("rotation", 0)) % 4
+    cells = tuple(sorted((x + dx, y + dy) for dx, dy in shapes[rotation]))
+    return (bool(choice.get("hold", False)), piece, cells)
+
+
+def _action_geometry_key(action: SearchAction) -> tuple[object, ...]:
+    placement = action.placement
+    return (
+        bool(action.use_hold),
+        placement.piece,
+        tuple(sorted(placement.cells)),
+    )
+
+
 def _seed_for_record(record: Mapping[str, object]) -> int:
     session_id = int(record.get("sessionId", 0))
     game_index = int(record.get("gameIndex", 0))
@@ -330,6 +352,7 @@ def write_human_ranking_dataset(
     written = 0
     candidates_written = 0
     skipped: dict[str, int] = {}
+    expert_matches = {"exact": 0, "geometry": 0}
 
     def skip(reason: str) -> None:
         skipped[reason] = skipped.get(reason, 0) + 1
@@ -352,12 +375,28 @@ def write_human_ranking_dataset(
                 skip("no-candidates")
                 continue
 
-            wanted_key = _choice_key(choice)
+            try:
+                wanted_key = _choice_key(choice)
+                wanted_geometry = _choice_geometry_key(choice)
+            except (TypeError, ValueError):
+                skip("invalid-choice")
+                continue
+
             raw_experts = [
                 index
                 for index, (action, _branch) in enumerate(action_branches)
                 if _action_key(action) == wanted_key
             ]
+            if raw_experts:
+                expert_matches["exact"] += 1
+            else:
+                raw_experts = [
+                    index
+                    for index, (action, _branch) in enumerate(action_branches)
+                    if _action_geometry_key(action) == wanted_geometry
+                ]
+                if raw_experts:
+                    expert_matches["geometry"] += 1
             if not raw_experts:
                 skip("expert-not-reachable")
                 continue
@@ -437,5 +476,6 @@ def write_human_ranking_dataset(
         "samples": written,
         "candidates": candidates_written,
         "skipped": dict(sorted(skipped.items())),
+        "expertMatches": expert_matches,
         "datasetConfig": cfg.to_dict(),
     }
