@@ -65,6 +65,8 @@ struct Table {
     std::vector<uint8_t> geometry_invalid;
     std::vector<Mask256> collision_masks;
     std::vector<Mask256> geometry_masks;
+    std::vector<int32_t> geometry_ids;
+    int32_t geometry_count = 0;
 
     std::vector<uint32_t> state_group_offsets;
     std::vector<uint32_t> group_kick_offsets;
@@ -129,6 +131,10 @@ struct Scratch {
     std::vector<int32_t> visited_state_ids;
     std::vector<int32_t> visited_rotation_ids;
     std::vector<int32_t> landing_trail;
+    std::vector<BestRecord> best_records;
+    std::vector<uint32_t> best_generations;
+    std::vector<int32_t> touched_geometry_ids;
+    uint32_t best_generation = 0;
 };
 
 std::vector<std::shared_ptr<Table>> g_tables;
@@ -501,8 +507,21 @@ RunResult run_native(
         return landing;
     };
 
-    std::unordered_map<Mask256, BestRecord, MaskHash> best;
-    best.reserve(128);
+    const size_t geometry_count = static_cast<size_t>(table.geometry_count);
+    if (scratch.best_records.size() < geometry_count) {
+        scratch.best_records.resize(geometry_count);
+    }
+    if (scratch.best_generations.size() < geometry_count) {
+        scratch.best_generations.resize(geometry_count, 0);
+    }
+    scratch.touched_geometry_ids.clear();
+    scratch.touched_geometry_ids.reserve(geometry_count);
+    ++scratch.best_generation;
+    if (scratch.best_generation == 0) {
+        std::fill(scratch.best_generations.begin(), scratch.best_generations.end(), uint32_t{0});
+        scratch.best_generation = 1;
+    }
+    const uint32_t best_generation = scratch.best_generation;
     const auto representative_started = Clock::now();
 
     auto landing_for = [&](int32_t state_id) -> int32_t {
@@ -534,7 +553,6 @@ RunResult run_native(
                 }
                 continue;
             }
-            const Mask256& key = table.geometry_masks[static_cast<size_t>(final_state)];
             const int32_t rotation_info = scratch.state_kick_infos[static_cast<size_t>(state_id)];
             const bool last_rotation = rotation_info >= 0;
             BestRecord candidate;
@@ -548,11 +566,15 @@ RunResult run_native(
             candidate.placement.rotation_from = last_rotation ? (rotation_info >> kKickIndexBits) : -1;
             candidate.placement.rotation_to = last_rotation ? (state_id & 3) : -1;
 
-            auto it = best.find(key);
-            if (it == best.end()) {
-                best.emplace(key, candidate);
-            } else if (better_non_t(candidate, it->second)) {
-                it->second = candidate;
+            const int32_t geometry_id = table.geometry_ids[static_cast<size_t>(final_state)];
+            auto& generation = scratch.best_generations[static_cast<size_t>(geometry_id)];
+            BestRecord& current = scratch.best_records[static_cast<size_t>(geometry_id)];
+            if (generation != best_generation) {
+                generation = best_generation;
+                scratch.touched_geometry_ids.push_back(geometry_id);
+                current = candidate;
+            } else if (better_non_t(candidate, current)) {
+                current = candidate;
             }
             if constexpr (Profile) {
                 ++counters.representative_nodes;
@@ -562,7 +584,6 @@ RunResult run_native(
         auto emit = [&](int32_t state_id, int32_t depth, int32_t rotation_info, int32_t order_rank) {
             const int32_t final_state = landing_for(state_id);
             if (table.geometry_invalid[static_cast<size_t>(final_state)] == 0) {
-                const Mask256& key = table.geometry_masks[static_cast<size_t>(final_state)];
                 const bool last_rotation = rotation_info >= 0;
                 const int32_t kick_index = last_rotation ? (rotation_info & kKickIndexMask) : -1;
                 BestRecord candidate;
@@ -589,11 +610,15 @@ RunResult run_native(
                 candidate.placement.rotation_from = last_rotation ? (rotation_info >> kKickIndexBits) : -1;
                 candidate.placement.rotation_to = last_rotation ? (state_id & 3) : -1;
 
-                auto it = best.find(key);
-                if (it == best.end()) {
-                    best.emplace(key, candidate);
-                } else if (better_t(candidate, it->second)) {
-                    it->second = candidate;
+                const int32_t geometry_id = table.geometry_ids[static_cast<size_t>(final_state)];
+                auto& generation = scratch.best_generations[static_cast<size_t>(geometry_id)];
+                BestRecord& current = scratch.best_records[static_cast<size_t>(geometry_id)];
+                if (generation != best_generation) {
+                    generation = best_generation;
+                    scratch.touched_geometry_ids.push_back(geometry_id);
+                    current = candidate;
+                } else if (better_t(candidate, current)) {
+                    current = candidate;
                 }
             }
             if constexpr (Profile) {
@@ -632,9 +657,11 @@ RunResult run_native(
     }
 
     const auto placement_started = Clock::now();
-    result.placements.reserve(best.size());
-    for (const auto& entry : best) {
-        result.placements.push_back(entry.second.placement);
+    result.placements.reserve(scratch.touched_geometry_ids.size());
+    for (int32_t geometry_id : scratch.touched_geometry_ids) {
+        result.placements.push_back(
+            scratch.best_records[static_cast<size_t>(geometry_id)].placement
+        );
     }
     std::sort(
         result.placements.begin(),
@@ -697,6 +724,20 @@ int register_table(
     table->geometry_invalid = to_u8_bytes(geometry_invalid, state_count, "geometry_invalid");
     table->collision_masks = decode_masks(collision_masks, state_count, "collision_masks");
     table->geometry_masks = decode_masks(geometry_masks, state_count, "geometry_masks");
+    table->geometry_ids.assign(state_count, -1);
+    std::unordered_map<Mask256, int32_t, MaskHash> geometry_lookup;
+    geometry_lookup.reserve(state_count);
+    for (size_t state_id = 0; state_id < state_count; ++state_id) {
+        if (table->geometry_invalid[state_id] != 0) {
+            continue;
+        }
+        const Mask256& mask = table->geometry_masks[state_id];
+        const auto inserted = geometry_lookup.emplace(mask, table->geometry_count);
+        if (inserted.second) {
+            ++table->geometry_count;
+        }
+        table->geometry_ids[state_id] = inserted.first->second;
+    }
 
     table->state_group_offsets.reserve(state_count + 1);
     table->state_group_offsets.push_back(0);
