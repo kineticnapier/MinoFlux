@@ -1,0 +1,63 @@
+name: Build Commandless Rotation Candidate
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [perf-rotation-hotloop-20260905]
+
+jobs:
+  build:
+    if: github.event.head_commit.message == 'Build clean commandless rotation candidate'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 815bab8b1a15510418604aca8ad5766c83cd6e2a
+          path: candidate
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: '3.13'
+      - name: Apply focused source change
+        shell: bash
+        run: |
+          cd candidate
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/minoflux_ai/reachability_pathless.py')
+          s=p.read_text()
+          s=s.replace('import time\n', 'import time\nfrom functools import cache\n', 1)
+          marker='_REFERENCE_REACHABLE_PLACEMENTS = _reference.reachable_placements\n'
+          helper='''_REFERENCE_REACHABLE_PLACEMENTS = _reference.reachable_placements\n\n\n@cache\ndef _rotation_kick_groups(\n    piece: str,\n    allow_180: bool,\n    width: int,\n    height: int,\n) -> tuple[tuple[tuple[tuple[int, int], ...], ...], ...]:\n    \"\"\"Drop path commands from cached SRS transitions for pathless search.\"\"\"\n\n    return tuple(\n        tuple(kicks for _command, kicks in groups)\n        for groups in _reference._rotation_transitions(piece, allow_180, width, height)\n    )\n'''
+          assert marker in s
+          s=s.replace(marker,helper,1)
+          old='''    rotation_transitions = _reference._rotation_transitions(\n        piece,\n        normalized_allow_180,\n        width,\n        height,\n    )\n'''
+          new='''    rotation_transitions = _rotation_kick_groups(\n        piece,\n        normalized_allow_180,\n        width,\n        height,\n    )\n'''
+          assert old in s
+          s=s.replace(old,new,1)
+          old_loop='for _command, kicks in rotation_transitions[state_id]:'
+          assert s.count(old_loop)==2
+          s=s.replace(old_loop,'for kicks in rotation_transitions[state_id]:')
+          p.write_text(s)
+          PY
+          git diff --check
+          git diff -- src/minoflux_ai/reachability_pathless.py
+      - name: Run full fast test suite
+        shell: bash
+        run: |
+          cd candidate
+          uv sync --extra game --extra dev
+          uv run --no-sync python -m pytest -q
+      - name: Commit clean candidate
+        shell: bash
+        run: |
+          cd candidate
+          git config user.name 'Kinetic Napier'
+          git config user.email 'u61819269@gmail.com'
+          git checkout -b perf-rotation-commandless-clean
+          git add src/minoflux_ai/reachability_pathless.py
+          git commit -m 'Strip unused commands from pathless rotation transitions'
+          git push --force origin HEAD:refs/heads/perf-rotation-commandless-clean
+          git rev-parse HEAD
