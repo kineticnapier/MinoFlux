@@ -16,17 +16,14 @@ class RepeatTimer:
     def __init__(self) -> None:
         self.held = False
         self.next_at = math.inf
-        self._instant_emitted = False
 
     def press(self, now: float, initial_delay_ms: int) -> None:
         self.held = True
         self.next_at = now + max(0, initial_delay_ms) / 1000.0
-        self._instant_emitted = False
 
     def release(self) -> None:
         self.held = False
         self.next_at = math.inf
-        self._instant_emitted = False
 
     def poll(self, now: float, interval_ms: int, max_count: int = 64) -> RepeatBatch:
         epsilon = 1e-9
@@ -34,10 +31,9 @@ class RepeatTimer:
             return RepeatBatch()
         interval_ms = max(0, int(interval_ms))
         if interval_ms == 0:
-            if self._instant_emitted:
-                return RepeatBatch()
-            self._instant_emitted = True
-            self.next_at = math.inf
+            # ARR=0 is a charged state, not a one-shot event. Keep emitting an
+            # instant move while the key remains held so DAS survives piece
+            # locks/rotations and the newly active piece still reaches the wall.
             return RepeatBatch(instant=True)
 
         interval = interval_ms / 1000.0
