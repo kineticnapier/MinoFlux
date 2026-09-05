@@ -20,26 +20,26 @@ class FestivalSafeConfig:
     The scorer intentionally has no learned parameters. It evaluates every legal
     exact-SRS placement supplied by the search layer and strongly prefers clean,
     low boards with an open right-side Quad well. When the stack is dangerous or
-    garbage/holes are present, survival and digging override the Quad discipline.
+    real garbage is present, survival and digging override the Quad discipline.
     """
 
-    danger_height: int = 12
-    critical_height: int = 16
-    holes: float = -105.0
-    new_holes: float = -240.0
-    removed_holes: float = 150.0
-    hole_depth: float = -11.0
-    aggregate_height: float = -1.35
-    max_height: float = -7.0
-    danger_height_quadratic: float = -8.0
-    critical_height_penalty: float = -180.0
-    stack_bumpiness: float = -4.5
-    center_peak: float = -7.0
-    right_well_depth: float = 18.0
-    deep_right_well: float = 3.0
-    right_well_fill: float = -70.0
-    right_overstack: float = -22.0
-    garbage_well_scale: float = 0.12
+    danger_height: int = 10
+    critical_height: int = 14
+    holes: float = -160.0
+    new_holes: float = -400.0
+    removed_holes: float = 220.0
+    hole_depth: float = -20.0
+    aggregate_height: float = -0.90
+    max_height: float = -11.0
+    danger_height_quadratic: float = -12.0
+    critical_height_penalty: float = -350.0
+    stack_bumpiness: float = -7.0
+    center_peak: float = -11.0
+    right_well_depth: float = 13.0
+    deep_right_well: float = -4.0
+    right_well_fill: float = -45.0
+    right_overstack: float = -35.0
+    garbage_well_scale: float = 0.08
     perfect_clear: float = 220.0
     topout: float = -1_000_000_000.0
 
@@ -65,14 +65,14 @@ def _line_clear_score(lines: int, *, danger: bool, garbage: bool) -> float:
     if lines <= 0:
         return 0.0
     if lines >= 4:
-        return 300.0 if not danger and not garbage else 245.0
+        return 350.0 if not danger and not garbage else 300.0
     if danger:
-        return (0.0, 70.0, 125.0, 185.0)[lines]
+        return (0.0, 100.0, 180.0, 260.0)[lines]
     if garbage:
-        return (0.0, 55.0, 105.0, 165.0)[lines]
+        return (0.0, 80.0, 150.0, 220.0)[lines]
     # On a healthy clean board, preserve the stack for a Quad instead of
     # cashing out weak line clears.
-    return (0.0, -38.0, -24.0, -12.0)[lines]
+    return (0.0, -25.0, -15.0, -8.0)[lines]
 
 
 def _score_after_rows(
@@ -93,7 +93,7 @@ def _score_after_rows(
 
     new_holes = max(0, after.holes - before.holes)
     removed_holes = max(0, before.holes - after.holes)
-    danger = before.max_height >= config.danger_height or before.holes >= 3
+    danger = before.max_height >= config.danger_height or before.holes > 0
 
     score = (
         after.holes * config.holes
@@ -104,7 +104,7 @@ def _score_after_rows(
         + after.max_height * config.max_height
     )
 
-    danger_excess = max(0, after.max_height - 9)
+    danger_excess = max(0, after.max_height - 8)
     score += danger_excess * danger_excess * config.danger_height_quadratic
     critical_excess = max(0, after.max_height - config.critical_height + 1)
     score += critical_excess * config.critical_height_penalty
@@ -162,11 +162,7 @@ def score_festival_safe_placement(
 
     rows = tuple(source_rows) if source_rows is not None else board_row_masks(game.board)
     before_features = before or extract_board_features_from_masks(rows, width=game.width)
-    garbage_mode = (
-        bool(garbage)
-        if garbage is not None
-        else (_has_garbage(game) or before_features.holes > 0)
-    )
+    garbage_mode = bool(garbage) if garbage is not None else _has_garbage(game)
     after_rows, lines, topped_out = place_and_clear_row_masks(
         rows,
         placement,
@@ -199,7 +195,7 @@ class FestivalSafeScorer:
             return ()
         rows = board_row_masks(game.board)
         before = extract_board_features_from_masks(rows, width=game.width)
-        garbage = _has_garbage(game) or before.holes > 0
+        garbage = _has_garbage(game)
         return tuple(
             score_festival_safe_placement(
                 game,
