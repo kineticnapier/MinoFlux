@@ -27,6 +27,29 @@ from remote_agent import (
 RESULT_PATH = PROJECT_ROOT / "data" / "remote" / "latest-placement-evaluation.json"
 RESULT_COMMANDS = {"placement-v2-evaluate", "placement-v2-full-50"}
 
+# Cloudflare-only fixed command. Keeping it here means the older GitHub-Issue
+# transport is unchanged while the dashboard can request the exact 100-game
+# baseline used for Placement-v2 comparison.
+COMMANDS["placement-baseline-100"] = (
+    "-m",
+    "minoflux.neural_cli",
+    "evaluate",
+    "--model",
+    "data/models/neural-value-human.pt",
+    "--games",
+    "100",
+    "--max-pieces",
+    "300",
+    "--seed-base",
+    "8100001",
+    "--seed-step",
+    "97",
+    "--game-batch-size",
+    "8",
+    "--device",
+    "auto",
+)
+
 
 @dataclass
 class ActiveTask:
@@ -42,6 +65,13 @@ def _load_latest_result() -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _read_full_log(path: Path) -> str:
+    try:
+        return path.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 class CloudflareRemoteAgent:
@@ -101,6 +131,7 @@ class CloudflareRemoteAgent:
         message: str = "",
         log_tail: list[str] | None = None,
         result: dict[str, Any] | None = None,
+        full_log: str | None = None,
     ) -> None:
         payload: dict[str, Any] = {
             "state": state,
@@ -111,6 +142,8 @@ class CloudflareRemoteAgent:
         }
         if result is not None:
             payload["result"] = result
+        if full_log is not None:
+            payload["fullLog"] = full_log
         self._request_json(
             "/api/agent/status",
             method="POST",
@@ -191,6 +224,7 @@ class CloudflareRemoteAgent:
             command=task.command,
             message=f"Stopped; exit={exit_code}",
             log_tail=log_tail,
+            full_log=_read_full_log(task.log_path),
         )
         print(f"[cf-remote] stopped {task.command}; exit={exit_code}")
         self.active = None
@@ -217,6 +251,7 @@ class CloudflareRemoteAgent:
             message=message,
             log_tail=log_tail,
             result=result,
+            full_log=_read_full_log(task.log_path),
         )
         print(f"[cf-remote] {task.command} finished; exit={exit_code}")
         self.active = None
