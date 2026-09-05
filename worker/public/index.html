@@ -29,6 +29,8 @@
     .meta { display:grid; grid-template-columns:120px 1fr; gap:6px 10px; color:var(--muted); font-size:13px; margin-bottom:12px; }
     .meta strong { color:var(--text); font-weight:600; overflow-wrap:anywhere; }
     pre { margin:0; max-height:320px; overflow:auto; padding:12px; background:#090b0f; border:1px solid var(--line); border-radius:10px; color:#d8e0ec; font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .log-actions { display:flex; justify-content:flex-end; margin-top:10px; }
+    .log-actions button { width:auto; padding:8px 11px; font-size:13px; text-align:center; }
     .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
     button { font:inherit; appearance:none; width:100%; border:1px solid var(--line); border-radius:12px; background:var(--panel2); color:var(--text); padding:13px 12px; font-weight:700; text-align:left; cursor:pointer; touch-action:manipulation; }
     button.primary { border-color:color-mix(in srgb,var(--accent) 60%,var(--line)); }
@@ -58,6 +60,7 @@
       <span>message</span><strong id="message">--</strong>
     </div>
     <pre id="log">statusを取得中...</pre>
+    <div class="log-actions"><button id="copy-log" type="button">ログ全文をコピー</button></div>
     <p id="notice"></p>
   </section>
 
@@ -79,6 +82,10 @@
       <button class="command" data-command="placement-v2-evaluate">
         Evaluate Placement v2
         <small>placement-v2.ptと旧モデルを同seed比較</small>
+      </button>
+      <button class="command" data-command="placement-baseline-100">
+        Baseline × 100
+        <small>旧 neural-value-human.pt を新モデルと同seedで100ゲーム評価</small>
       </button>
       <button class="danger command" data-command="stop">
         Stop active task
@@ -103,6 +110,7 @@
   const $ = id => document.getElementById(id);
   const notice = $("notice"), dot = $("dot"), state = $("state"), updated = $("updated");
   const agent = $("agent"), command = $("command"), queued = $("queued"), message = $("message"), log = $("log");
+  const copyLog = $("copy-log");
   const buttons = [...document.querySelectorAll(".command")];
 
   function setEnabled(value) { buttons.forEach(button => { button.disabled = !value; }); }
@@ -157,7 +165,43 @@
     }
   }
 
+  async function writeClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    const copied = document.execCommand("copy");
+    area.remove();
+    if (!copied) throw new Error("clipboard unavailable");
+  }
+
+  async function copyFullLog() {
+    copyLog.disabled = true;
+    showNotice("ログ全文を取得中...");
+    try {
+      const response = await fetch("/api/log", { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `log HTTP ${response.status}`);
+      if (typeof data.log !== "string") throw new Error("保存済みの全文ログがありません");
+      await writeClipboard(data.log);
+      showNotice(`${data.command || "last task"} のログ全文 ${data.log.length}文字をコピーしました`);
+    } catch (error) {
+      showNotice(String(error), true);
+    } finally {
+      copyLog.disabled = false;
+    }
+  }
+
   buttons.forEach(button => button.addEventListener("click", () => send(button.dataset.command)));
+  copyLog.addEventListener("click", copyFullLog);
 
   setEnabled(false);
   refresh();
