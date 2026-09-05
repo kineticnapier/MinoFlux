@@ -819,66 +819,41 @@ def reachable_placements(
             int,
         ],
     ] = {}
-    spin_cache: dict[tuple[int, int, int, int], str | None] = {}
 
-    def emit(state_id: int, node_index: int, order_rank: int) -> None:
-        emit_started = time.perf_counter() if profiling else 0.0
-        landing_elapsed = 0.0
-        try:
-            landing_started = time.perf_counter() if profiling else 0.0
-            if profile is not None:
-                profile.landing_queries += 1
+    if not piece_is_t:
+        # Non-T placements never need the rotation-ending representative used by
+        # T-spin classification. Their preference is always (0, 0, -depth), so
+        # compare depth/state rank directly and only build the full result tuple
+        # when a geometry actually wins. This keeps the exact representative and
+        # output ordering while avoiding a Python function call and preference
+        # tuple for every reached state.
+        if profile is None:
+            for state_id in visited_state_ids:
+                final_state = landing_state[state_id]
+                if final_state == _NO_LANDING:
+                    final_state = compute_landing_state(state_id)
 
-            final_state = landing_state[state_id]
-            if final_state != _NO_LANDING:
-                if profile is not None:
-                    profile.landing_cache_hits += 1
-            else:
-                final_state = compute_landing_state(state_id)
+                key = geometry_masks[final_state]
+                if key < 0:
+                    continue
 
-            if profile is not None:
-                landing_elapsed = time.perf_counter() - landing_started
-                profile.landing_seconds += landing_elapsed
-
-            key = geometry_masks[final_state]
-            if key < 0:
-                return
-
-            x = state_x[state_id]
-            landing_y = state_y[final_state]
-            rotation = state_id & 3
-            kick_index = kick_indices[node_index]
-            last_rotation = kick_index >= 0
-
-            spin_kind: str | None = None
-            if last_rotation and piece_is_t:
-                spin_key = (x, landing_y, rotation, kick_index)
-                if spin_key in spin_cache:
-                    spin_kind = spin_cache[spin_key]
-                else:
-                    spin_kind = classify_t_spin_row_masks(
-                        rows,
-                        piece=piece,
-                        x=x,
-                        y=landing_y,
-                        rotation=rotation,
-                        last_move_was_rotation=True,
-                        rotation_kick_index=kick_index,
-                        width=width,
+                node_index = state_nodes[state_id]
+                negative_depth = -depths[node_index]
+                previous = best.get(key)
+                if previous is not None and (
+                    negative_depth < previous[0][2]
+                    or (
+                        negative_depth == previous[0][2]
+                        and state_id >= previous[1]
                     )
-                    spin_cache[spin_key] = spin_kind
+                ):
+                    continue
 
-            preference = (
-                int(spin_kind is not None),
-                int(spin_kind == "full"),
-                -depths[node_index],
-            )
-            previous = best.get(key)
-            if (
-                previous is None
-                or preference > previous[0]
-                or (preference == previous[0] and order_rank < previous[1])
-            ):
+                x = state_x[state_id]
+                landing_y = state_y[final_state]
+                rotation = state_id & 3
+                kick_index = kick_indices[node_index]
+                last_rotation = kick_index >= 0
                 parent = parents[node_index]
                 rotation_from = (
                     (node_states[parent] & 3)
@@ -886,8 +861,8 @@ def reachable_placements(
                     else -1
                 )
                 best[key] = (
-                    preference,
-                    order_rank,
+                    (0, 0, negative_depth),
+                    state_id,
                     x,
                     landing_y,
                     rotation,
@@ -897,25 +872,156 @@ def reachable_placements(
                     rotation_from,
                     rotation if last_rotation else -1,
                 )
-        finally:
-            if profile is not None:
+        else:
+            for state_id in visited_state_ids:
+                emit_started = time.perf_counter()
+                landing_started = time.perf_counter()
+                profile.landing_queries += 1
+
+                final_state = landing_state[state_id]
+                if final_state != _NO_LANDING:
+                    profile.landing_cache_hits += 1
+                else:
+                    final_state = compute_landing_state(state_id)
+
+                landing_elapsed = time.perf_counter() - landing_started
+                profile.landing_seconds += landing_elapsed
+                key = geometry_masks[final_state]
+                if key >= 0:
+                    node_index = state_nodes[state_id]
+                    negative_depth = -depths[node_index]
+                    previous = best.get(key)
+                    if previous is None or negative_depth > previous[0][2] or (
+                        negative_depth == previous[0][2]
+                        and state_id < previous[1]
+                    ):
+                        x = state_x[state_id]
+                        landing_y = state_y[final_state]
+                        rotation = state_id & 3
+                        kick_index = kick_indices[node_index]
+                        last_rotation = kick_index >= 0
+                        parent = parents[node_index]
+                        rotation_from = (
+                            (node_states[parent] & 3)
+                            if last_rotation and parent >= 0
+                            else -1
+                        )
+                        best[key] = (
+                            (0, 0, negative_depth),
+                            state_id,
+                            x,
+                            landing_y,
+                            rotation,
+                            node_index,
+                            last_rotation,
+                            kick_index if last_rotation else -1,
+                            rotation_from,
+                            rotation if last_rotation else -1,
+                        )
+
                 profile.representative_nodes += 1
                 profile.representative_seconds += max(
                     0.0,
                     time.perf_counter() - emit_started - landing_elapsed,
                 )
+    else:
+        spin_cache: dict[tuple[int, int, int, int], str | None] = {}
 
-    for state_id in visited_state_ids:
-        emit(state_id, state_nodes[state_id], state_id)
+        def emit(state_id: int, node_index: int, order_rank: int) -> None:
+            emit_started = time.perf_counter() if profiling else 0.0
+            landing_elapsed = 0.0
+            try:
+                landing_started = time.perf_counter() if profiling else 0.0
+                if profile is not None:
+                    profile.landing_queries += 1
 
-    rotation_phase_base = packed_count
-    for state_id in visited_rotation_ids:
-        node_index = rotation_nodes[state_id]
-        if state_nodes[state_id] == node_index:
-            if profile is not None:
-                profile.representative_duplicate_skips += 1
-            continue
-        emit(state_id, node_index, rotation_phase_base + state_id)
+                final_state = landing_state[state_id]
+                if final_state != _NO_LANDING:
+                    if profile is not None:
+                        profile.landing_cache_hits += 1
+                else:
+                    final_state = compute_landing_state(state_id)
+
+                if profile is not None:
+                    landing_elapsed = time.perf_counter() - landing_started
+                    profile.landing_seconds += landing_elapsed
+
+                key = geometry_masks[final_state]
+                if key < 0:
+                    return
+
+                x = state_x[state_id]
+                landing_y = state_y[final_state]
+                rotation = state_id & 3
+                kick_index = kick_indices[node_index]
+                last_rotation = kick_index >= 0
+
+                spin_kind: str | None = None
+                if last_rotation:
+                    spin_key = (x, landing_y, rotation, kick_index)
+                    if spin_key in spin_cache:
+                        spin_kind = spin_cache[spin_key]
+                    else:
+                        spin_kind = classify_t_spin_row_masks(
+                            rows,
+                            piece=piece,
+                            x=x,
+                            y=landing_y,
+                            rotation=rotation,
+                            last_move_was_rotation=True,
+                            rotation_kick_index=kick_index,
+                            width=width,
+                        )
+                        spin_cache[spin_key] = spin_kind
+
+                preference = (
+                    int(spin_kind is not None),
+                    int(spin_kind == "full"),
+                    -depths[node_index],
+                )
+                previous = best.get(key)
+                if (
+                    previous is None
+                    or preference > previous[0]
+                    or (preference == previous[0] and order_rank < previous[1])
+                ):
+                    parent = parents[node_index]
+                    rotation_from = (
+                        (node_states[parent] & 3)
+                        if last_rotation and parent >= 0
+                        else -1
+                    )
+                    best[key] = (
+                        preference,
+                        order_rank,
+                        x,
+                        landing_y,
+                        rotation,
+                        node_index,
+                        last_rotation,
+                        kick_index if last_rotation else -1,
+                        rotation_from,
+                        rotation if last_rotation else -1,
+                    )
+            finally:
+                if profile is not None:
+                    profile.representative_nodes += 1
+                    profile.representative_seconds += max(
+                        0.0,
+                        time.perf_counter() - emit_started - landing_elapsed,
+                    )
+
+        for state_id in visited_state_ids:
+            emit(state_id, state_nodes[state_id], state_id)
+
+        rotation_phase_base = packed_count
+        for state_id in visited_rotation_ids:
+            node_index = rotation_nodes[state_id]
+            if state_nodes[state_id] == node_index:
+                if profile is not None:
+                    profile.representative_duplicate_skips += 1
+                continue
+            emit(state_id, node_index, rotation_phase_base + state_id)
 
     placement_started = time.perf_counter() if profiling else 0.0
     placements: list[Placement] = []
