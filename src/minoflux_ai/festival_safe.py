@@ -43,16 +43,21 @@ class FestivalSafeConfig:
     garbage_bumpiness_scale: float = 2.5
     garbage_center_peak_scale: float = 4.0
 
-    # Generic board holes do not describe the intentional gap in a garbage row.
-    # Explicit excavation terms stop the policy from building a clean-looking
-    # mountain over the channel instead of digging toward it.
-    garbage_channel_blockers: float = -180.0
-    new_garbage_channel_blockers: float = -320.0
-    removed_garbage_channel_blockers: float = 180.0
-    garbage_cover_cells: float = -8.0
-    garbage_stack_height: float = -55.0
-    garbage_rows_removed: float = 650.0
-    garbage_cells_removed: float = 28.0
+    # Garbage excavation is deliberately different from keeping a permanent
+    # open well. A block above the current garbage gap is acceptable when its
+    # row is almost ready to clear; what is dangerous is creating sparse new
+    # layers that turn the stack into a mountain.
+    garbage_channel_blockers: float = -18.0
+    new_garbage_channel_blockers: float = -28.0
+    removed_garbage_channel_blockers: float = 14.0
+    garbage_channel_debt: float = -55.0
+    garbage_clear_debt: float = -42.0
+    garbage_surface_spread: float = -90.0
+    garbage_surface_variation: float = -30.0
+    garbage_cover_cells: float = -10.0
+    garbage_stack_height: float = -80.0
+    garbage_rows_removed: float = 900.0
+    garbage_cells_removed: float = 30.0
 
     perfect_clear: float = 220.0
     topout: float = -1_000_000_000.0
@@ -66,8 +71,12 @@ class GarbageExcavationMetrics:
     rows: int = 0
     cells: int = 0
     channel_blockers: int = 0
+    channel_debt: int = 0
+    clear_debt: int = 0
     cover_cells: int = 0
     stack_height: int = 0
+    surface_spread: int = 0
+    surface_variation: int = 0
 
 
 def _column_heights(rows: Sequence[int], width: int) -> tuple[int, ...]:
@@ -80,6 +89,18 @@ def _column_heights(rows: Sequence[int], width: int) -> tuple[int, ...]:
     return tuple(result)
 
 
+def _board_column_heights(board: Sequence[Sequence[str | None]]) -> tuple[int, ...]:
+    if not board:
+        return ()
+    height = len(board)
+    width = len(board[0])
+    result: list[int] = []
+    for x in range(width):
+        top = next((y for y, row in enumerate(board) if row[x] is not None), height)
+        result.append(0 if top == height else height - top)
+    return tuple(result)
+
+
 def _has_garbage(game: Game) -> bool:
     return any(cell == "G" for row in game.board for cell in row)
 
@@ -87,11 +108,14 @@ def _has_garbage(game: Game) -> bool:
 def _garbage_excavation_metrics(
     board: Sequence[Sequence[str | None]],
 ) -> GarbageExcavationMetrics:
-    """Measure how buried the currently applied garbage is.
+    """Measure whether the current garbage can be excavated without a mountain.
 
-    Each live garbage row normally has an intentional empty gap. That gap is not
-    a generic board hole, so count occupied cells above each available gap and
-    penalize burying the route needed to excavate the garbage stack.
+    Only the gap of the topmost live garbage row is the immediate excavation
+    target. Keeping that entire column permanently empty is *not* required:
+    ordinary rows above it may need a block in that column in order to clear.
+    Instead, ``channel_debt`` charges such a blocker according to how many cells
+    its row still needs before it can disappear, while ``clear_debt`` and the
+    non-channel surface shape punish sparse new layers.
     """
 
     garbage_rows = [
@@ -108,20 +132,36 @@ def _garbage_excavation_metrics(
         for cell in row
         if cell == "G"
     )
-    channel_blockers = 0
-    for y, row in garbage_rows:
-        gaps = [x for x, cell in enumerate(row) if cell is None]
-        if not gaps:
-            # A full row should vanish on lock. Treat malformed/manual states
-            # conservatively instead of declaring them easy to excavate.
-            channel_blockers += len(row)
-            continue
-        channel_blockers += min(
-            sum(board[above_y][x] is not None for above_y in range(y))
-            for x in gaps
-        )
+    top_garbage_y, top_garbage_row = min(garbage_rows, key=lambda item: item[0])
+    gaps = [x for x, cell in enumerate(top_garbage_row) if cell is None]
 
-    top_garbage_y = min(y for y, _row in garbage_rows)
+    target_gap: int | None = None
+    channel_blockers = 0
+    channel_debt = 0
+    if gaps:
+        blocker_counts = {
+            x: sum(board[y][x] is not None for y in range(top_garbage_y))
+            for x in gaps
+        }
+        target_gap = min(gaps, key=lambda x: (blocker_counts[x], x))
+        channel_blockers = blocker_counts[target_gap]
+        for y in range(top_garbage_y):
+            if board[y][target_gap] is None:
+                continue
+            # A channel block in a nearly-complete row is cheap because the row
+            # is about to vanish. A block in a sparse mountain layer is costly.
+            channel_debt += sum(cell is None for cell in board[y])
+    else:
+        # Malformed/manual full garbage rows should normally have cleared.
+        channel_blockers = len(top_garbage_row)
+        channel_debt = len(top_garbage_row) * len(top_garbage_row)
+
+    active_rows = [
+        row
+        for row in board[:top_garbage_y]
+        if any(cell is not None for cell in row)
+    ]
+    clear_debt = sum(sum(cell is None for cell in row) for row in active_rows)
     cover_cells = sum(
         cell is not None and cell != "G"
         for row in board[:top_garbage_y]
@@ -137,12 +177,32 @@ def _garbage_excavation_metrics(
         if not non_garbage_rows_above
         else top_garbage_y - min(non_garbage_rows_above)
     )
+
+    heights = _board_column_heights(board)
+    support_heights = [
+        height
+        for x, height in enumerate(heights)
+        if target_gap is None or x != target_gap
+    ]
+    if len(support_heights) >= 2:
+        surface_spread = max(support_heights) - min(support_heights)
+        ordered = sorted(support_heights)
+        median = ordered[len(ordered) // 2]
+        surface_variation = sum(abs(height - median) for height in support_heights)
+    else:
+        surface_spread = 0
+        surface_variation = 0
+
     return GarbageExcavationMetrics(
         rows=len(garbage_rows),
         cells=garbage_cells,
         channel_blockers=channel_blockers,
+        channel_debt=channel_debt,
+        clear_debt=clear_debt,
         cover_cells=cover_cells,
         stack_height=stack_height,
+        surface_spread=surface_spread,
+        surface_variation=surface_variation,
     )
 
 
@@ -274,6 +334,10 @@ def _score_after_rows(
             garbage_after.channel_blockers * config.garbage_channel_blockers
             + new_blockers * config.new_garbage_channel_blockers
             + removed_blockers * config.removed_garbage_channel_blockers
+            + garbage_after.channel_debt * config.garbage_channel_debt
+            + garbage_after.clear_debt * config.garbage_clear_debt
+            + garbage_after.surface_spread * config.garbage_surface_spread
+            + garbage_after.surface_variation * config.garbage_surface_variation
             + garbage_after.cover_cells * config.garbage_cover_cells
             + garbage_after.stack_height * config.garbage_stack_height
             + removed_rows * config.garbage_rows_removed
