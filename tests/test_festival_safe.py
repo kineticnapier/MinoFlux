@@ -10,7 +10,11 @@ from minoflux_ai import (
     choose_search_action,
 )
 from minoflux_ai.bitboard import placement_cells, place_and_clear_row_masks, board_row_masks
-from minoflux_ai.festival_safe import _line_clear_score, score_festival_safe_placement
+from minoflux_ai.festival_safe import (
+    _garbage_excavation_metrics,
+    _line_clear_score,
+    score_festival_safe_placement,
+)
 from minoflux_ai.reachability import reachable_placements
 from minoflux_engine import BOARD_HEIGHT, BOARD_WIDTH, Game, Placement
 
@@ -109,6 +113,45 @@ class FestivalSafeTests(unittest.TestCase):
         self.assertLess(
             FESTIVAL_SAFE_CONFIG.garbage_well_scale,
             0.25,
+        )
+        self.assertLess(FESTIVAL_SAFE_CONFIG.garbage_channel_blockers, 0.0)
+        self.assertGreater(FESTIVAL_SAFE_CONFIG.garbage_rows_removed, 0.0)
+
+    def test_garbage_excavation_metrics_track_a_buried_channel(self) -> None:
+        board = _empty_board()
+        gap = 4
+        for y in range(BOARD_HEIGHT - 4, BOARD_HEIGHT):
+            for x in range(BOARD_WIDTH):
+                if x != gap:
+                    board[y][x] = "G"
+
+        open_metrics = _garbage_excavation_metrics(board)
+        self.assertEqual(open_metrics.rows, 4)
+        self.assertEqual(open_metrics.cells, 36)
+        self.assertEqual(open_metrics.channel_blockers, 0)
+        self.assertEqual(open_metrics.stack_height, 0)
+
+        board[BOARD_HEIGHT - 5][gap] = "T"
+        buried_metrics = _garbage_excavation_metrics(board)
+        self.assertEqual(buried_metrics.channel_blockers, 4)
+        self.assertEqual(buried_metrics.cover_cells, 1)
+        self.assertEqual(buried_metrics.stack_height, 1)
+
+    def test_garbage_mode_avoids_covering_the_access_channel(self) -> None:
+        game = Game(4)
+        game.board = _empty_board()
+        gap = 4
+        for y in range(BOARD_HEIGHT - 4, BOARD_HEIGHT):
+            for x in range(BOARD_WIDTH):
+                if x != gap:
+                    game.board[y][x] = "G"
+        game.current = "O"
+
+        clear_channel = _placement("O", 0, BOARD_HEIGHT - 6, 0)
+        cover_channel = _placement("O", 2, BOARD_HEIGHT - 6, 0)
+        self.assertGreater(
+            score_festival_safe_placement(game, clear_channel),
+            score_festival_safe_placement(game, cover_channel),
         )
 
     def test_new_holes_are_punished_more_than_existing_holes(self) -> None:
