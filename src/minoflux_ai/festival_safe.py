@@ -40,11 +40,34 @@ class FestivalSafeConfig:
     right_well_fill: float = -45.0
     right_overstack: float = -35.0
     garbage_well_scale: float = 0.08
+    garbage_bumpiness_scale: float = 2.5
+    garbage_center_peak_scale: float = 4.0
+
+    # Generic board holes do not describe the intentional gap in a garbage row.
+    # Explicit excavation terms stop the policy from building a clean-looking
+    # mountain over the channel instead of digging toward it.
+    garbage_channel_blockers: float = -180.0
+    new_garbage_channel_blockers: float = -320.0
+    removed_garbage_channel_blockers: float = 180.0
+    garbage_cover_cells: float = -8.0
+    garbage_stack_height: float = -55.0
+    garbage_rows_removed: float = 650.0
+    garbage_cells_removed: float = 28.0
+
     perfect_clear: float = 220.0
     topout: float = -1_000_000_000.0
 
 
 FESTIVAL_SAFE_CONFIG = FestivalSafeConfig()
+
+
+@dataclass(frozen=True, slots=True)
+class GarbageExcavationMetrics:
+    rows: int = 0
+    cells: int = 0
+    channel_blockers: int = 0
+    cover_cells: int = 0
+    stack_height: int = 0
 
 
 def _column_heights(rows: Sequence[int], width: int) -> tuple[int, ...]:
@@ -59,6 +82,94 @@ def _column_heights(rows: Sequence[int], width: int) -> tuple[int, ...]:
 
 def _has_garbage(game: Game) -> bool:
     return any(cell == "G" for row in game.board for cell in row)
+
+
+def _garbage_excavation_metrics(
+    board: Sequence[Sequence[str | None]],
+) -> GarbageExcavationMetrics:
+    """Measure how buried the currently applied garbage is.
+
+    Each live garbage row normally has an intentional empty gap. That gap is not
+    a generic board hole, so count occupied cells above each available gap and
+    penalize burying the route needed to excavate the garbage stack.
+    """
+
+    garbage_rows = [
+        (y, row)
+        for y, row in enumerate(board)
+        if any(cell == "G" for cell in row)
+    ]
+    if not garbage_rows:
+        return GarbageExcavationMetrics()
+
+    garbage_cells = sum(
+        1
+        for _y, row in garbage_rows
+        for cell in row
+        if cell == "G"
+    )
+    channel_blockers = 0
+    for y, row in garbage_rows:
+        gaps = [x for x, cell in enumerate(row) if cell is None]
+        if not gaps:
+            # A full row should vanish on lock. Treat malformed/manual states
+            # conservatively instead of declaring them easy to excavate.
+            channel_blockers += len(row)
+            continue
+        channel_blockers += min(
+            sum(board[above_y][x] is not None for above_y in range(y))
+            for x in gaps
+        )
+
+    top_garbage_y = min(y for y, _row in garbage_rows)
+    cover_cells = sum(
+        cell is not None and cell != "G"
+        for row in board[:top_garbage_y]
+        for cell in row
+    )
+    non_garbage_rows_above = [
+        y
+        for y, row in enumerate(board[:top_garbage_y])
+        if any(cell is not None and cell != "G" for cell in row)
+    ]
+    stack_height = (
+        0
+        if not non_garbage_rows_above
+        else top_garbage_y - min(non_garbage_rows_above)
+    )
+    return GarbageExcavationMetrics(
+        rows=len(garbage_rows),
+        cells=garbage_cells,
+        channel_blockers=channel_blockers,
+        cover_cells=cover_cells,
+        stack_height=stack_height,
+    )
+
+
+def _board_after_placement(
+    game: Game,
+    placement: Placement,
+) -> tuple[list[list[str | None]], int, bool]:
+    """Simulate one legal placement while preserving garbage-cell identity."""
+
+    board = [row.copy() for row in game.board]
+    topped_out = False
+    for cell_x, cell_y in placement.cells:
+        if cell_y < 0:
+            topped_out = True
+        elif 0 <= cell_y < game.height:
+            board[cell_y][cell_x] = placement.piece
+
+    full_rows = [
+        index
+        for index, row in enumerate(board)
+        if all(cell is not None for cell in row)
+    ]
+    for index in reversed(full_rows):
+        del board[index]
+    for _ in full_rows:
+        board.insert(0, [None] * game.width)
+    return board, len(full_rows), topped_out
 
 
 def _line_clear_score(lines: int, *, danger: bool, garbage: bool) -> float:
@@ -86,6 +197,8 @@ def _score_after_rows(
     topped_out: bool,
     garbage: bool,
     config: FestivalSafeConfig,
+    garbage_before: GarbageExcavationMetrics | None = None,
+    garbage_after: GarbageExcavationMetrics | None = None,
 ) -> float:
     game_over = topped_out or hidden_rows_occupied(after_rows, game.hidden_rows)
     if game_over:
@@ -111,20 +224,23 @@ def _score_after_rows(
 
     heights = _column_heights(after_rows, game.width)
     if len(heights) >= 2:
-        # Keep the first width-1 columns smooth. The final 8->9 height jump is
-        # deliberately excluded here because it is the intended Quad well.
-        stack = heights[:-1]
+        # Garbage mode has no privileged Quad-well edge: smooth the full surface
+        # so the old 9-0 exemption cannot turn into a post-garbage mountain.
+        surface = heights if garbage else heights[:-1]
         stack_bumpiness = sum(
-            abs(left - right) for left, right in zip(stack, stack[1:])
+            abs(left - right) for left, right in zip(surface, surface[1:])
         )
-        score += stack_bumpiness * config.stack_bumpiness
+        bumpiness_scale = config.garbage_bumpiness_scale if garbage else 1.0
+        score += stack_bumpiness * config.stack_bumpiness * bumpiness_scale
 
-        if len(stack) >= 5:
-            center = stack[2:-2] or stack
-            shoulders = stack[:2] + stack[-2:]
+        if len(surface) >= 5:
+            center = surface[2:-2] or surface
+            shoulders = surface[:2] + surface[-2:]
             center_peak = max(0, max(center) - max(shoulders, default=0))
-            score += center_peak * config.center_peak
+            center_scale = config.garbage_center_peak_scale if garbage else 1.0
+            score += center_peak * config.center_peak * center_scale
 
+        stack = heights[:-1]
         right_height = heights[-1]
         left_floor = min(stack, default=0)
         well_depth = max(0, left_floor - right_height)
@@ -143,6 +259,27 @@ def _score_after_rows(
         if fills_right and lines < 4 and not garbage and not danger:
             score += config.right_well_fill
 
+    if garbage and garbage_before is not None and garbage_after is not None:
+        new_blockers = max(
+            0,
+            garbage_after.channel_blockers - garbage_before.channel_blockers,
+        )
+        removed_blockers = max(
+            0,
+            garbage_before.channel_blockers - garbage_after.channel_blockers,
+        )
+        removed_rows = max(0, garbage_before.rows - garbage_after.rows)
+        removed_cells = max(0, garbage_before.cells - garbage_after.cells)
+        score += (
+            garbage_after.channel_blockers * config.garbage_channel_blockers
+            + new_blockers * config.new_garbage_channel_blockers
+            + removed_blockers * config.removed_garbage_channel_blockers
+            + garbage_after.cover_cells * config.garbage_cover_cells
+            + garbage_after.stack_height * config.garbage_stack_height
+            + removed_rows * config.garbage_rows_removed
+            + removed_cells * config.garbage_cells_removed
+        )
+
     score += _line_clear_score(lines, danger=danger, garbage=garbage)
     if after.occupied_cells == 0 and lines > 0:
         score += config.perfect_clear
@@ -157,6 +294,7 @@ def score_festival_safe_placement(
     source_rows: Sequence[int] | None = None,
     before: BoardFeatures | None = None,
     garbage: bool | None = None,
+    garbage_before: GarbageExcavationMetrics | None = None,
 ) -> float:
     """Score one already-legal placement without mutating ``game``."""
 
@@ -169,6 +307,16 @@ def score_festival_safe_placement(
         width=game.width,
     )
     after = extract_board_features_from_masks(after_rows, width=game.width)
+
+    before_excavation = garbage_before
+    after_excavation = None
+    if garbage_mode:
+        before_excavation = before_excavation or _garbage_excavation_metrics(game.board)
+        after_board, board_lines, board_topped_out = _board_after_placement(game, placement)
+        if board_lines != lines or board_topped_out != topped_out:
+            raise AssertionError("Garbage-preserving placement simulation diverged")
+        after_excavation = _garbage_excavation_metrics(after_board)
+
     return _score_after_rows(
         game=game,
         placement=placement,
@@ -179,6 +327,8 @@ def score_festival_safe_placement(
         topped_out=topped_out,
         garbage=garbage_mode,
         config=config,
+        garbage_before=before_excavation,
+        garbage_after=after_excavation,
     )
 
 
@@ -196,6 +346,7 @@ class FestivalSafeScorer:
         rows = board_row_masks(game.board)
         before = extract_board_features_from_masks(rows, width=game.width)
         garbage = _has_garbage(game)
+        garbage_before = _garbage_excavation_metrics(game.board) if garbage else None
         return tuple(
             score_festival_safe_placement(
                 game,
@@ -204,6 +355,7 @@ class FestivalSafeScorer:
                 source_rows=rows,
                 before=before,
                 garbage=garbage,
+                garbage_before=garbage_before,
             )
             for placement in placements
         )
