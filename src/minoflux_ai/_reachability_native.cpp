@@ -907,6 +907,46 @@ py::dict run_packed(
     return output;
 }
 
+
+py::tuple run_packed_fast(
+    int table_handle,
+    const py::sequence& row_values,
+    int start_x,
+    int start_y,
+    int start_rotation,
+    int max_nodes
+) {
+    RunResult native_result = execute_run(
+        table_handle,
+        row_values,
+        start_x,
+        start_y,
+        start_rotation,
+        max_nodes,
+        false
+    );
+
+    std::string packed(native_result.placements.size() * kPlacementRecordBytes, '\0');
+    char* dest = packed.data();
+    for (const PlacementRecord& item : native_result.placements) {
+        const std::array<int32_t, kPlacementRecordInts> fields = {
+            item.x,
+            item.y,
+            item.rotation,
+            item.last_rotation ? int32_t{1} : int32_t{0},
+            item.kick_index,
+            item.rotation_from,
+            item.rotation_to,
+        };
+        for (int32_t field : fields) {
+            write_i32_le(dest, field);
+            dest += sizeof(int32_t);
+        }
+    }
+
+    return py::make_tuple(py::bytes(packed), native_result.placements.size());
+}
+
 }  // namespace
 
 PYBIND11_MODULE(_reachability_native, module) {
@@ -954,4 +994,15 @@ PYBIND11_MODULE(_reachability_native, module) {
         py::arg("max_nodes"),
         py::arg("profile") = false
     );
+    module.def(
+        "run_packed_fast",
+        &run_packed_fast,
+        py::arg("table_handle"),
+        py::arg("rows"),
+        py::arg("start_x"),
+        py::arg("start_y"),
+        py::arg("start_rotation"),
+        py::arg("max_nodes")
+    );
+
 }

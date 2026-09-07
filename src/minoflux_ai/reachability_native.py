@@ -259,17 +259,30 @@ def reachable_placement_records_native(
     )
     python_setup_elapsed = time.perf_counter() - setup_started if profiling else 0.0
 
-    native_result = _native.run_packed(
-        table_handle,
-        rows,
-        game.x,
-        game.y,
-        game.rotation & 3,
-        normalized_max_nodes,
-        profiling,
-    )
-    packed = native_result["placementsPacked"]
-    count = int(native_result["placementCount"])
+    native_result = None
+    fast_run = getattr(_native, "run_packed_fast", None)
+    if not profiling and callable(fast_run):
+        packed, count = fast_run(
+            table_handle,
+            rows,
+            game.x,
+            game.y,
+            game.rotation & 3,
+            normalized_max_nodes,
+        )
+        count = int(count)
+    else:
+        native_result = _native.run_packed(
+            table_handle,
+            rows,
+            game.x,
+            game.y,
+            game.rotation & 3,
+            normalized_max_nodes,
+            profiling,
+        )
+        packed = native_result["placementsPacked"]
+        count = int(native_result["placementCount"])
     if len(packed) != count * _NATIVE_RECORD_STRUCT.size:
         raise RuntimeError("native packed placement record length mismatch")
     result = NativePlacementRecords(game.current, packed, count, rows)
@@ -385,6 +398,7 @@ def reachable_placements_pathless_native(
     python_placement_elapsed = time.perf_counter() - placement_started if profiling else 0.0
 
     if profile is not None:
+        assert native_result is not None
         _record_native_profile(
             profile,
             native_result,

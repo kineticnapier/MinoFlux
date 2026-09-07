@@ -10,7 +10,11 @@ from minoflux_ai.neural_search_fast import (
     _ORIGINAL_CHOOSE_SEARCH_ACTIONS_BATCH,
     choose_search_actions_batch as choose_native_record_actions_batch,
 )
-from minoflux_ai.reachability import clear_reachability_cache
+from minoflux_ai.reachability import (
+    ReachabilityProfile,
+    clear_reachability_cache,
+    collect_reachability_profile,
+)
 from minoflux_ai.reachability_native import (
     clear_native_record_cache,
     native_pathless_available,
@@ -156,6 +160,32 @@ class NativeRecordPathTests(unittest.TestCase):
     def setUp(self) -> None:
         clear_reachability_cache()
         clear_native_record_cache()
+
+    def test_unprofiled_fast_packed_records_match_profiled_records(self) -> None:
+        game = Game(8100001)
+        fast_records = reachable_placement_records_native(
+            game,
+            allow_180=False,
+            max_nodes=8_000,
+        )
+        self.assertIsNotNone(fast_records)
+        clear_native_record_cache()
+        profile = ReachabilityProfile()
+        with collect_reachability_profile(profile):
+            profiled_records = reachable_placement_records_native(
+                game,
+                allow_180=False,
+                max_nodes=8_000,
+            )
+        self.assertIsNotNone(profiled_records)
+        assert fast_records is not None and profiled_records is not None
+        self.assertEqual(fast_records.packed, profiled_records.packed)
+        self.assertEqual(fast_records.count, profiled_records.count)
+        self.assertEqual(fast_records.rows, profiled_records.rows)
+        self.assertEqual(
+            tuple(fast_records.materialize(index) for index in range(len(fast_records))),
+            tuple(profiled_records.materialize(index) for index in range(len(profiled_records))),
+        )
 
     def test_raw_records_materialize_to_exact_ordered_placements(self) -> None:
         games = [Game(8100001 + index * 97) for index in range(8)]
