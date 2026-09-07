@@ -108,7 +108,15 @@ def _rank_native_record_branches(
                 (use_hold, branch_game, tuple(placements), tuple(kept_values))
             )
 
-    return _search._rank_precomputed_actions(tuple(materialized), count)
+    # Only the fields in _candidate_key can affect the exact neural tie-break.
+    # Avoid computing wells/hole-depth/T-slot metadata for candidates that will
+    # immediately be discarded. The selected public evaluation is restored in
+    # choose_search_actions_batch after the winner is known.
+    return _search._rank_precomputed_actions(
+        tuple(materialized),
+        count,
+        _ranking_only=True,
+    )
 
 
 def choose_search_actions_batch(
@@ -228,7 +236,16 @@ def choose_search_actions_batch(
         if not ranked:
             choices.append(None)
             continue
-        action, evaluation = ranked[0]
+        action, ranking_evaluation = ranked[0]
+        branch_game = held if action.use_hold else game
+        if branch_game is None:
+            raise AssertionError("Selected Hold action has no legal Hold branch")
+        evaluation = _search._neural_metadata_evaluation(
+            branch_game,
+            action.placement,
+            ranking_evaluation.score,
+            source_rows=direct.rows or None,
+        )
         choices.append(
             _search.SearchChoice(
                 action,
