@@ -126,31 +126,44 @@ def count_t_spin_slots_from_masks(
     width: int,
     start_y: int = 0,
 ) -> int:
-    if not rows:
+    if not rows or width <= 0:
         return 0
     height = len(rows)
+    row_limit = (1 << width) - 1
+    normalized = tuple(int(row) & row_limit for row in rows)
+    left_wall = 1
+    right_wall = 1 << (width - 1)
     slots = 0
     for pivot_y in range(max(0, int(start_y)), height):
-        row_mask = rows[pivot_y]
-        for pivot_x in range(width):
-            if row_mask & (1 << pivot_x):
-                continue
-            corners = (
-                _occupied_or_wall_masks(rows, pivot_x - 1, pivot_y - 1, width),
-                _occupied_or_wall_masks(rows, pivot_x + 1, pivot_y - 1, width),
-                _occupied_or_wall_masks(rows, pivot_x - 1, pivot_y + 1, width),
-                _occupied_or_wall_masks(rows, pivot_x + 1, pivot_y + 1, width),
-            )
-            if sum(corners) < 3:
-                continue
-            empty_cardinals = (
-                int(_empty_masks(rows, pivot_x, pivot_y - 1, width))
-                + int(_empty_masks(rows, pivot_x - 1, pivot_y, width))
-                + int(_empty_masks(rows, pivot_x + 1, pivot_y, width))
-                + int(_empty_masks(rows, pivot_x, pivot_y + 1, width))
-            )
-            if empty_cardinals >= 3:
-                slots += 1
+        center = normalized[pivot_y]
+        above = normalized[pivot_y - 1] if pivot_y > 0 else row_limit
+        below = normalized[pivot_y + 1] if pivot_y + 1 < height else row_limit
+
+        nw = ((above << 1) | left_wall) & row_limit
+        ne = (above >> 1) | right_wall
+        sw = ((below << 1) | left_wall) & row_limit
+        se = (below >> 1) | right_wall
+        corners3 = (
+            (nw & ne & sw)
+            | (nw & ne & se)
+            | (nw & sw & se)
+            | (ne & sw & se)
+        )
+
+        center_empty = ~center & row_limit
+        up_empty = (~above & row_limit) if pivot_y > 0 else 0
+        down_empty = (~below & row_limit) if pivot_y + 1 < height else 0
+        left_empty = (center_empty << 1) & row_limit
+        right_empty = center_empty >> 1
+        cardinals3 = (
+            (up_empty & down_empty & left_empty)
+            | (up_empty & down_empty & right_empty)
+            | (up_empty & left_empty & right_empty)
+            | (down_empty & left_empty & right_empty)
+        )
+
+        valid = center_empty & corners3 & cardinals3
+        slots += valid.bit_count()
     return slots
 
 
