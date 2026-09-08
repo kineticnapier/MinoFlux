@@ -129,12 +129,6 @@ def count_t_spin_slots_from_masks(
     if not rows:
         return 0
     height = len(rows)
-    orientations = (
-        ((0, -1), (-1, 0), (0, 0), (1, 0)),
-        ((0, -1), (0, 0), (1, 0), (0, 1)),
-        ((-1, 0), (0, 0), (1, 0), (0, 1)),
-        ((0, -1), (-1, 0), (0, 0), (0, 1)),
-    )
     slots = 0
     for pivot_y in range(max(0, int(start_y)), height):
         row_mask = rows[pivot_y]
@@ -149,13 +143,13 @@ def count_t_spin_slots_from_masks(
             )
             if sum(corners) < 3:
                 continue
-            if any(
-                all(
-                    _empty_masks(rows, pivot_x + dx, pivot_y + dy, width)
-                    for dx, dy in cells
-                )
-                for cells in orientations
-            ):
+            empty_cardinals = (
+                int(_empty_masks(rows, pivot_x, pivot_y - 1, width))
+                + int(_empty_masks(rows, pivot_x - 1, pivot_y, width))
+                + int(_empty_masks(rows, pivot_x + 1, pivot_y, width))
+                + int(_empty_masks(rows, pivot_x, pivot_y + 1, width))
+            )
+            if empty_cardinals >= 3:
                 slots += 1
     return slots
 
