@@ -12,7 +12,9 @@ from minoflux_ai.neural import NeuralValueEvaluator
 from minoflux_ai.neural_promotion import (
     NeuralModelSpec,
     build_neural_promotion_report,
+    reverse_versus_benchmark_result,
     run_neural_solo_benchmark,
+    same_neural_model,
     summarize_paired_versus,
 )
 from minoflux_ai.progress import progress_bar
@@ -164,7 +166,12 @@ def build_parser() -> ArgumentParser:
     promotion.add_argument("--champion-name", default="human3")
     promotion.add_argument("--reference-name", default="e5")
     promotion.add_argument("--output", default=None)
-    promotion.add_argument("--solo-games", type=int, default=100)
+    promotion.add_argument(
+        "--solo-games",
+        type=int,
+        default=100,
+        help="Solo games per unique checkpoint; 500 is recommended for a standard promotion baseline",
+    )
     promotion.add_argument("--solo-max-pieces", type=int, default=300)
     promotion.add_argument("--solo-seed-base", type=int, default=8_100_001)
     promotion.add_argument("--solo-seed-step", type=int, default=31)
@@ -173,7 +180,10 @@ def build_parser() -> ArgumentParser:
         "--versus-pairs",
         type=int,
         default=50,
-        help="Same-seed mirrored pairs; each pair runs A-left/B-right and B-left/A-right",
+        help=(
+            "Same-seed mirrored pairs; each pair runs A-left/B-right and B-left/A-right. "
+            "300 pairs (600 games) is recommended for a standard promotion baseline"
+        ),
     )
     promotion.add_argument("--versus-max-turns", type=int, default=500)
     promotion.add_argument("--versus-seed-base", type=int, default=8_200_001)
@@ -203,6 +213,12 @@ def build_parser() -> ArgumentParser:
         action=BooleanOptionalAction,
         default=True,
         help="Also measure human3 vs e5 so candidate results have a baseline distribution",
+    )
+    promotion.add_argument(
+        "--same-model-match",
+        action=BooleanOptionalAction,
+        default=False,
+        help="Run same-checkpoint versus matchups instead of skipping them (default: skip)",
     )
     _add_search_args(promotion)
 
@@ -295,7 +311,7 @@ def _benchmark(args) -> int:
 
 
 def _promotion(args) -> int:
-    solo_cache: dict[str, NeuralValueEvaluator] = {}
+    solo_loader_cache: dict[str, NeuralValueEvaluator] = {}
     candidate = NeuralModelSpec.from_path(args.candidate, name=args.candidate_name)
     champion = NeuralModelSpec.from_path(args.champion, name=args.champion_name)
     reference = NeuralModelSpec.from_path(args.reference, name=args.reference_name)
@@ -304,19 +320,51 @@ def _promotion(args) -> int:
         "champion": champion,
         "reference": reference,
     }
-    scorers = {
-        key: _load_solo(spec.path, args, solo_cache)
-        for key, spec in specs.items()
-    }
-    if any(scorer is None for scorer in scorers.values()):
-        raise SystemExit("promotion benchmark requires all three neural model paths")
+    role_order = ("candidate", "champion", "reference")
+
+    representatives: dict[str, str] = {}
+    scorers: dict[str, NeuralValueEvaluator] = {}
+    for key in role_order:
+        reused_from = next(
+            (
+                previous
+                for previous in role_order
+                if previous in representatives and same_neural_model(specs[key], specs[previous])
+            ),
+            None,
+        )
+        if reused_from is not None:
+            representative = representatives[reused_from]
+            representatives[key] = representative
+            scorers[key] = scorers[reused_from]
+            continue
+        scorer = _load_solo(specs[key].path, args, solo_loader_cache)
+        if scorer is None:
+            raise SystemExit("promotion benchmark requires all three neural model paths")
+        representatives[key] = key
+        scorers[key] = scorer
 
     weights = load_weights(args.heuristic_model) if args.heuristic_model else DEFAULT_WEIGHTS
     versus_config = _search_config(args)
     solo_config = versus_config.placement_search
-    solo_results = {
-        key: run_neural_solo_benchmark(
-            scorer,  # type: ignore[arg-type]
+
+    solo_results = {}
+    solo_execution: dict[str, dict[str, object]] = {}
+    solo_by_representative = {}
+    for key in role_order:
+        representative = representatives[key]
+        existing = solo_by_representative.get(representative)
+        if existing is not None:
+            solo_results[key] = existing
+            solo_execution[key] = {
+                "executed": False,
+                "reused": True,
+                "skipped": False,
+                "reusedFrom": representative,
+            }
+            continue
+        result = run_neural_solo_benchmark(
+            scorers[key],
             model=specs[key].path,
             games=args.solo_games,
             max_pieces=args.solo_max_pieces,
@@ -327,12 +375,72 @@ def _promotion(args) -> int:
             search_config=solo_config,
             progress=args.progress,
         )
-        for key, scorer in scorers.items()
-    }
+        solo_by_representative[representative] = result
+        solo_results[key] = result
+        solo_execution[key] = {
+            "executed": True,
+            "reused": False,
+            "skipped": False,
+        }
 
     versus_games = max(1, int(args.versus_pairs)) * 2
+    versus_conditions_key = (
+        versus_games,
+        max(1, int(args.versus_max_turns)),
+        int(args.versus_seed_base),
+        int(args.versus_seed_step),
+        max(1, int(args.garbage_cap)),
+        max(1, int(args.game_batch)),
+        json.dumps(versus_config.to_dict(), sort_keys=True),
+        str(args.heuristic_model or ""),
+    )
+    versus_cache: dict[
+        tuple[tuple[str, str], tuple[object, ...]],
+        tuple[str, str, str, object],
+    ] = {}
 
     def paired(label: str, a_key: str, b_key: str) -> tuple[str, dict[str, object]]:
+        rep_a = representatives[a_key]
+        rep_b = representatives[b_key]
+        if rep_a == rep_b and not args.same_model_match:
+            return label, {
+                "modelA": specs[a_key].name,
+                "modelB": specs[b_key].name,
+                "games": 0,
+                "pairs": 0,
+                "executed": False,
+                "reused": False,
+                "skipped": True,
+                "reason": "same-model matchup",
+            }
+
+        canonical_pair = tuple(sorted((rep_a, rep_b)))
+        cache_key = (canonical_pair, versus_conditions_key)
+        cached = versus_cache.get(cache_key)
+        if cached is not None:
+            source_label, source_a, source_b, raw = cached
+            reversed_from_source = (source_a, source_b) != (rep_a, rep_b)
+            effective = (
+                reverse_versus_benchmark_result(raw)  # type: ignore[arg-type]
+                if reversed_from_source
+                else raw
+            )
+            summary = summarize_paired_versus(
+                effective,  # type: ignore[arg-type]
+                model_a=specs[a_key].name,
+                model_b=specs[b_key].name,
+            )
+            summary.update(
+                {
+                    "executed": False,
+                    "reused": True,
+                    "skipped": False,
+                    "reusedFrom": source_label,
+                    "reversedFromSource": reversed_from_source,
+                }
+            )
+            return label, summary
+
         raw = run_versus_benchmark(
             versus_games,
             max_turns=args.versus_max_turns,
@@ -348,11 +456,20 @@ def _promotion(args) -> int:
             progress=args.progress,
             game_batch=args.game_batch,
         )
-        return label, summarize_paired_versus(
+        versus_cache[cache_key] = (label, rep_a, rep_b, raw)
+        summary = summarize_paired_versus(
             raw,
             model_a=specs[a_key].name,
             model_b=specs[b_key].name,
         )
+        summary.update(
+            {
+                "executed": True,
+                "reused": False,
+                "skipped": False,
+            }
+        )
+        return label, summary
 
     versus_results = dict([
         paired("candidateVsChampion", "candidate", "champion"),
@@ -381,6 +498,11 @@ def _promotion(args) -> int:
             "sideSwap": True,
             "sameSeedPerPair": True,
             "baselineMatch": bool(args.baseline_match),
+            "sameModelMatch": bool(args.same_model_match),
+        },
+        "recommendedBaseline": {
+            "soloGamesPerUniqueModel": 500,
+            "versusPairsPerUniqueMatchup": 300,
         },
         "searchConfig": versus_config.to_dict(),
         "inference": {
@@ -397,6 +519,11 @@ def _promotion(args) -> int:
         versus=versus_results,
         conditions=conditions,
     )
+    for key in role_order:
+        payload = report["solo"][key]
+        payload["model"] = specs[key].path
+        payload["modelName"] = specs[key].name
+        payload.update(solo_execution[key])
 
     output = args.output
     if not output:

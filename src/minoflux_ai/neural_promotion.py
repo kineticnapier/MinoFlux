@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-import hashlib
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+import hashlib
+import os
 from pathlib import Path
 import time
 from typing import Mapping, Sequence
@@ -34,17 +35,34 @@ class NeuralModelSpec:
     def from_path(cls, path: str | Path, *, name: str | None = None) -> "NeuralModelSpec":
         target = Path(path)
         digest: str | None = None
-        if target.is_file():
-            hasher = hashlib.sha256()
-            with target.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    hasher.update(chunk)
-            digest = hasher.hexdigest()
+        try:
+            if target.is_file():
+                hasher = hashlib.sha256()
+                with target.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        hasher.update(chunk)
+                digest = hasher.hexdigest()
+        except OSError:
+            digest = None
         text = str(path)
         return cls(name=(name or target.stem), path=text, sha256=digest)
 
     def to_dict(self) -> dict[str, str | None]:
         return asdict(self)
+
+
+def normalized_model_path(path: str | Path) -> str:
+    """Return a stable local path identity when a checkpoint hash is unavailable."""
+
+    return os.path.normcase(str(Path(path).expanduser().resolve(strict=False)))
+
+
+def same_neural_model(a: NeuralModelSpec, b: NeuralModelSpec) -> bool:
+    """Compare checkpoint identity, preferring content hashes over path aliases."""
+
+    if a.sha256 is not None and b.sha256 is not None:
+        return a.sha256.casefold() == b.sha256.casefold()
+    return normalized_model_path(a.path) == normalized_model_path(b.path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +305,56 @@ def run_neural_solo_benchmark(
         search_config=cfg,
         elapsed_seconds=elapsed,
         per_game=per_game,
+    )
+
+
+def reverse_versus_benchmark_result(result: VersusBenchmarkResult) -> VersusBenchmarkResult:
+    """Return the same mirrored matches with logical model A/B exchanged."""
+
+    def reverse_game(game: VersusGameResult) -> VersusGameResult:
+        return replace(
+            game,
+            winner={"player": "ai", "ai": "player", "draw": "draw"}[game.winner],
+            player_pieces=game.ai_pieces,
+            ai_pieces=game.player_pieces,
+            player_attack=game.ai_attack,
+            ai_attack=game.player_attack,
+            player_sent=game.ai_sent,
+            ai_sent=game.player_sent,
+            player_canceled=game.ai_canceled,
+            ai_canceled=game.player_canceled,
+            player_received=game.ai_received,
+            ai_received=game.player_received,
+            player_garbage_applied=game.ai_garbage_applied,
+            ai_garbage_applied=game.player_garbage_applied,
+            player_pending=game.ai_pending,
+            ai_pending=game.player_pending,
+            player_final_height=game.ai_final_height,
+            ai_final_height=game.player_final_height,
+            player_final_holes=game.ai_final_holes,
+            ai_final_holes=game.player_final_holes,
+            player_max_b2b=game.ai_max_b2b,
+            ai_max_b2b=game.player_max_b2b,
+            player_max_surge=game.ai_max_surge,
+            ai_max_surge=game.player_max_surge,
+            models_swapped=not game.models_swapped,
+        )
+
+    return replace(
+        result,
+        player_wins=result.ai_wins,
+        ai_wins=result.player_wins,
+        player_mean_attack=result.ai_mean_attack,
+        ai_mean_attack=result.player_mean_attack,
+        player_mean_sent=result.ai_mean_sent,
+        ai_mean_sent=result.player_mean_sent,
+        player_mean_canceled=result.ai_mean_canceled,
+        ai_mean_canceled=result.player_mean_canceled,
+        player_mean_received=result.ai_mean_received,
+        ai_mean_received=result.player_mean_received,
+        player_mean_pieces=result.ai_mean_pieces,
+        ai_mean_pieces=result.player_mean_pieces,
+        per_game=tuple(reverse_game(game) for game in result.per_game),
     )
 
 
