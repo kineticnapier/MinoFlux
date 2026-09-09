@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from argparse import ArgumentParser, BooleanOptionalAction
 from contextlib import nullcontext
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
 
 from minoflux_ai.heuristic import DEFAULT_WEIGHTS, load_weights
 from minoflux_ai.neural import NeuralValueEvaluator
+from minoflux_ai.neural_promotion import (
+    NeuralModelSpec,
+    build_neural_promotion_report,
+    run_neural_solo_benchmark,
+    summarize_paired_versus,
+)
 from minoflux_ai.progress import progress_bar
 from minoflux_ai.search import SearchConfig
 from minoflux_ai.versus_benchmark import run_versus_benchmark
@@ -138,6 +145,67 @@ def build_parser() -> ArgumentParser:
     )
     _add_search_args(benchmark)
 
+    promotion = sub.add_parser(
+        "promotion",
+        help="Compare a neural candidate against stable and aggressive baselines without auto-promoting",
+    )
+    promotion.add_argument("--candidate", required=True)
+    promotion.add_argument(
+        "--champion",
+        default="data/models/placement-v2-human3-home.pt",
+        help="Stable current champion baseline",
+    )
+    promotion.add_argument(
+        "--reference",
+        default="data/models/placement-v2-human4-e5.pt",
+        help="Aggressive reference/challenger baseline",
+    )
+    promotion.add_argument("--candidate-name", default=None)
+    promotion.add_argument("--champion-name", default="human3")
+    promotion.add_argument("--reference-name", default="e5")
+    promotion.add_argument("--output", default=None)
+    promotion.add_argument("--solo-games", type=int, default=100)
+    promotion.add_argument("--solo-max-pieces", type=int, default=300)
+    promotion.add_argument("--solo-seed-base", type=int, default=8_100_001)
+    promotion.add_argument("--solo-seed-step", type=int, default=31)
+    promotion.add_argument("--solo-game-batch", type=int, default=20)
+    promotion.add_argument(
+        "--versus-pairs",
+        type=int,
+        default=50,
+        help="Same-seed mirrored pairs; each pair runs A-left/B-right and B-left/A-right",
+    )
+    promotion.add_argument("--versus-max-turns", type=int, default=500)
+    promotion.add_argument("--versus-seed-base", type=int, default=8_200_001)
+    promotion.add_argument("--versus-seed-step", type=int, default=31)
+    promotion.add_argument("--garbage-cap", type=int, default=8)
+    promotion.add_argument("--heuristic-model", default=None)
+    promotion.add_argument("--device", default="auto")
+    promotion.add_argument(
+        "--precision",
+        choices=("float32", "float16", "bfloat16", "auto"),
+        default="float32",
+    )
+    promotion.add_argument("--torch-compile", action="store_true")
+    promotion.add_argument(
+        "--game-batch",
+        type=int,
+        default=1,
+        help="Concurrent versus games sharing neural forwards; 1 is the serial reference",
+    )
+    promotion.add_argument(
+        "--progress",
+        action=BooleanOptionalAction,
+        default=True,
+    )
+    promotion.add_argument(
+        "--baseline-match",
+        action=BooleanOptionalAction,
+        default=True,
+        help="Also measure human3 vs e5 so candidate results have a baseline distribution",
+    )
+    _add_search_args(promotion)
+
     selfplay = sub.add_parser("selfplay", help="Generate win/loss-labelled versus self-play states")
     selfplay.add_argument("--output", default=DEFAULT_SELFPLAY)
     selfplay.add_argument("--games", type=int, default=50)
@@ -226,6 +294,122 @@ def _benchmark(args) -> int:
     return 0
 
 
+def _promotion(args) -> int:
+    solo_cache: dict[str, NeuralValueEvaluator] = {}
+    candidate = NeuralModelSpec.from_path(args.candidate, name=args.candidate_name)
+    champion = NeuralModelSpec.from_path(args.champion, name=args.champion_name)
+    reference = NeuralModelSpec.from_path(args.reference, name=args.reference_name)
+    specs = {
+        "candidate": candidate,
+        "champion": champion,
+        "reference": reference,
+    }
+    scorers = {
+        key: _load_solo(spec.path, args, solo_cache)
+        for key, spec in specs.items()
+    }
+    if any(scorer is None for scorer in scorers.values()):
+        raise SystemExit("promotion benchmark requires all three neural model paths")
+
+    weights = load_weights(args.heuristic_model) if args.heuristic_model else DEFAULT_WEIGHTS
+    versus_config = _search_config(args)
+    solo_config = versus_config.placement_search
+    solo_results = {
+        key: run_neural_solo_benchmark(
+            scorer,  # type: ignore[arg-type]
+            model=specs[key].path,
+            games=args.solo_games,
+            max_pieces=args.solo_max_pieces,
+            seed_base=args.solo_seed_base,
+            seed_step=args.solo_seed_step,
+            game_batch_size=args.solo_game_batch,
+            weights=weights,
+            search_config=solo_config,
+            progress=args.progress,
+        )
+        for key, scorer in scorers.items()
+    }
+
+    versus_games = max(1, int(args.versus_pairs)) * 2
+
+    def paired(label: str, a_key: str, b_key: str) -> tuple[str, dict[str, object]]:
+        raw = run_versus_benchmark(
+            versus_games,
+            max_turns=args.versus_max_turns,
+            seed_base=args.versus_seed_base,
+            seed_step=args.versus_seed_step,
+            player_weights=weights,
+            ai_weights=weights,
+            player_config=versus_config,
+            ai_config=versus_config,
+            garbage_cap=args.garbage_cap,
+            player_scorer=scorers[a_key],
+            ai_scorer=scorers[b_key],
+            progress=args.progress,
+            game_batch=args.game_batch,
+        )
+        return label, summarize_paired_versus(
+            raw,
+            model_a=specs[a_key].name,
+            model_b=specs[b_key].name,
+        )
+
+    versus_results = dict([
+        paired("candidateVsChampion", "candidate", "champion"),
+        paired("candidateVsReference", "candidate", "reference"),
+    ])
+    if args.baseline_match:
+        label, value = paired("championVsReference", "champion", "reference")
+        versus_results[label] = value
+
+    conditions = {
+        "solo": {
+            "games": max(1, int(args.solo_games)),
+            "maxPieces": max(1, int(args.solo_max_pieces)),
+            "seedBase": int(args.solo_seed_base),
+            "seedStep": int(args.solo_seed_step),
+            "gameBatch": max(1, int(args.solo_game_batch)),
+        },
+        "versus": {
+            "pairs": max(1, int(args.versus_pairs)),
+            "games": versus_games,
+            "seedBase": int(args.versus_seed_base),
+            "seedStep": int(args.versus_seed_step),
+            "maxTurns": max(1, int(args.versus_max_turns)),
+            "garbageCap": max(1, int(args.garbage_cap)),
+            "gameBatch": max(1, int(args.game_batch)),
+            "sideSwap": True,
+            "sameSeedPerPair": True,
+            "baselineMatch": bool(args.baseline_match),
+        },
+        "searchConfig": versus_config.to_dict(),
+        "inference": {
+            "device": args.device,
+            "precision": args.precision,
+            "torchCompile": bool(args.torch_compile),
+        },
+    }
+    report = build_neural_promotion_report(
+        candidate=candidate,
+        champion=champion,
+        reference=reference,
+        solo=solo_results,
+        versus=versus_results,
+        conditions=conditions,
+    )
+
+    output = args.output
+    if not output:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        output = f"data/benchmarks/neural-promotion-{stamp}.json"
+    target = Path(output)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    report["outputPath"] = str(target)
+    target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _print(report)
+    return 0
+
+
 def _selfplay(args) -> int:
     solo_cache: dict[str, NeuralValueEvaluator] = {}
     value_cache: dict[str, VersusValueEvaluator] = {}
@@ -284,6 +468,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "benchmark":
         return _benchmark(args)
+    if args.command == "promotion":
+        return _promotion(args)
     if args.command == "selfplay":
         return _selfplay(args)
     if args.command == "train":
