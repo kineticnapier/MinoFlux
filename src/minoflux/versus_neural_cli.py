@@ -41,6 +41,74 @@ def _print(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
+def _execution_note(payload: dict[str, object]) -> str:
+    if payload.get("skipped"):
+        return f"skipped: {payload.get('reason', 'skipped')}"
+    if payload.get("reused"):
+        return f"reused from {payload.get('reusedFrom', '?')}"
+    return "executed"
+
+
+def _promotion_summary(report: dict[str, object]) -> str:
+    lines = ["Neural promotion benchmark", "Solo:"]
+    solo = report["solo"]
+    assert isinstance(solo, dict)
+    for role in ("candidate", "champion", "reference"):
+        payload = solo[role]
+        assert isinstance(payload, dict)
+        model_name = str(payload.get("modelName", role))
+        app = float(payload.get("attackPerPiece", 0.0))
+        survived = float(payload.get("meanPiecesSurvived", 0.0))
+        completion = 100.0 * float(payload.get("completionRate", 0.0))
+        topouts = int(payload.get("topouts", 0))
+        games = int(payload.get("games", 0))
+        lines.append(
+            f"  {role} ({model_name}): APP {app:.4f}, survival {survived:.1f}, "
+            f"completion {completion:.1f}%, topouts {topouts}/{games} "
+            f"[{_execution_note(payload)}]"
+        )
+
+    lines.append("Versus:")
+    versus = report["versus"]
+    assert isinstance(versus, dict)
+    for label, raw_payload in versus.items():
+        assert isinstance(raw_payload, dict)
+        payload = raw_payload
+        if payload.get("skipped"):
+            lines.append(f"  {label}: skipped ({payload.get('reason', 'skipped')})")
+            continue
+        model_a = str(payload.get("modelA", "A"))
+        model_b = str(payload.get("modelB", "B"))
+        a_rate = 100.0 * float(payload.get("aWinRate", 0.0))
+        a_wins = int(payload.get("aWins", 0))
+        b_wins = int(payload.get("bWins", 0))
+        draws = int(payload.get("draws", 0))
+        pairs = int(payload.get("pairs", 0))
+        lines.append(
+            f"  {label}: {model_a} vs {model_b}, {model_a} {a_rate:.1f}% "
+            f"({a_wins}-{b_wins}-{draws}), pairs {pairs} "
+            f"[{_execution_note(payload)}]"
+        )
+
+    lines.append(f"Report: {report.get('outputPath', '-')}")
+    return "\n".join(lines)
+
+
+def _print_promotion_report(
+    report: dict[str, object],
+    *,
+    print_json: bool = False,
+    pretty_json: bool = False,
+) -> None:
+    if print_json:
+        print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
+        return
+    if pretty_json:
+        _print(report)
+        return
+    print(_promotion_summary(report))
+
+
 def _add_search_args(parser: ArgumentParser) -> None:
     parser.add_argument("--candidate-width", type=int, default=16)
     parser.add_argument("--reply-width", type=int, default=4)
@@ -166,6 +234,17 @@ def build_parser() -> ArgumentParser:
     promotion.add_argument("--champion-name", default="human3")
     promotion.add_argument("--reference-name", default="e5")
     promotion.add_argument("--output", default=None)
+    output_mode = promotion.add_mutually_exclusive_group()
+    output_mode.add_argument(
+        "--print-json",
+        action="store_true",
+        help="Print the complete report as compact one-line JSON",
+    )
+    output_mode.add_argument(
+        "--pretty-json",
+        action="store_true",
+        help="Print the complete report as indented JSON (legacy stdout format)",
+    )
     promotion.add_argument(
         "--solo-games",
         type=int,
@@ -533,7 +612,11 @@ def _promotion(args) -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     report["outputPath"] = str(target)
     target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    _print(report)
+    _print_promotion_report(
+        report,
+        print_json=bool(args.print_json),
+        pretty_json=bool(args.pretty_json),
+    )
     return 0
 
 
