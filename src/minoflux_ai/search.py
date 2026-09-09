@@ -19,6 +19,7 @@ from .bitboard import (
 )
 from .features import (
     BoardFeatures,
+    count_t_spin_slots_from_masks,
     extract_board_features_from_masks,
     max_height_and_holes_from_masks,
 )
@@ -248,18 +249,35 @@ def _neural_metadata_evaluation(
     if perfect_clear and lines:
         attack += 10
 
-    before = before_features or extract_board_features_from_masks(rows, width=game.width)
+    if before_features is None:
+        before_max_height, before_holes = max_height_and_holes_from_masks(
+            rows,
+            width=game.width,
+        )
+        slot_start_y = (
+            len(rows)
+            if before_max_height == 0
+            else max(0, len(rows) - before_max_height - 1)
+        )
+        before_t_spin_slots = count_t_spin_slots_from_masks(
+            rows,
+            width=game.width,
+            start_y=slot_start_y,
+        )
+    else:
+        before_holes = before_features.holes
+        before_t_spin_slots = before_features.t_spin_slots
     after = extract_board_features_from_masks(after_rows, width=game.width)
     features = PlacementFeatures(
         board=after,
-        new_holes=max(0, after.holes - before.holes),
+        new_holes=max(0, after.holes - before_holes),
         lines=lines,
         attack=attack,
         spin_lines=lines if spin is not None else 0,
         perfect_clear=perfect_clear,
         game_over=topped_out or hidden_rows_occupied(after_rows, game.hidden_rows),
         spin=spin,
-        t_spin_slot_delta=after.t_spin_slots - before.t_spin_slots,
+        t_spin_slot_delta=after.t_spin_slots - before_t_spin_slots,
     )
     return PlacementEvaluation(placement=placement, score=float(score), features=features)
 

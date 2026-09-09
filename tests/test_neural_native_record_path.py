@@ -20,8 +20,15 @@ from minoflux_ai.reachability_native import (
     native_pathless_available,
     reachable_placement_records_native,
 )
-from minoflux_ai.search import SearchAction, SearchConfig, _branch_groups, apply_search_action
+from minoflux_ai.search import (
+    SearchAction,
+    SearchConfig,
+    _branch_groups,
+    _neural_metadata_evaluation,
+    apply_search_action,
+)
 from minoflux_ai.bitboard import board_row_masks
+from minoflux_ai.features import extract_board_features_from_masks
 from minoflux_engine import Game
 from minoflux_engine.pieces import SHAPES
 
@@ -235,6 +242,37 @@ class NativeRecordPathTests(unittest.TestCase):
                         SearchAction(False if direct else True, placement),
                     )
         self.assertGreater(compared, 2_000)
+
+    def test_specialized_winner_before_metrics_match_full_features(self) -> None:
+        game = Game(8100001)
+        compared = 0
+        for _step in range(30):
+            records = reachable_placement_records_native(game)
+            assert records is not None
+            rows = records.rows
+            before = extract_board_features_from_masks(rows, width=game.width)
+            for index in range(len(records)):
+                placement = records.materialize(index)
+                expected = _neural_metadata_evaluation(
+                    game,
+                    placement,
+                    0.0,
+                    source_rows=rows,
+                    before_features=before,
+                )
+                actual = _neural_metadata_evaluation(
+                    game,
+                    placement,
+                    0.0,
+                    source_rows=rows,
+                )
+                self.assertEqual(actual, expected)
+                compared += 1
+            if records:
+                apply_search_action(game, SearchAction(False, records.materialize(0)))
+            if game.game_over:
+                break
+        self.assertGreater(compared, 300)
 
     def test_record_encoder_is_byte_identical_to_placement_encoder(self) -> None:
         game = Game(8100001)
