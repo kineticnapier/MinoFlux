@@ -41,6 +41,22 @@ def _print(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
+def _print_report(
+    report: dict[str, object],
+    *,
+    print_json: bool = False,
+    pretty_json: bool = False,
+    summary: str | None = None,
+) -> None:
+    if print_json:
+        print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
+        return
+    if pretty_json or summary is None:
+        _print(report)
+        return
+    print(summary)
+
+
 def _execution_note(payload: dict[str, object]) -> str:
     if payload.get("skipped"):
         return f"skipped: {payload.get('reason', 'skipped')}"
@@ -100,13 +116,12 @@ def _print_promotion_report(
     print_json: bool = False,
     pretty_json: bool = False,
 ) -> None:
-    if print_json:
-        print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
-        return
-    if pretty_json:
-        _print(report)
-        return
-    print(_promotion_summary(report))
+    _print_report(
+        report,
+        print_json=print_json,
+        pretty_json=pretty_json,
+        summary=_promotion_summary(report),
+    )
 
 
 def _add_search_args(parser: ArgumentParser) -> None:
@@ -212,6 +227,17 @@ def build_parser() -> ArgumentParser:
         "--profile",
         action="store_true",
         help="Collect detailed versus-search CPU timings",
+    )
+    benchmark_output_mode = benchmark.add_mutually_exclusive_group()
+    benchmark_output_mode.add_argument(
+        "--print-json",
+        action="store_true",
+        help="Print the complete result as compact one-line JSON",
+    )
+    benchmark_output_mode.add_argument(
+        "--pretty-json",
+        action="store_true",
+        help="Print the complete result as indented JSON (legacy stdout format)",
     )
     _add_search_args(benchmark)
 
@@ -385,7 +411,11 @@ def _benchmark(args) -> int:
     if profile is not None:
         result["versusProfile"] = profile.to_dict()
         print(profile.format_table(), file=sys.stderr)
-    _print(result)
+    _print_report(
+        result,
+        print_json=bool(args.print_json),
+        pretty_json=bool(args.pretty_json),
+    )
     return 0
 
 
