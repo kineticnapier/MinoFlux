@@ -135,6 +135,20 @@ def _add_search_args(parser: ArgumentParser) -> None:
     parser.add_argument("--reachability-nodes", type=int, default=8000)
 
 
+def _add_json_output_args(parser: ArgumentParser, *, value_name: str) -> None:
+    output_mode = parser.add_mutually_exclusive_group()
+    output_mode.add_argument(
+        "--print-json",
+        action="store_true",
+        help=f"Print the complete {value_name} as compact one-line JSON",
+    )
+    output_mode.add_argument(
+        "--pretty-json",
+        action="store_true",
+        help=f"Print the complete {value_name} as indented JSON (legacy stdout format)",
+    )
+
+
 def _search_config(args) -> VersusSearchConfig:
     placement = SearchConfig(
         allow_hold=args.hold,
@@ -228,17 +242,7 @@ def build_parser() -> ArgumentParser:
         action="store_true",
         help="Collect detailed versus-search CPU timings",
     )
-    benchmark_output_mode = benchmark.add_mutually_exclusive_group()
-    benchmark_output_mode.add_argument(
-        "--print-json",
-        action="store_true",
-        help="Print the complete result as compact one-line JSON",
-    )
-    benchmark_output_mode.add_argument(
-        "--pretty-json",
-        action="store_true",
-        help="Print the complete result as indented JSON (legacy stdout format)",
-    )
+    _add_json_output_args(benchmark, value_name="result")
     _add_search_args(benchmark)
 
     promotion = sub.add_parser(
@@ -260,17 +264,7 @@ def build_parser() -> ArgumentParser:
     promotion.add_argument("--champion-name", default="human3")
     promotion.add_argument("--reference-name", default="e5")
     promotion.add_argument("--output", default=None)
-    output_mode = promotion.add_mutually_exclusive_group()
-    output_mode.add_argument(
-        "--print-json",
-        action="store_true",
-        help="Print the complete report as compact one-line JSON",
-    )
-    output_mode.add_argument(
-        "--pretty-json",
-        action="store_true",
-        help="Print the complete report as indented JSON (legacy stdout format)",
-    )
+    _add_json_output_args(promotion, value_name="report")
     promotion.add_argument(
         "--solo-games",
         type=int,
