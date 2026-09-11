@@ -39,6 +39,8 @@ def generate_versus_selfplay_dataset_progress(
     heuristic_weights: HeuristicWeights = DEFAULT_WEIGHTS,
     versus_weights: VersusWeights = DEFAULT_VERSUS_WEIGHTS,
     value_scorer: VersusStateScorer | None = None,
+    ai_scorer: SearchScorer | None = None,
+    ai_value_scorer: VersusStateScorer | None = None,
     value_config: VersusValueConfig = VersusValueConfig(),
 ) -> dict[str, object]:
     return _generate_versus_selfplay_dataset_impl(
@@ -48,6 +50,8 @@ def generate_versus_selfplay_dataset_progress(
         heuristic_weights=heuristic_weights,
         versus_weights=versus_weights,
         value_scorer=value_scorer,
+        ai_scorer=ai_scorer,
+        ai_value_scorer=ai_value_scorer,
         value_config=value_config,
         progress=True,
     )
