@@ -150,6 +150,7 @@ class VersusSelfPlayConfig:
     garbage_cap: int = 8
     search_config: VersusSearchConfig = DEFAULT_VERSUS_SEARCH_CONFIG
     game_batch: int = 1
+    max_records_per_game: int = 0
 
 
 def _clip01(value: float) -> float:
@@ -480,6 +481,28 @@ def _outcome(winner: str, side: SideName) -> float:
     return 1.0 if winner == side else -1.0
 
 
+def _sample_selfplay_records(
+    records: Sequence[tuple[dict[str, object], SideName]],
+    max_records: int,
+    *,
+    seed: int,
+) -> list[tuple[dict[str, object], SideName]]:
+    """Deterministically sample across a whole game instead of taking a prefix."""
+
+    limit = max(0, int(max_records))
+    if limit == 0 or len(records) <= limit:
+        return list(records)
+    rng = random.Random((int(seed) << 32) ^ (len(records) << 16) ^ limit ^ 0x4D465350)
+    selected: list[tuple[dict[str, object], SideName]] = []
+    total = len(records)
+    for bucket in range(limit):
+        start = bucket * total // limit
+        stop = (bucket + 1) * total // limit
+        index = start if stop <= start + 1 else rng.randrange(start, stop)
+        selected.append(records[index])
+    return selected
+
+
 def generate_versus_selfplay_dataset(
     path: str | Path,
     solo_scorer: SearchScorer,
@@ -488,6 +511,8 @@ def generate_versus_selfplay_dataset(
     heuristic_weights: HeuristicWeights = DEFAULT_WEIGHTS,
     versus_weights: VersusWeights = DEFAULT_VERSUS_WEIGHTS,
     value_scorer: VersusStateScorer | None = None,
+    ai_scorer: SearchScorer | None = None,
+    ai_value_scorer: VersusStateScorer | None = None,
     value_config: VersusValueConfig = VersusValueConfig(),
 ) -> dict[str, object]:
     return _generate_versus_selfplay_dataset_impl(
@@ -497,6 +522,8 @@ def generate_versus_selfplay_dataset(
         heuristic_weights=heuristic_weights,
         versus_weights=versus_weights,
         value_scorer=value_scorer,
+        ai_scorer=ai_scorer,
+        ai_value_scorer=ai_value_scorer,
         value_config=value_config,
         progress=False,
     )
@@ -520,6 +547,8 @@ def _generate_versus_selfplay_dataset_impl(
     heuristic_weights: HeuristicWeights = DEFAULT_WEIGHTS,
     versus_weights: VersusWeights = DEFAULT_VERSUS_WEIGHTS,
     value_scorer: VersusStateScorer | None = None,
+    ai_scorer: SearchScorer | None = None,
+    ai_value_scorer: VersusStateScorer | None = None,
     value_config: VersusValueConfig = VersusValueConfig(),
     progress: bool = False,
 ) -> dict[str, object]:
@@ -531,7 +560,12 @@ def _generate_versus_selfplay_dataset_impl(
         garbage_cap=max(1, int(config.garbage_cap)),
         search_config=config.search_config.normalized(),
         game_batch=max(1, int(config.game_batch)),
+        max_records_per_game=max(0, int(config.max_records_per_game)),
     )
+    player_scorer = solo_scorer
+    resolved_ai_scorer = solo_scorer if ai_scorer is None else ai_scorer
+    player_value_scorer = value_scorer
+    resolved_ai_value_scorer = value_scorer if ai_value_scorer is None else ai_value_scorer
     value_cfg = value_config.normalized()
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -598,6 +632,14 @@ def _generate_versus_selfplay_dataset_impl(
                                 perspective,
                             )
                         )
+                    if game.turn_side == "player":
+                        acting_scorer = player_scorer
+                        opponent_scorer = resolved_ai_scorer
+                        acting_value_scorer = player_value_scorer
+                    else:
+                        acting_scorer = resolved_ai_scorer
+                        opponent_scorer = player_scorer
+                        acting_value_scorer = resolved_ai_value_scorer
                     requests.append(
                         VersusSearchRequest(
                             match=game.match,
@@ -605,10 +647,10 @@ def _generate_versus_selfplay_dataset_impl(
                             heuristic_weights=heuristic_weights,
                             config=cfg.search_config,
                             versus_weights=versus_weights,
-                            scorer=solo_scorer,
-                            opponent_scorer=solo_scorer,
+                            scorer=acting_scorer,
+                            opponent_scorer=opponent_scorer,
                             opponent_heuristic_weights=heuristic_weights,
-                            state_scorer=value_scorer,
+                            state_scorer=acting_value_scorer,
                         )
                     )
 
@@ -662,7 +704,11 @@ def _generate_versus_selfplay_dataset_impl(
                         )
                     for record, perspective in game.pending_records:
                         record["outcome"] = _outcome(winner, perspective)
-                    completed_records[game.index] = game.pending_records
+                    completed_records[game.index] = _sample_selfplay_records(
+                        game.pending_records,
+                        cfg.max_records_per_game,
+                        seed=game.seed,
+                    )
                     game_bar.update(1)
                     game_bar.set_postfix(
                         P=wins["player"],
@@ -699,6 +745,7 @@ def _generate_versus_selfplay_dataset_impl(
         "draws": wins["draw"],
         "meanTurns": total_turns / cfg.games,
         "gameBatch": cfg.game_batch,
+        "maxRecordsPerGame": cfg.max_records_per_game,
         "searchConfig": cfg.search_config.to_dict(),
         "valueConfig": asdict(value_cfg),
     }
