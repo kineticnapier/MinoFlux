@@ -41,6 +41,22 @@ def _print(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
+def _print_report(
+    report: dict[str, object],
+    *,
+    print_json: bool = False,
+    pretty_json: bool = False,
+    summary: str | None = None,
+) -> None:
+    if print_json:
+        print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
+        return
+    if pretty_json or summary is None:
+        _print(report)
+        return
+    print(summary)
+
+
 def _execution_note(payload: dict[str, object]) -> str:
     if payload.get("skipped"):
         return f"skipped: {payload.get('reason', 'skipped')}"
@@ -100,13 +116,12 @@ def _print_promotion_report(
     print_json: bool = False,
     pretty_json: bool = False,
 ) -> None:
-    if print_json:
-        print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
-        return
-    if pretty_json:
-        _print(report)
-        return
-    print(_promotion_summary(report))
+    _print_report(
+        report,
+        print_json=print_json,
+        pretty_json=pretty_json,
+        summary=_promotion_summary(report),
+    )
 
 
 def _add_search_args(parser: ArgumentParser) -> None:
@@ -118,6 +133,20 @@ def _add_search_args(parser: ArgumentParser) -> None:
     parser.add_argument("--hold", action=BooleanOptionalAction, default=True)
     parser.add_argument("--allow-180", action=BooleanOptionalAction, default=False)
     parser.add_argument("--reachability-nodes", type=int, default=8000)
+
+
+def _add_json_output_args(parser: ArgumentParser, *, value_name: str) -> None:
+    output_mode = parser.add_mutually_exclusive_group()
+    output_mode.add_argument(
+        "--print-json",
+        action="store_true",
+        help=f"Print the complete {value_name} as compact one-line JSON",
+    )
+    output_mode.add_argument(
+        "--pretty-json",
+        action="store_true",
+        help=f"Print the complete {value_name} as indented JSON (legacy stdout format)",
+    )
 
 
 def _search_config(args) -> VersusSearchConfig:
@@ -213,6 +242,7 @@ def build_parser() -> ArgumentParser:
         action="store_true",
         help="Collect detailed versus-search CPU timings",
     )
+    _add_json_output_args(benchmark, value_name="result")
     _add_search_args(benchmark)
 
     promotion = sub.add_parser(
@@ -234,17 +264,7 @@ def build_parser() -> ArgumentParser:
     promotion.add_argument("--champion-name", default="human3")
     promotion.add_argument("--reference-name", default="e5")
     promotion.add_argument("--output", default=None)
-    output_mode = promotion.add_mutually_exclusive_group()
-    output_mode.add_argument(
-        "--print-json",
-        action="store_true",
-        help="Print the complete report as compact one-line JSON",
-    )
-    output_mode.add_argument(
-        "--pretty-json",
-        action="store_true",
-        help="Print the complete report as indented JSON (legacy stdout format)",
-    )
+    _add_json_output_args(promotion, value_name="report")
     promotion.add_argument(
         "--solo-games",
         type=int,
@@ -385,7 +405,11 @@ def _benchmark(args) -> int:
     if profile is not None:
         result["versusProfile"] = profile.to_dict()
         print(profile.format_table(), file=sys.stderr)
-    _print(result)
+    _print_report(
+        result,
+        print_json=bool(args.print_json),
+        pretty_json=bool(args.pretty_json),
+    )
     return 0
 
 
