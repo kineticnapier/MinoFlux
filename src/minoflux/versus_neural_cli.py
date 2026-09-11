@@ -308,8 +308,26 @@ def build_parser() -> ArgumentParser:
     selfplay.add_argument("--seed-base", type=int, default=6_000_001)
     selfplay.add_argument("--seed-step", type=int, default=31)
     selfplay.add_argument("--garbage-cap", type=int, default=8)
-    selfplay.add_argument("--solo-model", default=DEFAULT_SOLO_MODEL)
-    selfplay.add_argument("--versus-value-model", default=None, help="Optional previous match-value checkpoint for iterative self-play")
+    selfplay.add_argument(
+        "--solo-model",
+        default=DEFAULT_SOLO_MODEL,
+        help="Legacy symmetric solo policy; player/AI-specific options override this per side",
+    )
+    selfplay.add_argument("--player-solo-model", default=None)
+    selfplay.add_argument("--ai-solo-model", default=None)
+    selfplay.add_argument(
+        "--versus-value-model",
+        default=None,
+        help="Legacy symmetric match-value policy; player/AI-specific options override this per side",
+    )
+    selfplay.add_argument("--player-versus-value-model", default=None)
+    selfplay.add_argument("--ai-versus-value-model", default=None)
+    selfplay.add_argument(
+        "--max-records-per-game",
+        type=int,
+        default=0,
+        help="Maximum sampled records per game across the full game (0 keeps every record)",
+    )
     selfplay.add_argument("--heuristic-model", default=None)
     selfplay.add_argument("--device", default="auto")
     selfplay.add_argument("--precision", choices=("float32", "float16", "bfloat16", "auto"), default="float32")
@@ -623,16 +641,30 @@ def _promotion(args) -> int:
 def _selfplay(args) -> int:
     solo_cache: dict[str, NeuralValueEvaluator] = {}
     value_cache: dict[str, VersusValueEvaluator] = {}
-    solo = _load_solo(args.solo_model, args, solo_cache)
-    if solo is None:
-        raise SystemExit("--solo-model is required for neural self-play")
-    value = _load_versus_value(args.versus_value_model, args, value_cache)
+    player_solo_model = args.player_solo_model or args.solo_model
+    ai_solo_model = args.ai_solo_model or args.solo_model
+    player_value_model = (
+        args.player_versus_value_model
+        if args.player_versus_value_model is not None
+        else args.versus_value_model
+    )
+    ai_value_model = (
+        args.ai_versus_value_model
+        if args.ai_versus_value_model is not None
+        else args.versus_value_model
+    )
+    player_solo = _load_solo(player_solo_model, args, solo_cache)
+    ai_solo = _load_solo(ai_solo_model, args, solo_cache)
+    if player_solo is None or ai_solo is None:
+        raise SystemExit("self-play requires a solo model for both player and AI policies")
+    player_value = _load_versus_value(player_value_model, args, value_cache)
+    ai_value = _load_versus_value(ai_value_model, args, value_cache)
     weights = load_weights(args.heuristic_model) if args.heuristic_model else DEFAULT_WEIGHTS
     profile_context = collect_versus_profile() if args.profile else nullcontext(None)
     with profile_context as profile:
         result = generate_versus_selfplay_dataset_progress(
             args.output,
-            solo,
+            player_solo,
             VersusSelfPlayConfig(
                 games=args.games,
                 max_turns=args.max_turns,
@@ -641,12 +673,19 @@ def _selfplay(args) -> int:
                 garbage_cap=args.garbage_cap,
                 search_config=_search_config(args),
                 game_batch=args.game_batch,
+                max_records_per_game=args.max_records_per_game,
             ),
             heuristic_weights=weights,
-            value_scorer=value,
+            value_scorer=player_value,
+            ai_scorer=ai_solo,
+            ai_value_scorer=ai_value,
         )
     result["soloModel"] = args.solo_model
     result["versusValueModel"] = args.versus_value_model
+    result["playerSoloModel"] = player_solo_model
+    result["aiSoloModel"] = ai_solo_model
+    result["playerVersusValueModel"] = player_value_model
+    result["aiVersusValueModel"] = ai_value_model
     if profile is not None:
         result["versusProfile"] = profile.to_dict()
         print(profile.format_table(), file=sys.stderr)
