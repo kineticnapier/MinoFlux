@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from copy import copy
+import os
 import time
 
 from minoflux_engine import Game, VersusMatch, VersusResolution, VersusSide
@@ -9,7 +10,13 @@ from minoflux_engine import Game, VersusMatch, VersusResolution, VersusSide
 from . import versus_search as _versus
 from .search import SearchAction
 
+_DISABLE_ENV = "MINOFLUX_DISABLE_VERSUS_SIM_FAST"
 _ORIGINAL_SIMULATE_ACTION = _versus._simulate_action
+
+
+def versus_sim_fast_enabled() -> bool:
+    disabled = os.environ.get(_DISABLE_ENV, "").strip().lower()
+    return disabled not in {"1", "true", "yes", "on"}
 
 
 def _clone_game_for_action(
@@ -40,8 +47,6 @@ def _clone_game_for_action(
         cloned._bag._rng = _versus._clone_random(game._bag._rng)
         _versus.record_profile_elapsed(profile, "bag_rng_state_copy", rng_started)
     else:
-        # The simulated action only pops existing bag items, so sharing the RNG
-        # cannot mutate the source Game. The bag deque itself is still copied.
         cloned._bag._rng = game._bag._rng
 
     _versus.record_profile_elapsed(profile, "clone_game", started)
@@ -68,6 +73,15 @@ def _simulate_action_fast(
     _profile=None,
 ) -> tuple[VersusMatch, VersusResolution]:
     """Simulate one lock with copy-on-write queues/RNG and exact engine methods."""
+
+    if not versus_sim_fast_enabled():
+        return _ORIGINAL_SIMULATE_ACTION(
+            match,
+            side_name,
+            action,
+            _stage=_stage,
+            _profile=_profile,
+        )
 
     simulate_started = _versus.profile_timer_start(_profile)
     clone_started_ns = time.perf_counter_ns() if _profile is not None else 0
