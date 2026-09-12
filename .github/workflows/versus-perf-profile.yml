@@ -24,6 +24,7 @@ jobs:
         run: >-
           uv run --no-sync python -m pytest -q
           tests/test_versus_batch_fusion.py
+          tests/test_versus_batch_fusion_torch.py
           tests/test_versus_optimization_correctness.py
           tests/test_neural_game_batch.py
           tests/test_versus_selfplay_sampling.py
