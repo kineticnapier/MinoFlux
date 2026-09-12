@@ -1,0 +1,45 @@
+name: Versus neural performance profile
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+
+jobs:
+  profile:
+    if: github.head_ref == 'perf/versus-neural-throughput'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: '3.13'
+          enable-cache: true
+      - name: Sync ML and dev dependencies
+        run: uv sync --extra ml --extra dev
+      - name: Profile benchmark baseline
+        run: >-
+          uv run --no-sync python tools/profile_versus_neural.py
+          --mode benchmark
+          --games 24
+          --max-turns 60
+          --game-batch 20
+          --device cpu
+          --output data/benchmarks/versus-profile-benchmark.json
+      - name: Profile self-play baseline
+        run: >-
+          uv run --no-sync python tools/profile_versus_neural.py
+          --mode selfplay
+          --games 24
+          --max-turns 60
+          --game-batch 20
+          --device cpu
+          --output data/benchmarks/versus-profile-selfplay.json
+      - name: Upload profile reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: versus-neural-profile
+          path: data/benchmarks/versus-profile-*.json
