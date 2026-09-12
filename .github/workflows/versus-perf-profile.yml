@@ -31,6 +31,7 @@ jobs:
       - name: Profile benchmark reference
         env:
           MINOFLUX_DISABLE_VERSUS_BATCH_FUSION: '1'
+          MINOFLUX_DISABLE_VERSUS_SIM_FAST: '1'
         run: >-
           uv run --no-sync python tools/profile_versus_neural.py
           --mode benchmark
@@ -39,7 +40,7 @@ jobs:
           --game-batch 20
           --device cpu
           --output data/benchmarks/versus-profile-benchmark-reference.json
-      - name: Profile benchmark fused
+      - name: Profile benchmark optimized
         run: >-
           uv run --no-sync python tools/profile_versus_neural.py
           --mode benchmark
@@ -47,10 +48,11 @@ jobs:
           --max-turns 60
           --game-batch 20
           --device cpu
-          --output data/benchmarks/versus-profile-benchmark-fused.json
+          --output data/benchmarks/versus-profile-benchmark-optimized.json
       - name: Profile self-play reference
         env:
           MINOFLUX_DISABLE_VERSUS_BATCH_FUSION: '1'
+          MINOFLUX_DISABLE_VERSUS_SIM_FAST: '1'
         run: >-
           uv run --no-sync python tools/profile_versus_neural.py
           --mode selfplay
@@ -59,7 +61,7 @@ jobs:
           --game-batch 20
           --device cpu
           --output data/benchmarks/versus-profile-selfplay-reference.json
-      - name: Profile self-play fused
+      - name: Profile self-play optimized
         run: >-
           uv run --no-sync python tools/profile_versus_neural.py
           --mode selfplay
@@ -67,7 +69,7 @@ jobs:
           --max-turns 60
           --game-batch 20
           --device cpu
-          --output data/benchmarks/versus-profile-selfplay-fused.json
+          --output data/benchmarks/versus-profile-selfplay-optimized.json
       - name: Upload profile reports
         uses: actions/upload-artifact@v4
         with:
