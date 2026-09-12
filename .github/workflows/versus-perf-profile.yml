@@ -20,7 +20,16 @@ jobs:
           enable-cache: true
       - name: Sync ML and dev dependencies
         run: uv sync --extra ml --extra dev
-      - name: Profile benchmark baseline
+      - name: Run focused correctness tests
+        run: >-
+          uv run --no-sync python -m pytest -q
+          tests/test_versus_batch_fusion.py
+          tests/test_versus_optimization_correctness.py
+          tests/test_neural_game_batch.py
+          tests/test_versus_selfplay_sampling.py
+      - name: Profile benchmark reference
+        env:
+          MINOFLUX_DISABLE_VERSUS_BATCH_FUSION: '1'
         run: >-
           uv run --no-sync python tools/profile_versus_neural.py
           --mode benchmark
@@ -28,8 +37,19 @@ jobs:
           --max-turns 60
           --game-batch 20
           --device cpu
-          --output data/benchmarks/versus-profile-benchmark.json
-      - name: Profile self-play baseline
+          --output data/benchmarks/versus-profile-benchmark-reference.json
+      - name: Profile benchmark fused
+        run: >-
+          uv run --no-sync python tools/profile_versus_neural.py
+          --mode benchmark
+          --games 24
+          --max-turns 60
+          --game-batch 20
+          --device cpu
+          --output data/benchmarks/versus-profile-benchmark-fused.json
+      - name: Profile self-play reference
+        env:
+          MINOFLUX_DISABLE_VERSUS_BATCH_FUSION: '1'
         run: >-
           uv run --no-sync python tools/profile_versus_neural.py
           --mode selfplay
@@ -37,7 +57,16 @@ jobs:
           --max-turns 60
           --game-batch 20
           --device cpu
-          --output data/benchmarks/versus-profile-selfplay.json
+          --output data/benchmarks/versus-profile-selfplay-reference.json
+      - name: Profile self-play fused
+        run: >-
+          uv run --no-sync python tools/profile_versus_neural.py
+          --mode selfplay
+          --games 24
+          --max-turns 60
+          --game-batch 20
+          --device cpu
+          --output data/benchmarks/versus-profile-selfplay-fused.json
       - name: Upload profile reports
         uses: actions/upload-artifact@v4
         with:
