@@ -94,6 +94,12 @@ from .versus_batch_fast import (
 
 _install_versus_batch_fast_path()
 
+from .versus_sim_fast import (
+    install_versus_sim_fast_path as _install_versus_sim_fast_path,
+)
+
+_install_versus_sim_fast_path()
+
 from .promotion import (
     PromotionConfig,
     PromotionResult,
