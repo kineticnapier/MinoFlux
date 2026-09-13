@@ -1,0 +1,29 @@
+name: Versus policy focused tests
+
+on:
+  pull_request:
+    branches: [main]
+    types: [synchronize, reopened]
+
+jobs:
+  focused:
+    if: github.head_ref == 'fix/versus-policy-aggregation'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: '3.13'
+          enable-cache: true
+      - name: Sync test dependencies
+        run: uv sync --extra game --extra dev
+      - name: Run focused versus aggregation and consistency tests
+        run: >-
+          uv run --no-sync python -m pytest -q
+          tests/test_versus_policy_aggregate.py
+          tests/test_versus_policy_cli_summary.py
+          tests/test_versus_selfplay_benchmark_consistency.py
+          tests/test_neural_benchmark_output.py
+          tests/test_neural_game_batch.py
+          tests/test_versus_selfplay_sampling.py
