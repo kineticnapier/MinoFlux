@@ -197,7 +197,8 @@ def test_unswapped_same_seed_selfplay_matches_benchmark_exactly(tmp_path) -> Non
     }
     assert _final_state(selfplay_match) == expected
     assert int(selfplay_summary["meanTurns"]) == benchmark.turns
-    assert selfplay_summary[f"{benchmark.winner}Wins"] == 1
+    summary_key = "draws" if benchmark.winner == "draw" else f"{benchmark.winner}Wins"
+    assert selfplay_summary[summary_key] == 1
 
     # The actual engine states also match, including future bag RNG and garbage RNG.
     assert _engine_snapshot(selfplay_match) == _engine_snapshot(benchmark_match)
