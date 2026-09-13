@@ -65,6 +65,23 @@ def _execution_note(payload: dict[str, object]) -> str:
     return "executed"
 
 
+def _benchmark_summary(report: dict[str, object]) -> str:
+    player_policy_wins = int(report.get("playerPolicyWins", report.get("playerWins", 0)))
+    ai_policy_wins = int(report.get("aiPolicyWins", report.get("aiWins", 0)))
+    draws = int(report.get("draws", 0))
+    physical_player_wins = int(report.get("physicalPlayerWins", 0))
+    physical_ai_wins = int(report.get("physicalAiWins", 0))
+    seed_count = int(report.get("seedCount", 0))
+    mirrored_games = int(report.get("mirroredGameCount", 0))
+    return (
+        "Benchmark policies: "
+        f"player {player_policy_wins} - ai {ai_policy_wins} - draws {draws}; "
+        "physical sides: "
+        f"player {physical_player_wins} - ai {physical_ai_wins}; "
+        f"seeds {seed_count}, mirrored legs {mirrored_games}"
+    )
+
+
 def _promotion_summary(report: dict[str, object]) -> str:
     lines = ["Neural promotion benchmark", "Solo:"]
     solo = report["solo"]
@@ -423,6 +440,8 @@ def _benchmark(args) -> int:
     if profile is not None:
         result["versusProfile"] = profile.to_dict()
         print(profile.format_table(), file=sys.stderr)
+    if not args.print_json and not args.pretty_json:
+        print(_benchmark_summary(result), file=sys.stderr)
     _print_report(
         result,
         print_json=bool(args.print_json),
