@@ -36,6 +36,18 @@ DEFAULT_SOLO_MODEL = "data/models/neural-value-human.pt"
 DEFAULT_VERSUS_MODEL = "data/models/versus-value.pt"
 DEFAULT_SELFPLAY = "data/neural/versus-selfplay.jsonl"
 
+class _ZeroVersusStateScorer:
+    """Represent an explicitly disabled versus-value scorer for one side."""
+
+    def score_match(self, match, root_side, to_move=None) -> float:
+        return 0.0
+
+    def score_matches(self, entries) -> tuple[float, ...]:
+        return (0.0,) * len(entries)
+
+
+_ZERO_VERSUS_STATE_SCORER = _ZeroVersusStateScorer()
+
 
 def _print(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
@@ -63,6 +75,23 @@ def _execution_note(payload: dict[str, object]) -> str:
     if payload.get("reused"):
         return f"reused from {payload.get('reusedFrom', '?')}"
     return "executed"
+
+
+def _benchmark_summary(report: dict[str, object]) -> str:
+    player_policy_wins = int(report.get("playerPolicyWins", report.get("playerWins", 0)))
+    ai_policy_wins = int(report.get("aiPolicyWins", report.get("aiWins", 0)))
+    draws = int(report.get("draws", 0))
+    physical_player_wins = int(report.get("physicalPlayerWins", 0))
+    physical_ai_wins = int(report.get("physicalAiWins", 0))
+    seed_count = int(report.get("seedCount", 0))
+    mirrored_games = int(report.get("mirroredGameCount", 0))
+    return (
+        "Benchmark policies: "
+        f"player {player_policy_wins} - ai {ai_policy_wins} - draws {draws}; "
+        "physical sides: "
+        f"player {physical_player_wins} - ai {physical_ai_wins}; "
+        f"seeds {seed_count}, mirrored legs {mirrored_games}"
+    )
 
 
 def _promotion_summary(report: dict[str, object]) -> str:
@@ -423,6 +452,8 @@ def _benchmark(args) -> int:
     if profile is not None:
         result["versusProfile"] = profile.to_dict()
         print(profile.format_table(), file=sys.stderr)
+    if not args.print_json and not args.pretty_json:
+        print(_benchmark_summary(result), file=sys.stderr)
     _print_report(
         result,
         print_json=bool(args.print_json),
@@ -683,6 +714,11 @@ def _selfplay(args) -> int:
         raise SystemExit("self-play requires a solo model for both player and AI policies")
     player_value = _load_versus_value(player_value_model, args, value_cache)
     ai_value = _load_versus_value(ai_value_model, args, value_cache)
+    ai_value_scorer = (
+        _ZERO_VERSUS_STATE_SCORER
+        if ai_value is None and player_value is not None
+        else ai_value
+    )
     weights = load_weights(args.heuristic_model) if args.heuristic_model else DEFAULT_WEIGHTS
     profile_context = collect_versus_profile() if args.profile else nullcontext(None)
     with profile_context as profile:
@@ -702,7 +738,7 @@ def _selfplay(args) -> int:
             heuristic_weights=weights,
             value_scorer=player_value,
             ai_scorer=ai_solo,
-            ai_value_scorer=ai_value,
+            ai_value_scorer=ai_value_scorer,
         )
     result["soloModel"] = args.solo_model
     result["versusValueModel"] = args.versus_value_model

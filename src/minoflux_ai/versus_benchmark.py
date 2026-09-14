@@ -72,19 +72,59 @@ class VersusBenchmarkResult:
     per_game: tuple[VersusGameResult, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
+        # Per-game results are stored in logical policy orientation. Swapped
+        # physical sides are remapped by _remap_swapped_result() before they
+        # reach this aggregate, so the legacy playerWins/aiWins fields already
+        # mean player-policy/ai-policy wins rather than physical-side wins.
         player_pieces = max(1.0, sum(item.player_pieces for item in self.per_game))
         ai_pieces = max(1.0, sum(item.ai_pieces for item in self.per_game))
+        unswapped = tuple(item for item in self.per_game if not item.models_swapped)
+        swapped = tuple(item for item in self.per_game if item.models_swapped)
+
+        unswapped_player_policy_wins = sum(item.winner == "player" for item in unswapped)
+        unswapped_ai_policy_wins = sum(item.winner == "ai" for item in unswapped)
+        swapped_player_policy_wins = sum(item.winner == "player" for item in swapped)
+        swapped_ai_policy_wins = sum(item.winner == "ai" for item in swapped)
+
+        def physical_winner(item: VersusGameResult) -> str:
+            if item.winner == "draw" or not item.models_swapped:
+                return item.winner
+            return "ai" if item.winner == "player" else "player"
+
+        physical_player_wins = sum(physical_winner(item) == "player" for item in self.per_game)
+        physical_ai_wins = sum(physical_winner(item) == "ai" for item in self.per_game)
+        seed_count = len({item.seed for item in self.per_game})
+        mirrored_game_count = len(swapped)
+        unswapped_game_count = len(unswapped)
+
         return {
             "games": self.games,
             "maxTurns": self.max_turns,
             "seedBase": self.seed_base,
             "seedStep": self.seed_step,
+            "seedCount": seed_count,
+            "seedStepUnit": "mirroredPair",
             "mirroredSides": True,
+            "mirroredGameCount": mirrored_game_count,
+            "unswappedGameCount": unswapped_game_count,
+            "perGameOrientation": "policy",
             "playerWins": self.player_wins,
             "aiWins": self.ai_wins,
             "draws": self.draws,
             "playerWinRate": self.player_wins / self.games,
             "aiWinRate": self.ai_wins / self.games,
+            "playerPolicyWins": self.player_wins,
+            "aiPolicyWins": self.ai_wins,
+            "playerPolicyWinRate": self.player_wins / self.games,
+            "aiPolicyWinRate": self.ai_wins / self.games,
+            "unswappedPlayerPolicyWins": unswapped_player_policy_wins,
+            "unswappedAiPolicyWins": unswapped_ai_policy_wins,
+            "swappedPlayerPolicyWins": swapped_player_policy_wins,
+            "swappedAiPolicyWins": swapped_ai_policy_wins,
+            "physicalPlayerWins": physical_player_wins,
+            "physicalAiWins": physical_ai_wins,
+            "physicalPlayerWinRate": physical_player_wins / self.games,
+            "physicalAiWinRate": physical_ai_wins / self.games,
             "meanTurns": self.mean_turns,
             "playerMeanPieces": self.player_mean_pieces,
             "aiMeanPieces": self.ai_mean_pieces,
@@ -102,6 +142,7 @@ class VersusBenchmarkResult:
             "aiAttackPerPiece": sum(item.ai_attack for item in self.per_game) / ai_pieces,
             "perGame": [asdict(item) for item in self.per_game],
         }
+
 
 
 def run_versus_game(
@@ -203,6 +244,9 @@ def run_versus_game(
 
 
 def _remap_swapped_result(result: VersusGameResult) -> VersusGameResult:
+    # Normalize a physically swapped leg back to logical policy orientation.
+    # After this point, winner="player" and player_* always refer to the
+    # configured player policy, not the physical player side.
     winner = {"player": "ai", "ai": "player", "draw": "draw"}[result.winner]
     return replace(
         result,
@@ -430,8 +474,8 @@ def _run_versus_benchmark_batched(
                     ai_wins = sum(item.winner == "ai" for item in completed_results)
                     draws = len(completed_results) - player_wins - ai_wins
                     game_bar.set_postfix(
-                        P=player_wins,
-                        A=ai_wins,
+                        playerPolicy=player_wins,
+                        aiPolicy=ai_wins,
                         D=draws,
                         turns=logical.turns,
                         active=len(active),
@@ -520,7 +564,7 @@ def run_versus_benchmark(
             player_wins = sum(item.winner == "player" for item in results)
             ai_wins = sum(item.winner == "ai" for item in results)
             draws = len(results) - player_wins - ai_wins
-            game_bar.set_postfix(P=player_wins, A=ai_wins, D=draws, turns=logical.turns)
+            game_bar.set_postfix(playerPolicy=player_wins, aiPolicy=ai_wins, D=draws, turns=logical.turns)
     game_bar.close()
 
     return _summarize_benchmark(
