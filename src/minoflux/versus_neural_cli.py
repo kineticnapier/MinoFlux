@@ -36,6 +36,18 @@ DEFAULT_SOLO_MODEL = "data/models/neural-value-human.pt"
 DEFAULT_VERSUS_MODEL = "data/models/versus-value.pt"
 DEFAULT_SELFPLAY = "data/neural/versus-selfplay.jsonl"
 
+class _ZeroVersusStateScorer:
+    """Represent an explicitly disabled versus-value scorer for one side."""
+
+    def score_match(self, match, root_side, to_move=None) -> float:
+        return 0.0
+
+    def score_matches(self, entries) -> tuple[float, ...]:
+        return (0.0,) * len(entries)
+
+
+_ZERO_VERSUS_STATE_SCORER = _ZeroVersusStateScorer()
+
 
 def _print(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
@@ -702,6 +714,11 @@ def _selfplay(args) -> int:
         raise SystemExit("self-play requires a solo model for both player and AI policies")
     player_value = _load_versus_value(player_value_model, args, value_cache)
     ai_value = _load_versus_value(ai_value_model, args, value_cache)
+    ai_value_scorer = (
+        _ZERO_VERSUS_STATE_SCORER
+        if ai_value is None and player_value is not None
+        else ai_value
+    )
     weights = load_weights(args.heuristic_model) if args.heuristic_model else DEFAULT_WEIGHTS
     profile_context = collect_versus_profile() if args.profile else nullcontext(None)
     with profile_context as profile:
@@ -721,7 +738,7 @@ def _selfplay(args) -> int:
             heuristic_weights=weights,
             value_scorer=player_value,
             ai_scorer=ai_solo,
-            ai_value_scorer=ai_value,
+            ai_value_scorer=ai_value_scorer,
         )
     result["soloModel"] = args.solo_model
     result["versusValueModel"] = args.versus_value_model
