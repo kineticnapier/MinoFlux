@@ -50,9 +50,43 @@ class AIJob:
     choice: VersusChoice | None
 
 
+@dataclass(slots=True)
+class FirstToScore:
+    target: int = 0
+    player_wins: int = 0
+    ai_wins: int = 0
+
+    def record(self, winner: str | None) -> None:
+        if winner == "player":
+            self.player_wins += 1
+        elif winner == "ai":
+            self.ai_wins += 1
+
+    @property
+    def winner(self) -> str | None:
+        if self.target <= 0:
+            return None
+        if self.player_wins >= self.target:
+            return "player"
+        if self.ai_wins >= self.target:
+            return "ai"
+        return None
+
+    def reset(self) -> None:
+        self.player_wins = 0
+        self.ai_wins = 0
+
+
 def build_parser() -> ArgumentParser:
     parser = ArgumentParser(prog="minoflux-versus", description="Play MinoFlux against the opponent-aware AI")
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--first-to",
+        type=int,
+        default=0,
+        metavar="WINS",
+        help="Keep score across restarts until either side reaches WINS; 0 disables series scoring",
+    )
     parser.add_argument(
         "--ai-pps",
         type=float,
@@ -167,6 +201,8 @@ def _run_ai_job(
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.first_to < 0:
+        raise SystemExit("--first-to must be >= 0")
     try:
         import pygame
     except ImportError as error:
@@ -244,9 +280,11 @@ def main(argv: list[str] | None = None) -> int:
         opponent_reply_width=args.ai_reply_width,
     ).normalized()
     match = VersusMatch(args.seed, garbage_cap=args.garbage_cap)
+    series = FirstToScore(args.first_to)
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="minoflux-versus-ai")
     ai_future: Future[AIJob] | None = None
     generation = 0
+    scored_generation = -1
     ai_pps = min(8.0, max(0.1, float(args.ai_pps)))
     ai_next_at = time.monotonic()
     started_at = time.monotonic()
@@ -257,8 +295,11 @@ def main(argv: list[str] | None = None) -> int:
     running = True
 
     def restart() -> None:
-        nonlocal generation, ai_future, ai_next_at, started_at, last_gravity, paused
+        nonlocal generation, scored_generation, ai_future, ai_next_at, started_at, last_gravity, paused
+        if series.winner is not None:
+            series.reset()
         generation += 1
+        scored_generation = -1
         if ai_future is not None:
             ai_future.cancel()
         ai_future = None
@@ -387,6 +428,10 @@ def main(argv: list[str] | None = None) -> int:
                     # AI an extra PPS interval for a move it never made.
                     ai_next_at = now + 1.0 / ai_pps if applied else now
 
+            if match.winner is not None and scored_generation != generation:
+                series.record(match.winner)
+                scored_generation = generation
+
             screen.fill(palette.background)
             elapsed = max(0.0, now - started_at)
             _draw_side(
@@ -411,6 +456,10 @@ def main(argv: list[str] | None = None) -> int:
                 small=small,
                 elapsed=elapsed,
             )
+            if series.target > 0:
+                score_label = f"FT{series.target}    PLAYER {series.player_wins} - {series.ai_wins} AI"
+                score_surface = font.render(score_label, True, palette.text)
+                screen.blit(score_surface, score_surface.get_rect(center=(680, 28)))
             neural_label = neural_path.name if neural_path is not None else "neural OFF"
             value_label = value_path.name if value_path is not None else "versus-value OFF"
             footer = (
@@ -422,6 +471,10 @@ def main(argv: list[str] | None = None) -> int:
             if paused or match.winner is not None:
                 if paused:
                     label = "PAUSED"
+                elif series.winner == "player":
+                    label = f"PLAYER WINS FT{series.target} — press restart for rematch"
+                elif series.winner == "ai":
+                    label = f"AI WINS FT{series.target} — press restart for rematch"
                 elif match.winner == "player":
                     label = "PLAYER WINS — press restart"
                 elif match.winner == "ai":
