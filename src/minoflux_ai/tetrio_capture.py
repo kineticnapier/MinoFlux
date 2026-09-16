@@ -40,6 +40,25 @@ def normalize_board(value: object, *, height: int | None = None) -> Board:
     return tuple(rows)
 
 
+def _normalize_compact_board(value: object) -> Board:
+    if not isinstance(value, str):
+        raise ValueError("Compact capture board must be a string")
+    expected = 40 * BOARD_WIDTH
+    if len(value) != expected:
+        raise ValueError(f"Compact capture board must contain {expected} cells, got {len(value)}")
+    cells = [None if cell == "." else _cell(cell) for cell in value]
+    return tuple(
+        tuple(cells[offset : offset + BOARD_WIDTH])
+        for offset in range(0, expected, BOARD_WIDTH)
+    )
+
+
+def _capture_board(value: Mapping[str, object]) -> Board:
+    if value.get("board") is not None:
+        return normalize_board(value["board"])
+    return _normalize_compact_board(value.get("boardCompact"))
+
+
 def _post_clear_board(board: Board, *, height: int) -> Board:
     """Convert TETR.IO's pre-line-clear lock snapshot to the settled board."""
     remaining = [row for row in board if any(cell is None for cell in row)]
@@ -158,7 +177,7 @@ class CapturePlacement:
             frame=int(value.get("frame", 0)),
             hold=hold,
             captured_at=_optional_int(value.get("capturedAt", value.get("captured_at"))),
-            board40=normalize_board(value.get("board")),
+            board40=_capture_board(value),
             operations=_operations(value),
             seed=_optional_int(value.get("seed")),
             hold_locked=_optional_bool(value.get("holdLocked", value.get("hold_locked"))),
