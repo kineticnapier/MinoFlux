@@ -99,6 +99,7 @@ class TetrioDistillTests(unittest.TestCase):
         self.assertEqual(result["samples"], len(records))
         self.assertGreater(result["candidates"], result["samples"])
         self.assertGreaterEqual(result["skipped"].get("insufficient-future-queue", 0), 6)
+        self.assertEqual(len({record["seed"] for record in records}), 1)
         for record in records:
             self.assertEqual(record["format"], "minoflux_neural_ranking_dataset_v1")
             self.assertEqual(record["teacher"], "tetrio-capture")
