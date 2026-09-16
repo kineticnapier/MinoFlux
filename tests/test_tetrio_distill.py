@@ -53,7 +53,7 @@ class TetrioDistillTests(unittest.TestCase):
         game = Game(24680)
         samples: list[CaptureSample] = []
         alignments: list[CaptureAlignment] = []
-        for sequence in range(1, 9):
+        for sequence in range(1, 10):
             before = _board(game)
             piece = game.current
             placements = reachable_placements(game, allow_180=True)
