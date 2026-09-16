@@ -40,6 +40,15 @@ def normalize_board(value: object, *, height: int | None = None) -> Board:
     return tuple(rows)
 
 
+def _post_clear_board(board: Board, *, height: int) -> Board:
+    """Convert TETR.IO's pre-line-clear lock snapshot to the settled board."""
+    remaining = [row for row in board if any(cell is None for cell in row)]
+    cleared = len(board) - len(remaining)
+    if cleared:
+        remaining = [(None,) * BOARD_WIDTH for _ in range(cleared)] + remaining
+    return normalize_board(remaining, height=height)
+
+
 def _optional_int(value: object) -> int | None:
     if value is None:
         return None
@@ -247,9 +256,13 @@ def build_capture_samples(
         split = _split_name(group_id)
         for index, item in enumerate(items):
             previous = items[index - 1] if index else None
+            board_before = (
+                _post_clear_board(previous.board40, height=MINOFLUX_BOARD_HEIGHT)
+                if previous is not None
+                else None
+            )
+            board_after = _post_clear_board(item.board40, height=MINOFLUX_BOARD_HEIGHT)
             following = items[index + 1] if index + 1 < len(items) else None
-            board_before = previous.board24 if previous is not None else None
-            board_after = item.board24
             estimated_lines, confidence = _transition_info(board_before, board_after)
             hold_before = previous.hold if previous is not None else None
             used_hold = None if previous is None else hold_before != item.hold
