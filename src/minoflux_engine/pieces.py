@@ -49,8 +49,8 @@ SHAPES: dict[str, tuple[tuple[tuple[int, int], ...], ...]] = {
     ),
 }
 
-# Super Rotation System kick data. The original SRS tables use positive Y
-# upward; this engine uses positive Y downward, so every Y offset is inverted.
+# Super Rotation System kick data. The reference tables use positive Y upward;
+# this engine uses positive Y downward, so every Y offset is inverted.
 JLSTZ_KICK_TABLE: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {
     (0, 1): ((0, 0), (-1, 0), (-1, -1), (0, 2), (-1, 2)),
     (1, 0): ((0, 0), (1, 0), (1, 1), (0, -2), (1, -2)),
@@ -62,26 +62,34 @@ JLSTZ_KICK_TABLE: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {
     (0, 3): ((0, 0), (1, 0), (1, -1), (0, 2), (1, 2)),
 }
 
+# TETR.IO SRS+ uses symmetric I-piece 90-degree kick tables rather than the
+# asymmetric Guideline SRS I table.
 I_KICK_TABLE: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {
-    (0, 1): ((0, 0), (-2, 0), (1, 0), (-2, 1), (1, -2)),
-    (1, 0): ((0, 0), (2, 0), (-1, 0), (2, -1), (-1, 2)),
+    (0, 1): ((0, 0), (1, 0), (-2, 0), (-2, 1), (1, -2)),
     (1, 2): ((0, 0), (-1, 0), (2, 0), (-1, -2), (2, 1)),
-    (2, 1): ((0, 0), (1, 0), (-2, 0), (1, 2), (-2, -1)),
     (2, 3): ((0, 0), (2, 0), (-1, 0), (2, -1), (-1, 2)),
-    (3, 2): ((0, 0), (-2, 0), (1, 0), (-2, 1), (1, -2)),
     (3, 0): ((0, 0), (1, 0), (-2, 0), (1, 2), (-2, -1)),
-    (0, 3): ((0, 0), (-1, 0), (2, 0), (-1, -2), (2, 1)),
+    (0, 3): ((0, 0), (-1, 0), (2, 0), (2, 1), (-1, -2)),
+    (1, 0): ((0, 0), (-1, 0), (2, 0), (-1, 2), (2, -1)),
+    (2, 1): ((0, 0), (-2, 0), (1, 0), (-2, -1), (1, 2)),
+    (3, 2): ((0, 0), (1, 0), (-2, 0), (1, -2), (-2, 1)),
 }
 
-# SRS does not define 180-degree kicks. MinoFlux keeps a small, explicit
-# project-specific table for its 180-degree action.
-ROTATION_180_KICKS: tuple[tuple[int, int], ...] = (
-    (0, 0),
-    (0, -1),
-    (1, 0),
-    (-1, 0),
-    (0, 1),
-)
+# TETR.IO's default SRS+ adds direction-dependent 180-degree kicks. JLSTZ use
+# six tests per facing; I uses two; O has no meaningful rotation.
+JLSTZ_180_KICK_TABLE: dict[int, tuple[tuple[int, int], ...]] = {
+    0: ((0, 0), (0, -1), (1, -1), (-1, -1), (1, 0), (-1, 0)),
+    1: ((0, 0), (1, 0), (1, -2), (1, -1), (0, -2), (0, -1)),
+    2: ((0, 0), (0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0)),
+    3: ((0, 0), (-1, 0), (-1, -2), (-1, -1), (0, -2), (0, -1)),
+}
+
+I_180_KICK_TABLE: dict[int, tuple[tuple[int, int], ...]] = {
+    0: ((0, 0), (0, -1)),
+    1: ((0, 0), (1, 0)),
+    2: ((0, 0), (0, 1)),
+    3: ((0, 0), (-1, 0)),
+}
 
 
 def kick_tests(piece: str, from_rotation: int, to_rotation: int) -> tuple[tuple[int, int], ...]:
@@ -90,7 +98,8 @@ def kick_tests(piece: str, from_rotation: int, to_rotation: int) -> tuple[tuple[
     if piece == "O":
         return ((0, 0),)
     if (target - source) % 4 == 2:
-        return ROTATION_180_KICKS
+        table = I_180_KICK_TABLE if piece == "I" else JLSTZ_180_KICK_TABLE
+        return table[source]
     table = I_KICK_TABLE if piece == "I" else JLSTZ_KICK_TABLE
     return table[(source, target)]
 
