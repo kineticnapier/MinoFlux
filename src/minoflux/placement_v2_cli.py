@@ -80,7 +80,7 @@ def build_parser() -> ArgumentParser:
 
     tetrio = sub.add_parser(
         "tetrio-dataset",
-        help="Convert aligned TETR.IO captures into first-pass neural ranking JSONL",
+        help="Convert aligned TETR.IO captures into Hold-aware neural ranking JSONL",
     )
     tetrio.add_argument("--input", required=True, help="Imported minoflux_tetrio_capture_v1 JSONL")
     tetrio.add_argument("--alignment", required=True, help="Matching minoflux_tetrio_alignment_v1 JSONL")
