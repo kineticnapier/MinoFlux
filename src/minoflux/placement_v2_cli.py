@@ -16,6 +16,7 @@ from minoflux_ai.placement_teacher import (
     load_placement_teacher_weights,
     write_placement_v2_dataset,
 )
+from minoflux_ai.tetrio_distill import TetrioDistillConfig, write_tetrio_ranking_dataset
 
 
 def build_parser() -> ArgumentParser:
@@ -76,6 +77,18 @@ def build_parser() -> ArgumentParser:
     human.add_argument("--allow-180", action="store_true")
     human.add_argument("--reachability-nodes", type=int, default=8_000)
     human.add_argument("--sampling-seed", type=int, default=26_090_905)
+
+    tetrio = sub.add_parser(
+        "tetrio-dataset",
+        help="Convert aligned TETR.IO captures into first-pass neural ranking JSONL",
+    )
+    tetrio.add_argument("--input", required=True, help="Imported minoflux_tetrio_capture_v1 JSONL")
+    tetrio.add_argument("--alignment", required=True, help="Matching minoflux_tetrio_alignment_v1 JSONL")
+    tetrio.add_argument("--output", default="data/neural/tetrio-ranking.jsonl")
+    tetrio.add_argument("--max-candidates", type=int, default=24)
+    tetrio.add_argument("--no-180", action="store_true")
+    tetrio.add_argument("--reachability-nodes", type=int, default=8_000)
+    tetrio.add_argument("--sampling-seed", type=int, default=26_090_916)
     return parser
 
 
@@ -157,12 +170,30 @@ def _human_dataset(args) -> int:
     return 0
 
 
+def _tetrio_dataset(args) -> int:
+    result = write_tetrio_ranking_dataset(
+        args.input,
+        args.alignment,
+        args.output,
+        TetrioDistillConfig(
+            max_candidates=args.max_candidates,
+            allow_180=not args.no_180,
+            reachability_node_limit=args.reachability_nodes,
+            random_seed=args.sampling_seed,
+        ),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "generate":
         return _generate(args)
     if args.command == "human-dataset":
         return _human_dataset(args)
+    if args.command == "tetrio-dataset":
+        return _tetrio_dataset(args)
     raise SystemExit(f"Unknown command: {args.command}")
 
 
