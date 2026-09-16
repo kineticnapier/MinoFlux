@@ -335,7 +335,7 @@ def write_tetrio_ranking_dataset(
                     continue
                 candidates = tuple(prepared[item] for item in selected)
                 expert_index = selected_map[expert_prepared]
-                seed = _stable_seed(group_id, sample.sequence, 0) & ((1 << 63) - 1)
+                seed = _stable_seed(group_id, 0, 0) & ((1 << 63) - 1)
                 record = NeuralRankingSample(
                     seed=seed,
                     piece_index=sample.piece_index if sample.piece_index is not None else sample.sequence,
