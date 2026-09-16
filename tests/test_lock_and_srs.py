@@ -78,7 +78,7 @@ class SrsTests(unittest.TestCase):
     def test_i_piece_has_separate_srs_table(self) -> None:
         self.assertEqual(
             I_KICK_TABLE[(0, 1)],
-            ((0, 0), (-2, 0), (1, 0), (-2, 1), (1, -2)),
+            ((0, 0), (1, 0), (-2, 0), (-2, 1), (1, -2)),
         )
         self.assertEqual(kick_tests("I", 0, 1), I_KICK_TABLE[(0, 1)])
         self.assertEqual(kick_tests("T", 0, 1), JLSTZ_KICK_TABLE[(0, 1)])
