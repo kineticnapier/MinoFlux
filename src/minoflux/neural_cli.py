@@ -9,6 +9,7 @@ import time
 from typing import Sequence
 
 from minoflux_ai import DEFAULT_WEIGHTS, SearchConfig, apply_search_action, load_weights
+from minoflux_ai.fusion_oracle import FusionOracleConfig, write_fusion_oracle_dataset
 from minoflux_ai.human_review import HumanReviewConfig, collect_neural_review_queue
 from minoflux_ai.neural import NeuralValueEvaluator
 from minoflux_ai.reachability import ReachabilityProfile, collect_reachability_profile
@@ -130,6 +131,27 @@ def _generate(args: argparse.Namespace) -> int:
         progress=progress,
         progress_every=args.progress_every,
         workers=args.workers,
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _fusion_dataset(args: argparse.Namespace) -> int:
+    result = write_fusion_oracle_dataset(
+        args.output,
+        args.oracle_bin,
+        FusionOracleConfig(
+            queue_length=18,
+            max_candidates=args.max_candidates,
+            workers=args.workers,
+            allow_180=args.allow_180,
+            reachability_node_limit=args.reachability_nodes,
+        ),
+        games=args.games,
+        max_pieces=args.max_pieces,
+        seed_base=args.seed_base,
+        seed_step=args.seed_step,
+        trajectory=args.trajectory,
     )
     print(json.dumps(result, indent=2))
     return 0
@@ -474,6 +496,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate diverse lookahead-distilled data with clean-attack rollouts",
     )
     _add_generate_args(generate_strong, strong=True)
+
+    fusion = subparsers.add_parser(
+        "fusion-dataset",
+        help="Generate neural ranking data with the fusion offline oracle",
+    )
+    fusion.add_argument("--oracle-bin", required=True)
+    fusion.add_argument("--output", default="data/neural/fusion-oracle.jsonl")
+    fusion.add_argument("--games", type=int, default=40)
+    fusion.add_argument("--max-pieces", type=int, default=500)
+    fusion.add_argument("--seed-base", type=int, default=6_000_001)
+    fusion.add_argument("--seed-step", type=int, default=97)
+    fusion.add_argument("--workers", type=int, default=1)
+    fusion.add_argument("--max-candidates", type=int, default=24)
+    fusion.add_argument("--trajectory", choices=("heuristic",), default="heuristic")
+    fusion.add_argument("--allow-180", action="store_true")
+    fusion.add_argument("--reachability-nodes", type=int, default=8_000)
+    fusion.set_defaults(func=_fusion_dataset)
 
     train = subparsers.add_parser("train", help="Train a neural value network from ranking data")
     train.add_argument("--dataset", default="data/neural/champion-ranking.jsonl")
