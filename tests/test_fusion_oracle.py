@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from collections import deque
+import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +12,7 @@ from minoflux_ai.fusion_oracle import (
     game_to_fusion_request,
     match_fusion_action,
     parse_fusion_label,
+    run_fusion_oracle_requests,
 )
 from minoflux_ai.search import SearchAction
 from minoflux_engine import Game, Placement
@@ -25,6 +29,61 @@ def _raw_move(*, piece_raw: int, rotation: int, x: int, y: int) -> int:
         | ((piece_raw & 0x7) << 10)
         | ((rotation & 0x3) << 13)
     )
+
+
+def _write_fake_oracle(tmp_path: Path) -> Path:
+    script = tmp_path / "fake_oracle.py"
+    script.write_text(
+        """from __future__ import annotations
+import json
+import os
+from pathlib import Path
+import sys
+
+if os.environ.get("FAKE_ORACLE_FAIL") == "1":
+    raise SystemExit(7)
+if os.environ.get("RAYON_NUM_THREADS") != "1":
+    raise SystemExit(8)
+if "--time-budget-ms" in sys.argv:
+    raise SystemExit(9)
+args = sys.argv[1:]
+if len(args) != 3 or args[0] != "--skip-failures":
+    raise SystemExit(10)
+input_path = Path(args[1])
+output_path = Path(args[2])
+log_path = os.environ.get("FAKE_ORACLE_LOG")
+if log_path:
+    with Path(log_path).open("a", encoding="utf-8") as log:
+        log.write(json.dumps({"argv": args, "rayon": os.environ.get("RAYON_NUM_THREADS")}) + "\\n")
+with input_path.open("r", encoding="utf-8") as source, output_path.open("w", encoding="utf-8") as target:
+    for line in source:
+        if not line.strip():
+            continue
+        request = json.loads(line)
+        target.write(json.dumps({
+            "best_move_raw": 0,
+            "best_value": float(request["frame_id"]),
+            "position_complexity": 0.0,
+            "root_scores": [[0, float(request["frame_id"])]],
+            "policy_probs": [1.0],
+        }) + "\\n")
+""",
+        encoding="utf-8",
+    )
+    if os.name == "nt":
+        wrapper = tmp_path / "fake_oracle.cmd"
+        wrapper.write_text(
+            f'@"{os.fspath(Path(os.sys.executable))}" "{os.fspath(script)}" %*\r\n',
+            encoding="utf-8",
+        )
+        return wrapper
+    wrapper = tmp_path / "fake_oracle"
+    wrapper.write_text(
+        f"#!{os.sys.executable}\nimport runpy, sys\nsys.argv[0] = {str(script)!r}\nrunpy.run_path({str(script)!r}, run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return wrapper
 
 
 def test_game_to_fusion_request_converts_board_and_chain_state() -> None:
@@ -124,8 +183,6 @@ def test_extended_label_matches_hold_action_exactly() -> None:
 
 def test_legacy_raw_label_matches_unique_action_by_piece_and_cells() -> None:
     game = Game(22)
-    # fusion O North pivot (4,1) occupies (4,1),(5,1),(4,2),(5,2).
-    # MinoFlux uses top-down rows, so those are y=22 and y=21 on a 24-row board.
     wanted = SearchAction(
         False,
         _placement("O", ((4, 22), (5, 22), (4, 21), (5, 21))),
@@ -171,3 +228,70 @@ def test_legacy_raw_label_rejects_unmatched_action() -> None:
         match_fusion_action(game, (action,), label)
 
     assert error.value.reason == "oracle-action-unmatched"
+
+
+def test_run_fusion_oracle_requests_batches_and_preserves_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    oracle = _write_fake_oracle(tmp_path)
+    log_path = tmp_path / "oracle.log"
+    monkeypatch.setenv("FAKE_ORACLE_LOG", str(log_path))
+    requests = tuple(
+        {
+            "schema_version": "phase1-v1",
+            "replay_id": f"r{index}",
+            "round_id": 0,
+            "player_id": 0,
+            "frame_id": index,
+            "group_id": f"r{index}",
+            "player_board_rows": [],
+            "opponent_board_rows": [],
+            "current_piece": "t",
+            "hold_piece": None,
+            "queue": ["i"] * 18,
+            "combo": 0,
+            "b2b": 0,
+            "lines": 0,
+            "pending_garbage": 0,
+            "bag_number": 0,
+        }
+        for index in range(5)
+    )
+
+    labels = run_fusion_oracle_requests(requests, oracle, workers=2)
+
+    assert [label.best_value for label in labels] == [0.0, 1.0, 2.0, 3.0, 4.0]
+    calls = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == 2
+    assert all(call["rayon"] == "1" for call in calls)
+    assert all("--time-budget-ms" not in call["argv"] for call in calls)
+
+
+def test_run_fusion_oracle_requests_fails_on_child_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    oracle = _write_fake_oracle(tmp_path)
+    monkeypatch.setenv("FAKE_ORACLE_FAIL", "1")
+    request = {
+        "schema_version": "phase1-v1",
+        "replay_id": "fail",
+        "round_id": 0,
+        "player_id": 0,
+        "frame_id": 0,
+        "group_id": "fail",
+        "player_board_rows": [],
+        "opponent_board_rows": [],
+        "current_piece": "t",
+        "hold_piece": None,
+        "queue": ["i"] * 18,
+        "combo": 0,
+        "b2b": 0,
+        "lines": 0,
+        "pending_garbage": 0,
+        "bag_number": 0,
+    }
+
+    with pytest.raises(RuntimeError, match="oracle-process-failed"):
+        run_fusion_oracle_requests((request,), oracle, workers=1)
