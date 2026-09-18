@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
@@ -11,7 +11,21 @@ from typing import Mapping, Sequence
 
 from minoflux_engine import Game
 
-from .search import SearchAction
+from .heuristic import DEFAULT_WEIGHTS
+from .neural import NeuralValueConfig, encode_game_state
+from .neural_dataset import (
+    NEURAL_DATASET_FORMAT,
+    NeuralRankingCandidate,
+    NeuralRankingSample,
+    pack_board_rows,
+)
+from .search import (
+    SearchAction,
+    SearchConfig,
+    apply_search_action,
+    clone_game,
+    rank_search_actions,
+)
 
 
 _FUSION_PIECES = ("I", "O", "T", "L", "J", "S", "Z")
@@ -24,6 +38,9 @@ _FUSION_BASE_OFFSETS: dict[str, tuple[tuple[int, int], ...]] = {
     "S": ((-1, 0), (0, 1), (1, 1)),
     "Z": ((-1, 1), (0, 1), (1, 0)),
 }
+_ORACLE_BEAM_WIDTH = 2_000
+_ORACLE_DEPTH = 18
+_DATASET_BATCH_SIZE = 512
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +67,13 @@ class FusionOracleLabel:
     best_value: float
     best_hold_used: bool | None = None
     best_cells: frozenset[tuple[int, int]] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingSample:
+    game: Game
+    actions: tuple[SearchAction, ...]
+    request: Mapping[str, object]
 
 
 class FusionOracleMatchError(ValueError):
@@ -291,3 +315,205 @@ def run_fusion_oracle_requests(
     if any(label is None for label in ordered):
         raise RuntimeError("oracle-output-missing")
     return tuple(label for label in ordered if label is not None)
+
+
+def _dataset_search_config(config: FusionOracleConfig) -> SearchConfig:
+    return SearchConfig(
+        allow_hold=True,
+        lookahead_pieces=0,
+        beam_width=4,
+        discount=0.90,
+        srs_reachable=True,
+        allow_180=config.allow_180,
+        reachability_node_limit=config.reachability_node_limit,
+    ).normalized()
+
+
+def _request_for_game(game: Game, config: FusionOracleConfig) -> dict[str, object]:
+    request_game = clone_game(game)
+    request_game._fill_queue(config.queue_length)
+    seed = 0 if game.seed is None else int(game.seed)
+    return game_to_fusion_request(
+        request_game,
+        request_id=f"seed{seed}:{int(game.pieces_placed)}",
+        queue_length=config.queue_length,
+    )
+
+
+def _select_actions(
+    actions: Sequence[SearchAction],
+    teacher: SearchAction,
+    maximum: int,
+) -> tuple[SearchAction, ...]:
+    if maximum <= 0 or len(actions) <= maximum:
+        return tuple(actions)
+    selected = list(actions[:maximum])
+    if teacher in selected:
+        return tuple(selected)
+    selected[-1] = teacher
+    return tuple(selected)
+
+
+def _candidate_for_action(
+    game: Game,
+    action: SearchAction,
+    neural_config: NeuralValueConfig,
+    *,
+    expert: bool,
+) -> NeuralRankingCandidate:
+    child = clone_game(game)
+    apply_search_action(child, action)
+    state = encode_game_state(child, neural_config)
+    placement = action.placement
+    return NeuralRankingCandidate(
+        board_rows=pack_board_rows(state.board, neural_config),
+        context=state.context,
+        move=(
+            int(action.use_hold),
+            placement.piece,
+            int(placement.x),
+            int(placement.y),
+            int(placement.rotation),
+        ),
+        sampling_bucket="fusion-expert" if expert else "fusion-negative",
+    )
+
+
+def write_fusion_oracle_dataset(
+    output_path: str | Path,
+    oracle_bin: str | Path,
+    config: FusionOracleConfig = FusionOracleConfig(),
+    *,
+    games: int = 40,
+    max_pieces: int = 500,
+    seed_base: int = 6_000_001,
+    seed_step: int = 97,
+    trajectory: str = "heuristic",
+) -> dict[str, object]:
+    cfg = config.normalized()
+    if trajectory != "heuristic":
+        raise ValueError("trajectory must be 'heuristic'")
+    game_count = max(1, int(games))
+    piece_limit = max(1, int(max_pieces))
+    seed_stride = max(1, int(seed_step))
+    search_config = _dataset_search_config(cfg)
+    neural_config = NeuralValueConfig().normalized()
+
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    written = 0
+    candidates_written = 0
+    attempted = 0
+    skipped: dict[str, int] = {}
+    pending: list[_PendingSample] = []
+
+    def skip(reason: str) -> None:
+        skipped[reason] = skipped.get(reason, 0) + 1
+
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        def flush() -> None:
+            nonlocal written, candidates_written
+            if not pending:
+                return
+            labels = run_fusion_oracle_requests(
+                tuple(item.request for item in pending),
+                oracle_bin,
+                workers=cfg.workers,
+            )
+            for item, label in zip(pending, labels):
+                try:
+                    teacher = match_fusion_action(item.game, item.actions, label)
+                except FusionOracleMatchError as error:
+                    skip(error.reason)
+                    continue
+                selected = _select_actions(item.actions, teacher, cfg.max_candidates)
+                try:
+                    expert_index = selected.index(teacher)
+                except ValueError:
+                    skip("teacher-not-encodable")
+                    continue
+                candidates = tuple(
+                    _candidate_for_action(
+                        item.game,
+                        action,
+                        neural_config,
+                        expert=index == expert_index,
+                    )
+                    for index, action in enumerate(selected)
+                )
+                if not candidates:
+                    skip("teacher-not-encodable")
+                    continue
+                record = NeuralRankingSample(
+                    seed=0 if item.game.seed is None else int(item.game.seed),
+                    piece_index=int(item.game.pieces_placed),
+                    expert_index=expert_index,
+                    expert_indices=(expert_index,),
+                    candidates=candidates,
+                ).to_dict()
+                record["teacher"] = "fusion-offline-oracle"
+                record["fusionOracle"] = {
+                    "beamWidth": _ORACLE_BEAM_WIDTH,
+                    "depth": _ORACLE_DEPTH,
+                    "timeBudgetMs": None,
+                }
+                stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+                written += 1
+                candidates_written += len(candidates)
+            pending.clear()
+
+        for game_index in range(game_count):
+            seed = int(seed_base) + game_index * seed_stride
+            game = Game(seed)
+            while not game.game_over and game.pieces_placed < piece_limit:
+                ranked = rank_search_actions(
+                    game,
+                    DEFAULT_WEIGHTS,
+                    search_config,
+                    limit=None,
+                )
+                if not ranked:
+                    break
+                state = clone_game(game)
+                actions = tuple(action for action, _evaluation in ranked)
+                try:
+                    request = _request_for_game(state, cfg)
+                except ValueError as error:
+                    if str(error) == "insufficient-queue":
+                        skip("insufficient-queue")
+                        apply_search_action(game, ranked[0][0])
+                        continue
+                    raise
+                pending.append(_PendingSample(state, actions, request))
+                attempted += 1
+                if len(pending) >= _DATASET_BATCH_SIZE:
+                    flush()
+                apply_search_action(game, ranked[0][0])
+        flush()
+
+    temporary.replace(target)
+    summary: dict[str, object] = {
+        "format": NEURAL_DATASET_FORMAT,
+        "teacher": "fusion-offline-oracle",
+        "path": str(target),
+        "oracleBin": str(oracle_bin),
+        "games": game_count,
+        "attempted": attempted,
+        "samples": written,
+        "candidates": candidates_written,
+        "skipped": dict(sorted(skipped.items())),
+        "workers": cfg.workers,
+        "trajectory": trajectory,
+        "config": asdict(cfg),
+        "fusionOracle": {
+            "beamWidth": _ORACLE_BEAM_WIDTH,
+            "depth": _ORACLE_DEPTH,
+            "timeBudgetMs": None,
+        },
+    }
+    target.with_suffix(target.suffix + ".meta.json").write_text(
+        json.dumps(summary, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return summary
