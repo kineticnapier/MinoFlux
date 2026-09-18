@@ -107,9 +107,10 @@ def test_extended_label_matches_hold_action_exactly() -> None:
         SearchAction(False, _placement("O", direct_cells)),
         SearchAction(True, _placement("O", hold_cells)),
     )
+    raw = _raw_move(piece_raw=1, rotation=0, x=3, y=0)
     label = parse_fusion_label(
         {
-            "best_move_raw": 0,
+            "best_move_raw": raw,
             "best_value": 3.5,
             "bestHoldUsed": True,
             "bestCells": [[3, 0], [4, 0], [3, 1], [4, 1]],
