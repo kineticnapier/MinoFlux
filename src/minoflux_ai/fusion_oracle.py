@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
 from typing import Mapping, Sequence
 
 from minoflux_engine import Game
@@ -193,3 +199,95 @@ def match_fusion_action(
     if len(matches) != 1:
         raise FusionOracleMatchError("oracle-action-ambiguous")
     return matches[0]
+
+
+def _run_oracle_shard(
+    oracle_bin: str,
+    directory: str,
+    shard_index: int,
+    indexed_requests: Sequence[tuple[int, Mapping[str, object]]],
+) -> tuple[tuple[int, FusionOracleLabel], ...]:
+    root = Path(directory)
+    request_path = root / f"requests-{shard_index:03d}.jsonl"
+    output_path = root / f"labels-{shard_index:03d}.jsonl"
+    with request_path.open("w", encoding="utf-8", newline="\n") as stream:
+        for _index, request in indexed_requests:
+            stream.write(json.dumps(dict(request), separators=(",", ":")) + "\n")
+
+    env = os.environ.copy()
+    env["RAYON_NUM_THREADS"] = "1"
+    process = subprocess.run(
+        [str(oracle_bin), "--skip-failures", str(request_path), str(output_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    if process.returncode != 0:
+        detail = process.stderr.strip() or process.stdout.strip() or f"exit {process.returncode}"
+        raise RuntimeError(f"oracle-process-failed: {detail}")
+    if not output_path.is_file():
+        raise RuntimeError("oracle-output-missing")
+
+    lines = [line for line in output_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(lines) != len(indexed_requests):
+        raise RuntimeError(
+            f"oracle-output-missing: expected {len(indexed_requests)} labels, got {len(lines)}"
+        )
+
+    results: list[tuple[int, FusionOracleLabel]] = []
+    for (index, _request), line in zip(indexed_requests, lines):
+        try:
+            raw_value = json.loads(line)
+            if not isinstance(raw_value, Mapping):
+                raise ValueError("not an object")
+            label = parse_fusion_label(raw_value)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"oracle-output-invalid: {error}") from error
+        results.append((index, label))
+    return tuple(results)
+
+
+def run_fusion_oracle_requests(
+    requests: Sequence[Mapping[str, object]],
+    oracle_bin: str | Path,
+    *,
+    workers: int = 1,
+) -> tuple[FusionOracleLabel, ...]:
+    if not requests:
+        return ()
+    count = len(requests)
+    worker_count = min(count, max(1, int(workers)))
+    indexed = tuple(enumerate(requests))
+    base, remainder = divmod(count, worker_count)
+    shards: list[tuple[tuple[int, Mapping[str, object]], ...]] = []
+    start = 0
+    for shard_index in range(worker_count):
+        size = base + int(shard_index < remainder)
+        shards.append(tuple(indexed[start : start + size]))
+        start += size
+
+    with tempfile.TemporaryDirectory(prefix="minoflux-fusion-oracle-") as directory:
+        if worker_count == 1:
+            completed = (_run_oracle_shard(str(oracle_bin), directory, 0, shards[0]),)
+        else:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = [
+                    executor.submit(
+                        _run_oracle_shard,
+                        str(oracle_bin),
+                        directory,
+                        shard_index,
+                        shard,
+                    )
+                    for shard_index, shard in enumerate(shards)
+                ]
+                completed = tuple(future.result() for future in futures)
+
+    ordered: list[FusionOracleLabel | None] = [None] * count
+    for shard in completed:
+        for index, label in shard:
+            ordered[index] = label
+    if any(label is None for label in ordered):
+        raise RuntimeError("oracle-output-missing")
+    return tuple(label for label in ordered if label is not None)
