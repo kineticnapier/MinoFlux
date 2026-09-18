@@ -25,6 +25,30 @@ The default output is `data/neural/champion-ranking.jsonl`. Boards are stored as
 
 To make the teacher use future lookahead, raise `--lookahead`. This is much more expensive because the label itself then comes from beam search.
 
+### Optional: MochBot/fusion offline-oracle teacher
+
+MinoFlux can also label the same ranking format with the external `generate_policy_value_labels` binary from MochBot/fusion. fusion is optional and is not imported or built by MinoFlux.
+
+When MinoFlux is running in the same WSL environment as the fusion release binary:
+
+```bash
+uv run minoflux-neural fusion-dataset \
+  --oracle-bin ~/dev/fusion/target/release/generate_policy_value_labels \
+  --output data/neural/fusion-oracle.jsonl \
+  --games 200 \
+  --max-pieces 500 \
+  --workers 12 \
+  --allow-180
+```
+
+The generator batches requests into worker shards and forces `RAYON_NUM_THREADS=1` inside each oracle child. It intentionally does **not** pass fusion's `--time-budget-ms`: the offline teacher uses the full depth-18 / beam-2000 search rather than the time-budget iterative-widening path.
+
+Current fusion binaries expose `best_move_raw`. MinoFlux decodes that move and accepts it only when piece plus occupied cells identify exactly one MinoFlux direct/Hold root action. If both a direct and Hold action are indistinguishable from the legacy output, the sample is skipped as `oracle-action-ambiguous`; unmatched cross-engine moves are skipped as `oracle-action-unmatched`. There is no nearest-move fallback.
+
+An extended fusion binary may additionally emit `bestHoldUsed` and `bestCells`; when present, those fields are used for exact Hold/direct identity and remove the legacy Hold ambiguity.
+
+Generated records still use `minoflux_neural_ranking_dataset_v1`, so they can be passed directly to the existing `train` command. A sidecar `<output>.meta.json` records worker count, trajectory policy, skip counts, and the oracle profile. The first implementation uses the explicit `heuristic` MinoFlux trajectory while fusion supplies the labels.
+
 ## 3. Train
 
 ```powershell
