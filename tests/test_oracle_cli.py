@@ -30,6 +30,31 @@ def test_oracle_smoke_cli_runs_native_policy(capsys) -> None:
     assert result["topouts"] == 0
 
 
+def test_oracle_profile_cli_reports_native_hotspots(capsys) -> None:
+    code = main(
+        [
+            "oracle-profile",
+            "--seed",
+            "8100001",
+            "--beam",
+            "16",
+            "--depth",
+            "1",
+            "--no-180",
+        ]
+    )
+
+    assert code == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["teacher"] == "minoflux-native-oracle"
+    assert result["searchSeconds"] > 0.0
+    assert 0.0 <= result["reachabilitySeconds"] <= result["searchSeconds"]
+    assert result["movegenCalls"] > 0
+    assert result["generatedMoves"] > 0
+    assert result["reachability"]["bfsSeconds"] >= 0.0
+    assert result["reachability"]["landingSeconds"] >= 0.0
+
+
 def test_oracle_dataset_cli_writes_trainable_ranking_jsonl(tmp_path, capsys) -> None:
     target = tmp_path / "oracle.jsonl"
 
