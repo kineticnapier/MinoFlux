@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from minoflux.neural_cli import main
+from minoflux.neural_dispatch_cli import main
 from minoflux_ai.neural_dataset import NEURAL_DATASET_FORMAT
 
 
