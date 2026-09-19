@@ -75,6 +75,16 @@ struct TransitionResult {
     int surge_charge = 0;
 };
 
+struct BoardFeatures {
+    int aggregate_height = 0;
+    int max_height = 0;
+    int holes = 0;
+    int hole_depth = 0;
+    int bumpiness = 0;
+    int wells = 0;
+    int t_spin_slots = 0;
+};
+
 struct ReachabilityProfile {
     uint64_t calls = 0;
     uint64_t generated_moves = 0;
@@ -99,6 +109,7 @@ struct SearchProfile {
 
 Piece piece_from_char(char value);
 char piece_to_char(Piece piece);
+BoardFeatures board_features(const std::array<uint16_t, kHeight>& rows);
 void register_reachability_table(
     Piece piece,
     bool allow_180,
