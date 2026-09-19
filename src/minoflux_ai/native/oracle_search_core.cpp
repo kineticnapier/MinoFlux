@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -128,61 +129,58 @@ int classify_t_spin(
     return (corners[pair[0]] && corners[pair[1]]) || kick_index == 4 ? 2 : 1;
 }
 
-struct Features {
-    int aggregate_height = 0;
-    int max_height = 0;
-    int holes = 0;
-    int hole_depth = 0;
-    int bumpiness = 0;
-    int wells = 0;
-    int t_spin_slots = 0;
-};
+using Features = BoardFeatures;
 
-bool cell_occupied(
-    const std::array<uint16_t, kHeight>& rows,
-    int x,
-    int y
-) noexcept {
-    if (x < 0 || x >= kWidth || y < 0 || y >= kHeight) {
-        return true;
+int triangular_runs(uint32_t bits) noexcept {
+    int total = 0;
+    while (bits != 0) {
+        const unsigned start = std::countr_zero(bits);
+        const uint32_t shifted = bits >> start;
+        const unsigned run = std::countr_one(shifted);
+        total += static_cast<int>(run * (run + 1) / 2);
+        const uint32_t run_mask = ((uint32_t{1} << run) - 1u) << start;
+        bits &= ~run_mask;
     }
-    return (rows[static_cast<size_t>(y)] & (uint16_t{1} << x)) != 0;
-}
-
-bool cell_empty(
-    const std::array<uint16_t, kHeight>& rows,
-    int x,
-    int y
-) noexcept {
-    return x >= 0 && x < kWidth && y >= 0 && y < kHeight && !cell_occupied(rows, x, y);
+    return total;
 }
 
 Features features_impl(const std::array<uint16_t, kHeight>& rows) {
     Features result;
-    std::array<int, kWidth> heights{};
+    constexpr uint32_t full_height_mask = (uint32_t{1} << kHeight) - 1u;
+    constexpr uint16_t row_limit = kFullRow;
+    std::array<uint32_t, kWidth> columns{};
 
-    for (int x = 0; x < kWidth; ++x) {
-        int top = -1;
-        int occupied_above = 0;
-        for (int y = 0; y < kHeight; ++y) {
-            const bool occupied = (rows[static_cast<size_t>(y)] & (uint16_t{1} << x)) != 0;
-            if (occupied) {
-                if (top < 0) {
-                    top = y;
-                }
-                ++occupied_above;
-            } else if (top >= 0) {
-                ++result.holes;
-                result.hole_depth += occupied_above;
-            }
+    for (int y = 0; y < kHeight; ++y) {
+        uint16_t mask = rows[static_cast<size_t>(y)] & row_limit;
+        while (mask != 0) {
+            const unsigned x = std::countr_zero(static_cast<unsigned>(mask));
+            columns[static_cast<size_t>(x)] |= uint32_t{1} << y;
+            mask = static_cast<uint16_t>(mask & static_cast<uint16_t>(mask - 1));
         }
-        heights[static_cast<size_t>(x)] = top < 0 ? 0 : kHeight - top;
     }
 
-    for (int height : heights) {
+    std::array<int, kWidth> heights{};
+    for (int x = 0; x < kWidth; ++x) {
+        const uint32_t bits = columns[static_cast<size_t>(x)];
+        if (bits == 0) {
+            continue;
+        }
+        const unsigned top = std::countr_zero(bits);
+        const int height = kHeight - static_cast<int>(top);
+        heights[static_cast<size_t>(x)] = height;
         result.aggregate_height += height;
+        result.max_height = std::max(result.max_height, height);
+
+        const uint32_t above_top_mask = top == 0 ? 0u : ((uint32_t{1} << top) - 1u);
+        uint32_t holes = (full_height_mask ^ above_top_mask) & ~bits & full_height_mask;
+        result.holes += static_cast<int>(std::popcount(holes));
+        while (holes != 0) {
+            const uint32_t bit = holes & (~holes + 1u);
+            result.hole_depth += static_cast<int>(std::popcount(bits & (bit - 1u)));
+            holes ^= bit;
+        }
     }
-    result.max_height = *std::max_element(heights.begin(), heights.end());
+
     for (int x = 0; x < kWidth - 1; ++x) {
         result.bumpiness += std::abs(
             heights[static_cast<size_t>(x)] - heights[static_cast<size_t>(x + 1)]
@@ -190,44 +188,61 @@ Features features_impl(const std::array<uint16_t, kHeight>& rows) {
     }
 
     for (int x = 0; x < kWidth; ++x) {
-        int run = 0;
-        for (int y = 0; y < kHeight; ++y) {
-            const bool well = !cell_occupied(rows, x, y) &&
-                (x == 0 || cell_occupied(rows, x - 1, y)) &&
-                (x == kWidth - 1 || cell_occupied(rows, x + 1, y));
-            if (well) {
-                ++run;
-            } else {
-                result.wells += run * (run + 1) / 2;
-                run = 0;
-            }
-        }
-        result.wells += run * (run + 1) / 2;
+        const uint32_t bits = columns[static_cast<size_t>(x)];
+        const uint32_t left = x == 0
+            ? full_height_mask
+            : columns[static_cast<size_t>(x - 1)];
+        const uint32_t right = x == kWidth - 1
+            ? full_height_mask
+            : columns[static_cast<size_t>(x + 1)];
+        const uint32_t well_cells = (~bits) & left & right & full_height_mask;
+        result.wells += triangular_runs(well_cells);
     }
 
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            if (cell_occupied(rows, x, y)) {
-                continue;
-            }
-            const int corners =
-                int(cell_occupied(rows, x - 1, y - 1)) +
-                int(cell_occupied(rows, x + 1, y - 1)) +
-                int(cell_occupied(rows, x - 1, y + 1)) +
-                int(cell_occupied(rows, x + 1, y + 1));
-            if (corners < 3) {
-                continue;
-            }
-            const int cardinals =
-                int(cell_empty(rows, x, y - 1)) +
-                int(cell_empty(rows, x, y + 1)) +
-                int(cell_empty(rows, x - 1, y)) +
-                int(cell_empty(rows, x + 1, y));
-            if (cardinals >= 3) {
-                ++result.t_spin_slots;
-            }
-        }
+    const int slot_start_y = result.max_height == 0
+        ? kHeight
+        : std::max(0, kHeight - result.max_height - 1);
+    constexpr uint16_t left_wall = 1u;
+    constexpr uint16_t right_wall = uint16_t{1} << (kWidth - 1);
+    for (int y = slot_start_y; y < kHeight; ++y) {
+        const uint16_t center = rows[static_cast<size_t>(y)] & row_limit;
+        const uint16_t above = y > 0
+            ? static_cast<uint16_t>(rows[static_cast<size_t>(y - 1)] & row_limit)
+            : row_limit;
+        const uint16_t below = y + 1 < kHeight
+            ? static_cast<uint16_t>(rows[static_cast<size_t>(y + 1)] & row_limit)
+            : row_limit;
+
+        const uint16_t nw = static_cast<uint16_t>(((above << 1) | left_wall) & row_limit);
+        const uint16_t ne = static_cast<uint16_t>((above >> 1) | right_wall);
+        const uint16_t sw = static_cast<uint16_t>(((below << 1) | left_wall) & row_limit);
+        const uint16_t se = static_cast<uint16_t>((below >> 1) | right_wall);
+        const uint16_t corners3 = static_cast<uint16_t>(
+            (nw & ne & sw) |
+            (nw & ne & se) |
+            (nw & sw & se) |
+            (ne & sw & se)
+        );
+
+        const uint16_t center_empty = static_cast<uint16_t>((~center) & row_limit);
+        const uint16_t up_empty = y > 0
+            ? static_cast<uint16_t>((~above) & row_limit)
+            : 0;
+        const uint16_t down_empty = y + 1 < kHeight
+            ? static_cast<uint16_t>((~below) & row_limit)
+            : 0;
+        const uint16_t left_empty = static_cast<uint16_t>((center_empty << 1) & row_limit);
+        const uint16_t right_empty = static_cast<uint16_t>(center_empty >> 1);
+        const uint16_t cardinals3 = static_cast<uint16_t>(
+            (up_empty & down_empty & left_empty) |
+            (up_empty & down_empty & right_empty) |
+            (up_empty & left_empty & right_empty) |
+            (down_empty & left_empty & right_empty)
+        );
+        const uint16_t valid = static_cast<uint16_t>(center_empty & corners3 & cardinals3);
+        result.t_spin_slots += static_cast<int>(std::popcount(static_cast<unsigned>(valid)));
     }
+
     return result;
 }
 
@@ -508,7 +523,9 @@ void insert_dedup(
     Node&& child
 ) {
     const bool profiling = g_search_profile_enabled;
-    const auto started = profiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const auto started = profiling
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
 
     StateKey key = key_of(child.state);
     auto [iterator, inserted] = indices.emplace(std::move(key), children.size());
@@ -614,6 +631,10 @@ void begin_search_profile() {
 SearchProfile end_search_profile() {
     g_search_profile_enabled = false;
     return g_search_profile;
+}
+
+BoardFeatures board_features(const std::array<uint16_t, kHeight>& rows) {
+    return features_impl(rows);
 }
 
 Piece piece_from_char(char value) {
