@@ -78,6 +78,8 @@ struct TransitionResult {
 struct ReachabilityProfile {
     uint64_t calls = 0;
     uint64_t generated_moves = 0;
+    uint64_t cache_hits = 0;
+    uint64_t cache_misses = 0;
     double total_seconds = 0.0;
     double setup_seconds = 0.0;
     double bfs_seconds = 0.0;
@@ -94,6 +96,8 @@ void register_reachability_table(
     bool allow_180,
     std::shared_ptr<const minoflux::reachability::Table> table
 );
+void begin_reachability_cache();
+void end_reachability_cache();
 void begin_reachability_profile();
 ReachabilityProfile end_reachability_profile();
 std::vector<Move> reachable_moves(
