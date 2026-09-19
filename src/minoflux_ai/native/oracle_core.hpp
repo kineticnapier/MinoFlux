@@ -75,6 +75,18 @@ struct TransitionResult {
     int surge_charge = 0;
 };
 
+struct ReachabilityProfile {
+    uint64_t calls = 0;
+    uint64_t generated_moves = 0;
+    double total_seconds = 0.0;
+    double setup_seconds = 0.0;
+    double bfs_seconds = 0.0;
+    double rotation_seconds = 0.0;
+    double landing_seconds = 0.0;
+    double representative_seconds = 0.0;
+    double placement_seconds = 0.0;
+};
+
 Piece piece_from_char(char value);
 char piece_to_char(Piece piece);
 void register_reachability_table(
@@ -82,6 +94,8 @@ void register_reachability_table(
     bool allow_180,
     std::shared_ptr<const minoflux::reachability::Table> table
 );
+void begin_reachability_profile();
+ReachabilityProfile end_reachability_profile();
 std::vector<Move> reachable_moves(
     const std::array<uint16_t, kHeight>& rows,
     Piece piece,
