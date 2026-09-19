@@ -20,7 +20,10 @@ setup(
         ),
         Pybind11Extension(
             "minoflux_ai._oracle_native",
-            ["src/minoflux_ai/_oracle_native.cpp"],
+            [
+                "src/minoflux_ai/_oracle_native.cpp",
+                "src/minoflux_ai/native/oracle_core.cpp",
+            ],
             cxx_std=20,
             optional=True,
         ),
