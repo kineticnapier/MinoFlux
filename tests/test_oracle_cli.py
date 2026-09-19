@@ -56,8 +56,18 @@ def test_oracle_profile_cli_reports_native_hotspots(capsys) -> None:
     assert result["dedupSeconds"] >= 0.0
     assert result["pruneSeconds"] >= 0.0
     assert result["expandedChildren"] > 0
-    assert result["reachability"]["bfsSeconds"] >= 0.0
-    assert result["reachability"]["landingSeconds"] >= 0.0
+    reachability = result["reachability"]
+    assert reachability["bfsSeconds"] >= 0.0
+    assert reachability["landingSeconds"] >= 0.0
+    assert reachability["bfsNodes"] > 0
+    assert reachability["collisionChecks"] > 0
+    assert reachability["collisionEvaluations"] > 0
+    assert reachability["collisionCacheHits"] >= 0
+    assert reachability["kickChecks"] >= 0
+    assert reachability["landingQueries"] > 0
+    assert reachability["landingCacheHits"] >= 0
+    assert reachability["representativeNodes"] > 0
+    assert reachability["representativeDuplicateSkips"] >= 0
 
 
 def test_oracle_dataset_cli_writes_trainable_ranking_jsonl(tmp_path, capsys) -> None:
