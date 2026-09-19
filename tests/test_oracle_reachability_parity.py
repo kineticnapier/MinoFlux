@@ -6,6 +6,7 @@ import pytest
 
 from minoflux_ai import _oracle_native
 from minoflux_ai.bitboard import board_row_masks
+from minoflux_ai.oracle import _ensure_native_reachability_tables
 from minoflux_ai.reachability_native import reachable_placements_pathless_native
 from minoflux_engine import Game
 
@@ -43,6 +44,11 @@ def _assert_parity(game: Game, *, allow_180: bool, max_nodes: int = 8_000) -> No
         game,
         allow_180=allow_180,
         max_nodes=max_nodes,
+    )
+    _ensure_native_reachability_tables(
+        bool(allow_180),
+        game.width,
+        game.height,
     )
     actual = _oracle_native.reachable(
         board_row_masks(game.board),
