@@ -18,13 +18,6 @@ namespace reach_support = minoflux::reachability::pybind_support;
 
 namespace {
 
-struct ReachabilityCacheScope {
-    ReachabilityCacheScope() { oracle::begin_reachability_cache(); }
-    ~ReachabilityCacheScope() { oracle::end_reachability_cache(); }
-    ReachabilityCacheScope(const ReachabilityCacheScope&) = delete;
-    ReachabilityCacheScope& operator=(const ReachabilityCacheScope&) = delete;
-};
-
 oracle::Piece parse_piece(const std::string& value, const char* name) {
     if (value.size() != 1) {
         throw py::value_error(std::string(name) + " must be one tetromino letter");
@@ -280,7 +273,6 @@ py::object search_native(
     );
     const std::vector<oracle::Piece> queue = parse_queue(queue_value);
 
-    ReachabilityCacheScope cache_scope;
     oracle::Result result;
     {
         py::gil_scoped_release release;
@@ -320,35 +312,42 @@ py::dict search_profile_native(
     );
     const std::vector<oracle::Piece> queue = parse_queue(queue_value);
 
-    ReachabilityCacheScope cache_scope;
     oracle::begin_reachability_profile();
+    oracle::begin_search_profile();
     oracle::Result result;
     const auto started = std::chrono::steady_clock::now();
     try {
         py::gil_scoped_release release;
         result = run_search(state, queue, beam_width, depth, allow_180, max_nodes);
     } catch (...) {
+        oracle::end_search_profile();
         oracle::end_reachability_profile();
         throw;
     }
     const auto stopped = std::chrono::steady_clock::now();
-    const oracle::ReachabilityProfile profile = oracle::end_reachability_profile();
+    const oracle::SearchProfile search_profile = oracle::end_search_profile();
+    const oracle::ReachabilityProfile reachability_profile = oracle::end_reachability_profile();
 
     py::dict output;
     output["searchSeconds"] = std::chrono::duration<double>(stopped - started).count();
-    output["reachabilitySeconds"] = profile.total_seconds;
-    output["movegenCalls"] = profile.calls;
-    output["generatedMoves"] = profile.generated_moves;
-    output["movegenCacheHits"] = profile.cache_hits;
-    output["movegenCacheMisses"] = profile.cache_misses;
+    output["reachabilitySeconds"] = reachability_profile.total_seconds;
+    output["movegenCalls"] = reachability_profile.calls;
+    output["generatedMoves"] = reachability_profile.generated_moves;
+    output["featureCalls"] = search_profile.feature_calls;
+    output["featureSeconds"] = search_profile.feature_seconds;
+    output["dedupSeconds"] = search_profile.dedup_seconds;
+    output["pruneSeconds"] = search_profile.prune_seconds;
+    output["expandedChildren"] = search_profile.expanded_children;
+    output["dedupHits"] = search_profile.dedup_hits;
+    output["dedupReplacements"] = search_profile.dedup_replacements;
 
     py::dict reachability;
-    reachability["setupSeconds"] = profile.setup_seconds;
-    reachability["bfsSeconds"] = profile.bfs_seconds;
-    reachability["rotationSeconds"] = profile.rotation_seconds;
-    reachability["landingSeconds"] = profile.landing_seconds;
-    reachability["representativeSeconds"] = profile.representative_seconds;
-    reachability["placementSeconds"] = profile.placement_seconds;
+    reachability["setupSeconds"] = reachability_profile.setup_seconds;
+    reachability["bfsSeconds"] = reachability_profile.bfs_seconds;
+    reachability["rotationSeconds"] = reachability_profile.rotation_seconds;
+    reachability["landingSeconds"] = reachability_profile.landing_seconds;
+    reachability["representativeSeconds"] = reachability_profile.representative_seconds;
+    reachability["placementSeconds"] = reachability_profile.placement_seconds;
     output["reachability"] = reachability;
 
     if (result.found) {
