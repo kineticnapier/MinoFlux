@@ -51,9 +51,11 @@ def test_oracle_profile_cli_reports_native_hotspots(capsys) -> None:
     assert 0.0 <= result["reachabilitySeconds"] <= result["searchSeconds"]
     assert result["movegenCalls"] > 0
     assert result["generatedMoves"] > 0
-    assert result["movegenCacheHits"] >= 0
-    assert result["movegenCacheMisses"] > 0
-    assert result["movegenCacheHits"] + result["movegenCacheMisses"] >= result["movegenCalls"]
+    assert result["featureCalls"] > 0
+    assert result["featureSeconds"] >= 0.0
+    assert result["dedupSeconds"] >= 0.0
+    assert result["pruneSeconds"] >= 0.0
+    assert result["expandedChildren"] > 0
     assert result["reachability"]["bfsSeconds"] >= 0.0
     assert result["reachability"]["landingSeconds"] >= 0.0
 
