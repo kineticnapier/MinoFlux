@@ -4,7 +4,7 @@ import sys
 
 from . import neural_cli, oracle_cli
 
-_ORACLE_COMMANDS = frozenset({"oracle-smoke", "oracle-dataset"})
+_ORACLE_COMMANDS = frozenset({"oracle-smoke", "oracle-profile", "oracle-dataset"})
 
 
 def main(argv: list[str] | None = None) -> int:
