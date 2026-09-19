@@ -2,15 +2,18 @@
 #include <pybind11/stl.h>
 
 #include "native/oracle_core.hpp"
+#include "native/reachability_pybind.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace py = pybind11;
 namespace oracle = minoflux::oracle;
+namespace reach_support = minoflux::reachability::pybind_support;
 
 namespace {
 
@@ -110,6 +113,49 @@ py::object spin_name(int event) {
         case 6: return py::str("T_SPIN_TRIPLE");
         default: return py::none();
     }
+}
+
+void register_reachability_table_native(
+    const std::string& piece_value,
+    bool allow_180,
+    int width,
+    int height,
+    int x_min,
+    int x_max,
+    int x_count,
+    int y_min,
+    const py::sequence& state_x,
+    const py::sequence& state_y,
+    const py::sequence& left_state,
+    const py::sequence& right_state,
+    const py::sequence& down_state,
+    const py::bytes& collision_invalid,
+    const py::bytes& collision_masks,
+    const py::bytes& geometry_invalid,
+    const py::bytes& geometry_masks,
+    const py::sequence& rotation_transitions
+) {
+    const oracle::Piece piece = parse_piece(piece_value, "piece");
+    auto table = reach_support::table_from_python(
+        piece_value,
+        width,
+        height,
+        x_min,
+        x_max,
+        x_count,
+        y_min,
+        state_x,
+        state_y,
+        left_state,
+        right_state,
+        down_state,
+        collision_invalid,
+        collision_masks,
+        geometry_invalid,
+        geometry_masks,
+        rotation_transitions
+    );
+    oracle::register_reachability_table(piece, allow_180, std::move(table));
 }
 
 py::list reachable_native(
@@ -235,6 +281,29 @@ py::object search_native(
 PYBIND11_MODULE(_oracle_native, module) {
     module.doc() = "Native offline exact-SRS beam-search oracle";
     module.def("api_version", []() { return 1; });
+    module.def("reachability_backend", []() { return "shared-table-v1"; });
+    module.def(
+        "register_reachability_table",
+        &register_reachability_table_native,
+        py::arg("piece"),
+        py::arg("allow_180"),
+        py::arg("width"),
+        py::arg("height"),
+        py::arg("x_min"),
+        py::arg("x_max"),
+        py::arg("x_count"),
+        py::arg("y_min"),
+        py::arg("state_x"),
+        py::arg("state_y"),
+        py::arg("left_state"),
+        py::arg("right_state"),
+        py::arg("down_state"),
+        py::arg("collision_invalid"),
+        py::arg("collision_masks"),
+        py::arg("geometry_invalid"),
+        py::arg("geometry_masks"),
+        py::arg("rotation_transitions")
+    );
     module.def(
         "reachable",
         &reachable_native,
