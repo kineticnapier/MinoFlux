@@ -104,6 +104,19 @@ py::dict move_dict(const oracle::Move& move) {
     return output;
 }
 
+py::dict board_features_native(const py::sequence& rows_value) {
+    const oracle::BoardFeatures features = oracle::board_features(parse_rows(rows_value));
+    py::dict output;
+    output["aggregateHeight"] = features.aggregate_height;
+    output["maxHeight"] = features.max_height;
+    output["holes"] = features.holes;
+    output["holeDepth"] = features.hole_depth;
+    output["bumpiness"] = features.bumpiness;
+    output["wells"] = features.wells;
+    output["tSpinSlots"] = features.t_spin_slots;
+    return output;
+}
+
 py::object spin_name(int event) {
     switch (event) {
         case 1: return py::str("T_SPIN_MINI");
@@ -366,6 +379,7 @@ PYBIND11_MODULE(_oracle_native, module) {
     module.doc() = "Native offline exact-SRS beam-search oracle";
     module.def("api_version", []() { return 1; });
     module.def("reachability_backend", []() { return "shared-table-v1"; });
+    module.def("board_features", &board_features_native, py::arg("rows"));
     module.def(
         "register_reachability_table",
         &register_reachability_table_native,
