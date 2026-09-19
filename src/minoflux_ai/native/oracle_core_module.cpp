@@ -4,6 +4,7 @@
 #include <chrono>
 #include <memory>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 namespace minoflux::oracle {
@@ -13,6 +14,35 @@ namespace reach = minoflux::reachability;
 std::array<std::shared_ptr<const reach::Table>, 14> g_reachability_tables{};
 thread_local bool g_reachability_profile_enabled = false;
 thread_local ReachabilityProfile g_reachability_profile{};
+thread_local bool g_reachability_cache_enabled = false;
+
+struct ReachabilityCacheKey {
+    std::array<uint16_t, kHeight> rows{};
+    Piece piece = Piece::None;
+
+    bool operator==(const ReachabilityCacheKey& other) const noexcept {
+        return piece == other.piece && rows == other.rows;
+    }
+};
+
+struct ReachabilityCacheHash {
+    size_t operator()(const ReachabilityCacheKey& key) const noexcept {
+        uint64_t h = 1469598103934665603ULL;
+        for (uint16_t row : key.rows) {
+            h ^= row;
+            h *= 1099511628211ULL;
+        }
+        h ^= static_cast<uint8_t>(key.piece);
+        h *= 1099511628211ULL;
+        return static_cast<size_t>(h ^ (h >> 32));
+    }
+};
+
+thread_local std::unordered_map<
+    ReachabilityCacheKey,
+    std::vector<Move>,
+    ReachabilityCacheHash
+> g_reachability_cache{};
 
 size_t table_index(Piece piece, bool allow_180) {
     const int value = static_cast<int>(piece);
@@ -29,6 +59,16 @@ const reach::Table& table_for(Piece piece, bool allow_180) {
     }
     return *table;
 }
+
+std::vector<Move> with_hold_flag(const std::vector<Move>& source, bool use_hold) {
+    std::vector<Move> result = source;
+    if (use_hold) {
+        for (Move& move : result) {
+            move.use_hold = true;
+        }
+    }
+    return result;
+}
 }  // namespace
 
 void register_reachability_table(
@@ -43,6 +83,16 @@ void register_reachability_table(
         throw std::runtime_error("oracle reachability table dimensions do not match");
     }
     g_reachability_tables[table_index(piece, allow_180)] = std::move(table);
+}
+
+void begin_reachability_cache() {
+    g_reachability_cache.clear();
+    g_reachability_cache_enabled = true;
+}
+
+void end_reachability_cache() {
+    g_reachability_cache_enabled = false;
+    g_reachability_cache.clear();
 }
 
 void begin_reachability_profile() {
@@ -62,6 +112,23 @@ std::vector<Move> reachable_moves(
     int max_nodes,
     bool use_hold
 ) {
+    ReachabilityCacheKey cache_key;
+    cache_key.rows = rows;
+    cache_key.piece = piece;
+
+    if (g_reachability_cache_enabled) {
+        const auto cached = g_reachability_cache.find(cache_key);
+        if (cached != g_reachability_cache.end()) {
+            if (g_reachability_profile_enabled) {
+                ++g_reachability_profile.cache_hits;
+            }
+            return with_hold_flag(cached->second, use_hold);
+        }
+        if (g_reachability_profile_enabled) {
+            ++g_reachability_profile.cache_misses;
+        }
+    }
+
     const reach::Table& table = table_for(piece, allow_180);
     std::vector<uint64_t> native_rows;
     native_rows.reserve(kHeight);
@@ -94,22 +161,26 @@ std::vector<Move> reachable_moves(
         g_reachability_profile.placement_seconds += native_result.timings.placement_seconds;
     }
 
-    std::vector<Move> result;
-    result.reserve(native_result.placements.size());
+    std::vector<Move> base_moves;
+    base_moves.reserve(native_result.placements.size());
     for (const reach::PlacementRecord& placement : native_result.placements) {
         Move move;
         move.piece = piece;
         move.x = static_cast<int8_t>(placement.x);
         move.y = static_cast<int8_t>(placement.y);
         move.rotation = static_cast<int8_t>(placement.rotation);
-        move.use_hold = use_hold;
+        move.use_hold = false;
         move.last_rotation = placement.last_rotation;
         move.kick_index = static_cast<int8_t>(placement.kick_index);
         move.rotation_from = static_cast<int8_t>(placement.rotation_from);
         move.rotation_to = static_cast<int8_t>(placement.rotation_to);
-        result.push_back(move);
+        base_moves.push_back(move);
     }
-    return result;
+
+    if (g_reachability_cache_enabled) {
+        g_reachability_cache.emplace(std::move(cache_key), base_moves);
+    }
+    return with_hold_flag(base_moves, use_hold);
 }
 
 TransitionResult transition(
