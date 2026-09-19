@@ -1,8 +1,129 @@
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+
+#include "native/oracle_core.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <string>
+#include <vector>
 
 namespace py = pybind11;
+namespace oracle = minoflux::oracle;
+
+namespace {
+
+oracle::Piece parse_piece(const std::string& value, const char* name) {
+    if (value.size() != 1) {
+        throw py::value_error(std::string(name) + " must be one tetromino letter");
+    }
+    const oracle::Piece piece = oracle::piece_from_char(value[0]);
+    if (piece == oracle::Piece::None) {
+        throw py::value_error(std::string(name) + " contains an unknown tetromino");
+    }
+    return piece;
+}
+
+std::array<uint16_t, oracle::kHeight> parse_rows(const py::sequence& values) {
+    if (py::len(values) != oracle::kHeight) {
+        throw py::value_error("oracle board must contain exactly 24 rows");
+    }
+    std::array<uint16_t, oracle::kHeight> rows{};
+    for (py::ssize_t index = 0; index < oracle::kHeight; ++index) {
+        const uint64_t raw = py::cast<uint64_t>(values[index]);
+        if ((raw & ~uint64_t{oracle::kFullRow}) != 0) {
+            throw py::value_error("oracle board row exceeds 10 bits");
+        }
+        rows[static_cast<size_t>(index)] = static_cast<uint16_t>(raw);
+    }
+    return rows;
+}
+
+std::vector<oracle::Piece> parse_queue(const py::sequence& values) {
+    std::vector<oracle::Piece> result;
+    result.reserve(static_cast<size_t>(py::len(values)));
+    for (py::handle item : values) {
+        result.push_back(parse_piece(py::cast<std::string>(item), "queue item"));
+    }
+    return result;
+}
+
+py::object search_native(
+    const py::sequence& rows_value,
+    const std::string& current_value,
+    const py::object& hold_value,
+    const py::sequence& queue_value,
+    int combo,
+    bool back_to_back,
+    int b2b_chain,
+    bool can_hold,
+    int beam_width,
+    int depth,
+    bool allow_180,
+    int max_nodes
+) {
+    oracle::State state;
+    state.rows = parse_rows(rows_value);
+    state.current = parse_piece(current_value, "current");
+    state.combo = static_cast<int16_t>(combo);
+    state.b2b_active = back_to_back;
+    state.b2b_chain = static_cast<uint16_t>(std::max(0, b2b_chain));
+    state.can_hold = can_hold;
+    state.has_hold = !hold_value.is_none();
+    if (state.has_hold) {
+        state.hold = parse_piece(py::cast<std::string>(hold_value), "hold");
+    }
+    std::vector<oracle::Piece> queue = parse_queue(queue_value);
+
+    oracle::Config config;
+    config.beam_width = beam_width;
+    config.depth = depth;
+    config.allow_180 = allow_180;
+    config.max_nodes = max_nodes;
+
+    oracle::Result result;
+    {
+        py::gil_scoped_release release;
+        result = oracle::search(state, queue, config);
+    }
+    if (!result.found) {
+        return py::none();
+    }
+
+    py::dict output;
+    output["piece"] = std::string(1, oracle::piece_to_char(result.move.piece));
+    output["x"] = result.move.x;
+    output["y"] = result.move.y;
+    output["rotation"] = result.move.rotation;
+    output["holdUsed"] = result.move.use_hold;
+    output["lastMoveWasRotation"] = result.move.last_rotation;
+    output["kickIndex"] = result.move.kick_index;
+    output["rotationFrom"] = result.move.rotation_from;
+    output["rotationTo"] = result.move.rotation_to;
+    output["score"] = result.score;
+    return output;
+}
+
+}  // namespace
 
 PYBIND11_MODULE(_oracle_native, module) {
-    module.doc() = "Native offline oracle core";
+    module.doc() = "Native offline exact-SRS beam-search oracle";
     module.def("api_version", []() { return 1; });
+    module.def(
+        "search",
+        &search_native,
+        py::arg("rows"),
+        py::arg("current"),
+        py::arg("hold"),
+        py::arg("queue"),
+        py::arg("combo"),
+        py::arg("back_to_back"),
+        py::arg("b2b_chain"),
+        py::arg("can_hold"),
+        py::arg("beam_width") = 2000,
+        py::arg("depth") = 18,
+        py::arg("allow_180") = true,
+        py::arg("max_nodes") = 8000
+    );
 }
