@@ -121,6 +121,17 @@ def _choice_from_native(value: Mapping[str, object]) -> OracleChoice:
     )
 
 
+def _native_request(game: Game, cfg: OracleConfig) -> tuple[Game, tuple[str, ...]]:
+    _ensure_native_reachability_tables(
+        cfg.allow_180,
+        game.width,
+        game.height,
+    )
+    request_game = clone_game(game)
+    request_game._fill_queue(cfg.depth + 2)
+    return request_game, tuple(request_game.queue)
+
+
 def search_oracle(
     game: Game,
     config: OracleConfig = OracleConfig(),
@@ -131,18 +142,12 @@ def search_oracle(
         return None
 
     cfg = config.normalized()
-    _ensure_native_reachability_tables(
-        cfg.allow_180,
-        game.width,
-        game.height,
-    )
-    request_game = clone_game(game)
-    request_game._fill_queue(cfg.depth + 2)
+    request_game, queue = _native_request(game, cfg)
     value = _native.search(
         board_row_masks(request_game.board),
         request_game.current,
         request_game.hold_piece,
-        tuple(request_game.queue),
+        queue,
         int(request_game.combo),
         bool(request_game.back_to_back),
         int(request_game.b2b_chain),
@@ -155,3 +160,32 @@ def search_oracle(
     if value is None:
         return None
     return _choice_from_native(value)
+
+
+def profile_oracle(
+    game: Game,
+    config: OracleConfig = OracleConfig(),
+) -> dict[str, object]:
+    if not oracle_native_available():
+        raise RuntimeError("MinoFlux native oracle extension is unavailable")
+    if game.game_over or game.paused:
+        raise ValueError("cannot profile oracle on an inactive game")
+
+    cfg = config.normalized()
+    request_game, queue = _native_request(game, cfg)
+    return dict(
+        _native.search_profile(
+            board_row_masks(request_game.board),
+            request_game.current,
+            request_game.hold_piece,
+            queue,
+            int(request_game.combo),
+            bool(request_game.back_to_back),
+            int(request_game.b2b_chain),
+            not bool(request_game.hold_used),
+            cfg.beam_width,
+            cfg.depth,
+            cfg.allow_180,
+            cfg.reachability_node_limit,
+        )
+    )
