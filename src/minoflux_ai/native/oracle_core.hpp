@@ -1,7 +1,10 @@
 #pragma once
 
+#include "reachability_core.hpp"
+
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -74,6 +77,11 @@ struct TransitionResult {
 
 Piece piece_from_char(char value);
 char piece_to_char(Piece piece);
+void register_reachability_table(
+    Piece piece,
+    bool allow_180,
+    std::shared_ptr<const minoflux::reachability::Table> table
+);
 std::vector<Move> reachable_moves(
     const std::array<uint16_t, kHeight>& rows,
     Piece piece,
@@ -81,7 +89,15 @@ std::vector<Move> reachable_moves(
     int max_nodes,
     bool use_hold = false
 );
-TransitionResult transition(const State& root, std::span<const Piece> queue, const Move& move);
-Result search(const State& root, std::span<const Piece> queue, const Config& config);
+TransitionResult transition(
+    const State& root,
+    std::span<const Piece> queue,
+    const Move& move
+);
+Result search(
+    const State& root,
+    std::span<const Piece> queue,
+    const Config& config
+);
 
 }  // namespace minoflux::oracle
