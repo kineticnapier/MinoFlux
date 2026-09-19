@@ -61,6 +61,16 @@ struct Result {
     double score = 0.0;
 };
 
+struct TransitionResult {
+    bool valid = false;
+    State state{};
+    int lines = 0;
+    int attack = 0;
+    int spin_event = 0;
+    bool perfect_clear = false;
+    int surge_released = 0;
+};
+
 Piece piece_from_char(char value);
 char piece_to_char(Piece piece);
 std::vector<Move> reachable_moves(
@@ -69,6 +79,11 @@ std::vector<Move> reachable_moves(
     bool allow_180,
     int max_nodes,
     bool use_hold = false
+);
+TransitionResult transition(
+    const State& root,
+    std::span<const Piece> queue,
+    const Move& move
 );
 Result search(const State& root, std::span<const Piece> queue, const Config& config);
 
