@@ -1,6 +1,7 @@
 #include "oracle_search_core.cpp"
 
 #include <array>
+#include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -10,6 +11,8 @@ namespace {
 namespace reach = minoflux::reachability;
 
 std::array<std::shared_ptr<const reach::Table>, 14> g_reachability_tables{};
+thread_local bool g_reachability_profile_enabled = false;
+thread_local ReachabilityProfile g_reachability_profile{};
 
 size_t table_index(Piece piece, bool allow_180) {
     const int value = static_cast<int>(piece);
@@ -42,6 +45,16 @@ void register_reachability_table(
     g_reachability_tables[table_index(piece, allow_180)] = std::move(table);
 }
 
+void begin_reachability_profile() {
+    g_reachability_profile = ReachabilityProfile{};
+    g_reachability_profile_enabled = true;
+}
+
+ReachabilityProfile end_reachability_profile() {
+    g_reachability_profile_enabled = false;
+    return g_reachability_profile;
+}
+
 std::vector<Move> reachable_moves(
     const std::array<uint16_t, kHeight>& rows,
     Piece piece,
@@ -55,6 +68,9 @@ std::vector<Move> reachable_moves(
     for (uint16_t row : rows) {
         native_rows.push_back(row);
     }
+
+    const bool profiling = g_reachability_profile_enabled;
+    const auto started = std::chrono::steady_clock::now();
     const reach::RunResult native_result = reach::run(
         table,
         native_rows,
@@ -62,8 +78,21 @@ std::vector<Move> reachable_moves(
         1,
         0,
         max_nodes,
-        false
+        profiling
     );
+    if (profiling) {
+        const auto stopped = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(stopped - started).count();
+        ++g_reachability_profile.calls;
+        g_reachability_profile.generated_moves += native_result.placements.size();
+        g_reachability_profile.total_seconds += elapsed;
+        g_reachability_profile.setup_seconds += native_result.timings.setup_seconds;
+        g_reachability_profile.bfs_seconds += native_result.timings.bfs_seconds;
+        g_reachability_profile.rotation_seconds += native_result.timings.rotation_seconds;
+        g_reachability_profile.landing_seconds += native_result.timings.landing_seconds;
+        g_reachability_profile.representative_seconds += native_result.timings.representative_seconds;
+        g_reachability_profile.placement_seconds += native_result.timings.placement_seconds;
+    }
 
     std::vector<Move> result;
     result.reserve(native_result.placements.size());
