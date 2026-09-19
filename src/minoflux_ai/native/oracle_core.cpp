@@ -383,7 +383,7 @@ int spin_event(int kind,int lines) noexcept {
     if (kind==1) {
         if (lines==0) return 1;
         if (lines==1) return 2;
-        return lines==2 ? 4 : 5;
+        return lines==2 ? 5 : 6;
     }
     if (lines==0) return 3;
     if (lines==1) return 4;
