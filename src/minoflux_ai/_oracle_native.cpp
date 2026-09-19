@@ -18,6 +18,13 @@ namespace reach_support = minoflux::reachability::pybind_support;
 
 namespace {
 
+struct ReachabilityCacheScope {
+    ReachabilityCacheScope() { oracle::begin_reachability_cache(); }
+    ~ReachabilityCacheScope() { oracle::end_reachability_cache(); }
+    ReachabilityCacheScope(const ReachabilityCacheScope&) = delete;
+    ReachabilityCacheScope& operator=(const ReachabilityCacheScope&) = delete;
+};
+
 oracle::Piece parse_piece(const std::string& value, const char* name) {
     if (value.size() != 1) {
         throw py::value_error(std::string(name) + " must be one tetromino letter");
@@ -273,6 +280,7 @@ py::object search_native(
     );
     const std::vector<oracle::Piece> queue = parse_queue(queue_value);
 
+    ReachabilityCacheScope cache_scope;
     oracle::Result result;
     {
         py::gil_scoped_release release;
@@ -312,6 +320,7 @@ py::dict search_profile_native(
     );
     const std::vector<oracle::Piece> queue = parse_queue(queue_value);
 
+    ReachabilityCacheScope cache_scope;
     oracle::begin_reachability_profile();
     oracle::Result result;
     const auto started = std::chrono::steady_clock::now();
@@ -330,6 +339,8 @@ py::dict search_profile_native(
     output["reachabilitySeconds"] = profile.total_seconds;
     output["movegenCalls"] = profile.calls;
     output["generatedMoves"] = profile.generated_moves;
+    output["movegenCacheHits"] = profile.cache_hits;
+    output["movegenCacheMisses"] = profile.cache_misses;
 
     py::dict reachability;
     reachability["setupSeconds"] = profile.setup_seconds;
