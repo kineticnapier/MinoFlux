@@ -133,11 +133,28 @@ inline double seconds_between(Clock::time_point start, Clock::time_point end) {
     return std::chrono::duration<double>(end - start).count();
 }
 
-inline bool mask_intersects(const Mask256& left, const Mask256& right, int limb_count) noexcept {
+inline bool mask_intersects_generic(const Mask256& left, const Mask256& right, int limb_count) noexcept {
     for (int i = 0; i < limb_count; ++i) {
         if ((left.words[static_cast<size_t>(i)] & right.words[static_cast<size_t>(i)]) != 0) return true;
     }
     return false;
+}
+
+inline bool mask_intersects_four(const Mask256& left, const Mask256& right) noexcept {
+    return (
+        (left.words[0] & right.words[0]) |
+        (left.words[1] & right.words[1]) |
+        (left.words[2] & right.words[2]) |
+        (left.words[3] & right.words[3])
+    ) != 0;
+}
+
+template <bool FourLimb>
+inline bool mask_intersects(const Mask256& left, const Mask256& right, int limb_count) noexcept {
+    if constexpr (FourLimb) {
+        return mask_intersects_four(left, right);
+    }
+    return mask_intersects_generic(left, right, limb_count);
 }
 
 inline Mask256 pack_board(const std::vector<uint64_t>& rows, int width, int height) {
@@ -187,7 +204,7 @@ inline bool better_t(const BestRecord& candidate, const BestRecord& current) noe
     return candidate.order_rank < current.order_rank;
 }
 
-template <bool Profile>
+template <bool Profile, bool FourLimb>
 inline bool checked_collision(const Table& table, const Mask256& board, int32_t state_id, std::vector<uint8_t>& collision_cache, Counters& counters) {
     if constexpr (Profile) ++counters.collision_checks;
     const uint8_t cached = collision_cache[static_cast<size_t>(state_id)];
@@ -197,12 +214,12 @@ inline bool checked_collision(const Table& table, const Mask256& board, int32_t 
     }
     if constexpr (Profile) ++counters.collision_evaluations;
     const bool blocked = table.collision_invalid[static_cast<size_t>(state_id)] != 0 ||
-        mask_intersects(board, table.collision_masks[static_cast<size_t>(state_id)], table.limb_count);
+        mask_intersects<FourLimb>(board, table.collision_masks[static_cast<size_t>(state_id)], table.limb_count);
     collision_cache[static_cast<size_t>(state_id)] = blocked ? kCollisionBlocked : kCollisionClear;
     return blocked;
 }
 
-template <bool Profile>
+template <bool Profile, bool FourLimb>
 inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes) {
     RunResult result;
     auto& counters = result.counters;
@@ -239,7 +256,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
     }
     if constexpr (Profile) { counters.collision_checks = 1; counters.collision_evaluations = 1; }
     const bool start_blocked = table.collision_invalid[static_cast<size_t>(start_state)] != 0 ||
-        mask_intersects(board, table.collision_masks[static_cast<size_t>(start_state)], table.limb_count);
+        mask_intersects<FourLimb>(board, table.collision_masks[static_cast<size_t>(start_state)], table.limb_count);
     scratch.collision_cache[static_cast<size_t>(start_state)] = start_blocked ? kCollisionBlocked : kCollisionClear;
     if (start_blocked) {
         if constexpr (Profile) timings.setup_seconds = seconds_between(setup_started, Clock::now());
@@ -264,7 +281,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         };
         for (int32_t target_state : movement_targets) {
             if (target_state == kNoState || scratch.state_depths[static_cast<size_t>(target_state)] != kNoState) continue;
-            if (!checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) {
+            if (!checked_collision<Profile, FourLimb>(table, board, target_state, scratch.collision_cache, counters)) {
                 scratch.state_depths[static_cast<size_t>(target_state)] = new_depth;
                 scratch.state_kick_infos[static_cast<size_t>(target_state)] = -1;
                 scratch.visited_state_ids.push_back(target_state);
@@ -284,7 +301,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             for (uint32_t kick_index = kick_begin; kick_index < kick_end; ++kick_index) {
                 if constexpr (Profile) ++counters.kick_checks;
                 const int32_t target_state = table.kick_targets[static_cast<size_t>(kick_index)];
-                if (checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) continue;
+                if (checked_collision<Profile, FourLimb>(table, board, target_state, scratch.collision_cache, counters)) continue;
                 successful_state = target_state;
                 successful_kick = table.kick_indices[static_cast<size_t>(kick_index)];
                 break;
@@ -325,7 +342,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         while (true) {
             const int32_t target_id = table.down_state[static_cast<size_t>(current_id)];
             if (target_id == kNoState) { landing = current_id; break; }
-            if (checked_collision<Profile>(table, board, target_id, scratch.collision_cache, counters)) { landing = current_id; break; }
+            if (checked_collision<Profile, FourLimb>(table, board, target_id, scratch.collision_cache, counters)) { landing = current_id; break; }
             current_id = target_id;
             const int32_t cached_landing = scratch.landing_state[static_cast<size_t>(current_id)];
             if (cached_landing != kNoLanding) {
@@ -451,8 +468,19 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
 
 inline RunResult run(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes, bool profile = false) {
     if (static_cast<int>(rows.size()) != table.height) throw std::runtime_error("board row count mismatch");
-    return profile ? run_impl<true>(table, rows, start_x, start_y, start_rotation, max_nodes)
-                   : run_impl<false>(table, rows, start_x, start_y, start_rotation, max_nodes);
+    if (profile) {
+        return table.limb_count == 4
+            ? run_impl<true, true>(table, rows, start_x, start_y, start_rotation, max_nodes)
+            : run_impl<true, false>(table, rows, start_x, start_y, start_rotation, max_nodes);
+    }
+    return table.limb_count == 4
+        ? run_impl<false, true>(table, rows, start_x, start_y, start_rotation, max_nodes)
+        : run_impl<false, false>(table, rows, start_x, start_y, start_rotation, max_nodes);
+}
+
+inline RunResult run_reference(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes) {
+    if (static_cast<int>(rows.size()) != table.height) throw std::runtime_error("board row count mismatch");
+    return run_impl<false, false>(table, rows, start_x, start_y, start_rotation, max_nodes);
 }
 
 inline void finalize_table(Table& table) {
