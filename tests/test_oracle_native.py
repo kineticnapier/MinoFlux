@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import random
+
 import pytest
 
 import minoflux_ai.oracle as oracle_module
+from minoflux_ai.features import extract_board_features_from_masks
 from minoflux_ai.oracle import OracleConfig, oracle_native_available, search_oracle
 from minoflux_ai.search import SearchConfig, rank_search_actions
 from minoflux_engine import Game
@@ -24,6 +27,31 @@ def _action_key(action):
 def test_native_oracle_uses_shared_table_reachability_backend() -> None:
     assert oracle_native_available()
     assert oracle_module._native.reachability_backend() == "shared-table-v1"
+
+
+def test_native_board_features_match_python_reference() -> None:
+    assert oracle_native_available()
+    rng = random.Random(20260920)
+    boards = [[0] * 24]
+    for _ in range(100):
+        rows = [0] * 24
+        start = rng.randrange(4, 24)
+        for y in range(start, 24):
+            rows[y] = rng.randrange(1 << 10)
+        boards.append(rows)
+
+    for rows in boards:
+        expected = extract_board_features_from_masks(rows, width=10)
+        actual = oracle_module._native.board_features(rows)
+        assert actual == {
+            "aggregateHeight": expected.aggregate_height,
+            "maxHeight": expected.max_height,
+            "holes": expected.holes,
+            "holeDepth": expected.hole_depth,
+            "bumpiness": expected.bumpiness,
+            "wells": expected.wells,
+            "tSpinSlots": expected.t_spin_slots,
+        }
 
 
 def test_native_oracle_returns_exact_reachable_action() -> None:
