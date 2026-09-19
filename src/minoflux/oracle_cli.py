@@ -4,8 +4,9 @@ import argparse
 import json
 import sys
 
-from minoflux_ai.oracle import OracleConfig, oracle_native_available
+from minoflux_ai.oracle import OracleConfig, oracle_native_available, profile_oracle
 from minoflux_ai.oracle_dataset import OracleDatasetConfig, run_oracle_smoke, write_oracle_ranking_dataset
+from minoflux_engine import Game
 
 
 def _require_native() -> None:
@@ -45,6 +46,25 @@ def _smoke(args: argparse.Namespace) -> int:
         seed_step=args.seed_step,
         oracle=_oracle_config(args),
     )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _profile(args: argparse.Namespace) -> int:
+    _require_native()
+    config = _oracle_config(args)
+    result = profile_oracle(Game(args.seed), config)
+    result = {
+        "teacher": "minoflux-native-oracle",
+        "seed": args.seed,
+        **result,
+        "oracle": {
+            "beamWidth": config.beam_width,
+            "depth": config.depth,
+            "allow180": config.allow_180,
+            "reachabilityNodeLimit": config.reachability_node_limit,
+        },
+    }
     print(json.dumps(result, indent=2))
     return 0
 
@@ -91,6 +111,14 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--seed-step", type=int, default=97)
     _add_oracle_search_args(smoke, beam=64, depth=2)
     smoke.set_defaults(func=_smoke)
+
+    profile = subparsers.add_parser(
+        "oracle-profile",
+        help="Profile one native oracle search and report reachability hot spots",
+    )
+    profile.add_argument("--seed", type=int, default=8_100_001)
+    _add_oracle_search_args(profile, beam=2_000, depth=18)
+    profile.set_defaults(func=_profile)
 
     dataset = subparsers.add_parser(
         "oracle-dataset",
