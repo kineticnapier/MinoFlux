@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+import minoflux_ai.oracle as oracle_module
 from minoflux_ai.oracle import OracleConfig, oracle_native_available, search_oracle
 from minoflux_ai.search import SearchConfig, rank_search_actions
 from minoflux_engine import Game
@@ -57,3 +60,17 @@ def test_native_oracle_is_deterministic() -> None:
     assert right is not None
     assert _action_key(left.action) == _action_key(right.action)
     assert left.score == right.score
+
+
+def test_search_does_not_call_python_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*args, **kwargs):
+        raise AssertionError("Python search must not run inside the native oracle")
+
+    monkeypatch.setattr(oracle_module, "choose_search_action", fail)
+
+    choice = search_oracle(
+        Game(314159),
+        OracleConfig(beam_width=32, depth=2, allow_180=True),
+    )
+
+    assert choice is not None
