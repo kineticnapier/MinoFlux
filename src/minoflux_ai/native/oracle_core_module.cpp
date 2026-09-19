@@ -1,6 +1,46 @@
-#include "oracle_core.cpp"
+#include "oracle_search_core.cpp"
+
+#include <array>
+#include <memory>
+#include <stdexcept>
+#include <vector>
 
 namespace minoflux::oracle {
+namespace {
+namespace reach = minoflux::reachability;
+
+std::array<std::shared_ptr<const reach::Table>, 14> g_reachability_tables{};
+
+size_t table_index(Piece piece, bool allow_180) {
+    const int value = static_cast<int>(piece);
+    if (value < 0 || value >= 7) {
+        throw std::runtime_error("invalid oracle piece for reachability table");
+    }
+    return static_cast<size_t>(value * 2 + (allow_180 ? 1 : 0));
+}
+
+const reach::Table& table_for(Piece piece, bool allow_180) {
+    const auto& table = g_reachability_tables[table_index(piece, allow_180)];
+    if (!table) {
+        throw std::runtime_error("oracle reachability table is not registered");
+    }
+    return *table;
+}
+}  // namespace
+
+void register_reachability_table(
+    Piece piece,
+    bool allow_180,
+    std::shared_ptr<const minoflux::reachability::Table> table
+) {
+    if (!table) {
+        throw std::runtime_error("oracle reachability table is null");
+    }
+    if (table->width != kWidth || table->height != kHeight) {
+        throw std::runtime_error("oracle reachability table dimensions do not match");
+    }
+    g_reachability_tables[table_index(piece, allow_180)] = std::move(table);
+}
 
 std::vector<Move> reachable_moves(
     const std::array<uint16_t, kHeight>& rows,
@@ -9,7 +49,38 @@ std::vector<Move> reachable_moves(
     int max_nodes,
     bool use_hold
 ) {
-    return reachable(rows, piece, allow_180, max_nodes, use_hold);
+    const reach::Table& table = table_for(piece, allow_180);
+    std::vector<uint64_t> native_rows;
+    native_rows.reserve(kHeight);
+    for (uint16_t row : rows) {
+        native_rows.push_back(row);
+    }
+    const reach::RunResult native_result = reach::run(
+        table,
+        native_rows,
+        3,
+        1,
+        0,
+        max_nodes,
+        false
+    );
+
+    std::vector<Move> result;
+    result.reserve(native_result.placements.size());
+    for (const reach::PlacementRecord& placement : native_result.placements) {
+        Move move;
+        move.piece = piece;
+        move.x = static_cast<int8_t>(placement.x);
+        move.y = static_cast<int8_t>(placement.y);
+        move.rotation = static_cast<int8_t>(placement.rotation);
+        move.use_hold = use_hold;
+        move.last_rotation = placement.last_rotation;
+        move.kick_index = static_cast<int8_t>(placement.kick_index);
+        move.rotation_from = static_cast<int8_t>(placement.rotation_from);
+        move.rotation_to = static_cast<int8_t>(placement.rotation_to);
+        result.push_back(move);
+    }
+    return result;
 }
 
 TransitionResult transition(
@@ -49,13 +120,9 @@ TransitionResult transition(
         }
     }
 
-    if (move.piece != placing) {
-        return result;
-    }
-    if (collides(state.rows, move.piece, move.x, move.y, move.rotation)) {
-        return result;
-    }
-    if (!collides(state.rows, move.piece, move.x, move.y + 1, move.rotation)) {
+    if (move.piece != placing ||
+        collides(state.rows, move.piece, move.x, move.y, move.rotation) ||
+        !collides(state.rows, move.piece, move.x, move.y + 1, move.rotation)) {
         return result;
     }
 
