@@ -21,6 +21,11 @@ def _action_key(action):
     )
 
 
+def test_native_oracle_uses_shared_table_reachability_backend() -> None:
+    assert oracle_native_available()
+    assert oracle_module._native.reachability_backend() == "shared-table-v1"
+
+
 def test_native_oracle_returns_exact_reachable_action() -> None:
     assert oracle_native_available()
 
