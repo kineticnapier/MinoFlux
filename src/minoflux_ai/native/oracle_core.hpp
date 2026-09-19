@@ -88,6 +88,15 @@ struct BoardFeatures {
 struct ReachabilityProfile {
     uint64_t calls = 0;
     uint64_t generated_moves = 0;
+    uint64_t bfs_nodes = 0;
+    uint64_t collision_checks = 0;
+    uint64_t collision_evaluations = 0;
+    uint64_t collision_cache_hits = 0;
+    uint64_t kick_checks = 0;
+    uint64_t landing_queries = 0;
+    uint64_t landing_cache_hits = 0;
+    uint64_t representative_nodes = 0;
+    uint64_t representative_duplicate_skips = 0;
     double total_seconds = 0.0;
     double setup_seconds = 0.0;
     double bfs_seconds = 0.0;
