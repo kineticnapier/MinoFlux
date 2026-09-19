@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace minoflux::oracle {
 
@@ -62,6 +63,13 @@ struct Result {
 
 Piece piece_from_char(char value);
 char piece_to_char(Piece piece);
+std::vector<Move> reachable_moves(
+    const std::array<uint16_t, kHeight>& rows,
+    Piece piece,
+    bool allow_180,
+    int max_nodes,
+    bool use_hold = false
+);
 Result search(const State& root, std::span<const Piece> queue, const Config& config);
 
 }  // namespace minoflux::oracle
