@@ -49,6 +49,40 @@ std::vector<oracle::Piece> parse_queue(const py::sequence& values) {
     return result;
 }
 
+py::dict move_dict(const oracle::Move& move) {
+    py::dict output;
+    output["piece"] = std::string(1, oracle::piece_to_char(move.piece));
+    output["x"] = move.x;
+    output["y"] = move.y;
+    output["rotation"] = move.rotation;
+    output["holdUsed"] = move.use_hold;
+    output["lastMoveWasRotation"] = move.last_rotation;
+    output["kickIndex"] = move.kick_index;
+    output["rotationFrom"] = move.rotation_from;
+    output["rotationTo"] = move.rotation_to;
+    return output;
+}
+
+py::list reachable_native(
+    const py::sequence& rows_value,
+    const std::string& piece_value,
+    bool allow_180,
+    int max_nodes
+) {
+    const auto rows = parse_rows(rows_value);
+    const oracle::Piece piece = parse_piece(piece_value, "piece");
+    std::vector<oracle::Move> moves;
+    {
+        py::gil_scoped_release release;
+        moves = oracle::reachable_moves(rows, piece, allow_180, max_nodes);
+    }
+    py::list output;
+    for (const oracle::Move& move : moves) {
+        output.append(move_dict(move));
+    }
+    return output;
+}
+
 py::object search_native(
     const py::sequence& rows_value,
     const std::string& current_value,
@@ -91,16 +125,7 @@ py::object search_native(
         return py::none();
     }
 
-    py::dict output;
-    output["piece"] = std::string(1, oracle::piece_to_char(result.move.piece));
-    output["x"] = result.move.x;
-    output["y"] = result.move.y;
-    output["rotation"] = result.move.rotation;
-    output["holdUsed"] = result.move.use_hold;
-    output["lastMoveWasRotation"] = result.move.last_rotation;
-    output["kickIndex"] = result.move.kick_index;
-    output["rotationFrom"] = result.move.rotation_from;
-    output["rotationTo"] = result.move.rotation_to;
+    py::dict output = move_dict(result.move);
     output["score"] = result.score;
     return output;
 }
@@ -110,6 +135,14 @@ py::object search_native(
 PYBIND11_MODULE(_oracle_native, module) {
     module.doc() = "Native offline exact-SRS beam-search oracle";
     module.def("api_version", []() { return 1; });
+    module.def(
+        "reachable",
+        &reachable_native,
+        py::arg("rows"),
+        py::arg("piece"),
+        py::arg("allow_180") = false,
+        py::arg("max_nodes") = 8000
+    );
     module.def(
         "search",
         &search_native,
