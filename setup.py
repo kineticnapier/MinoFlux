@@ -22,7 +22,7 @@ setup(
             "minoflux_ai._oracle_native",
             [
                 "src/minoflux_ai/_oracle_native.cpp",
-                "src/minoflux_ai/native/oracle_core.cpp",
+                "src/minoflux_ai/native/oracle_core_module.cpp",
             ],
             cxx_std=20,
             optional=True,
