@@ -49,6 +49,43 @@ std::vector<oracle::Piece> parse_queue(const py::sequence& values) {
     return result;
 }
 
+oracle::State parse_state(
+    const py::sequence& rows_value,
+    const std::string& current_value,
+    const py::object& hold_value,
+    int combo,
+    bool back_to_back,
+    int b2b_chain,
+    bool can_hold
+) {
+    oracle::State state;
+    state.rows = parse_rows(rows_value);
+    state.current = parse_piece(current_value, "current");
+    state.combo = static_cast<int16_t>(combo);
+    state.b2b_active = back_to_back;
+    state.b2b_chain = static_cast<uint16_t>(std::max(0, b2b_chain));
+    state.can_hold = can_hold;
+    state.has_hold = !hold_value.is_none();
+    if (state.has_hold) {
+        state.hold = parse_piece(py::cast<std::string>(hold_value), "hold");
+    }
+    return state;
+}
+
+oracle::Move parse_move(const py::dict& value) {
+    oracle::Move move;
+    move.piece = parse_piece(py::cast<std::string>(value["piece"]), "move piece");
+    move.x = static_cast<int8_t>(py::cast<int>(value["x"]));
+    move.y = static_cast<int8_t>(py::cast<int>(value["y"]));
+    move.rotation = static_cast<int8_t>(py::cast<int>(value["rotation"]));
+    move.use_hold = py::cast<bool>(value["holdUsed"]);
+    move.last_rotation = py::cast<bool>(value["lastMoveWasRotation"]);
+    move.kick_index = static_cast<int8_t>(py::cast<int>(value["kickIndex"]));
+    move.rotation_from = static_cast<int8_t>(py::cast<int>(value["rotationFrom"]));
+    move.rotation_to = static_cast<int8_t>(py::cast<int>(value["rotationTo"]));
+    return move;
+}
+
 py::dict move_dict(const oracle::Move& move) {
     py::dict output;
     output["piece"] = std::string(1, oracle::piece_to_char(move.piece));
@@ -61,6 +98,18 @@ py::dict move_dict(const oracle::Move& move) {
     output["rotationFrom"] = move.rotation_from;
     output["rotationTo"] = move.rotation_to;
     return output;
+}
+
+py::object spin_name(int event) {
+    switch (event) {
+        case 1: return py::str("T_SPIN_MINI");
+        case 2: return py::str("T_SPIN_MINI_SINGLE");
+        case 3: return py::str("T_SPIN");
+        case 4: return py::str("T_SPIN_SINGLE");
+        case 5: return py::str("T_SPIN_DOUBLE");
+        case 6: return py::str("T_SPIN_TRIPLE");
+        default: return py::none();
+    }
 }
 
 py::list reachable_native(
@@ -83,6 +132,59 @@ py::list reachable_native(
     return output;
 }
 
+py::dict transition_native(
+    const py::sequence& rows_value,
+    const std::string& current_value,
+    const py::object& hold_value,
+    const py::sequence& queue_value,
+    int combo,
+    bool back_to_back,
+    int b2b_chain,
+    bool can_hold,
+    const py::dict& move_value
+) {
+    oracle::State state = parse_state(
+        rows_value,
+        current_value,
+        hold_value,
+        combo,
+        back_to_back,
+        b2b_chain,
+        can_hold
+    );
+    const std::vector<oracle::Piece> queue = parse_queue(queue_value);
+    const oracle::Move move = parse_move(move_value);
+
+    oracle::TransitionResult result;
+    {
+        py::gil_scoped_release release;
+        result = oracle::transition(state, queue, move);
+    }
+    if (!result.valid) {
+        throw py::value_error("invalid native oracle transition");
+    }
+
+    py::dict output;
+    output["rows"] = result.state.rows;
+    output["current"] = std::string(1, oracle::piece_to_char(result.state.current));
+    output["hold"] = result.state.has_hold
+        ? py::object(py::str(std::string(1, oracle::piece_to_char(result.state.hold))))
+        : py::object(py::none());
+    output["queueIndex"] = result.state.queue_index;
+    output["combo"] = result.state.combo;
+    output["backToBack"] = result.state.b2b_active;
+    output["b2bChain"] = result.state.b2b_chain;
+    output["canHold"] = result.state.can_hold;
+    output["gameOver"] = result.state.game_over;
+    output["lines"] = result.lines;
+    output["attack"] = result.attack;
+    output["spin"] = spin_name(result.spin_event);
+    output["perfectClear"] = result.perfect_clear;
+    output["surgeReleased"] = result.surge_released;
+    output["surgeCharge"] = result.surge_charge;
+    return output;
+}
+
 py::object search_native(
     const py::sequence& rows_value,
     const std::string& current_value,
@@ -97,17 +199,15 @@ py::object search_native(
     bool allow_180,
     int max_nodes
 ) {
-    oracle::State state;
-    state.rows = parse_rows(rows_value);
-    state.current = parse_piece(current_value, "current");
-    state.combo = static_cast<int16_t>(combo);
-    state.b2b_active = back_to_back;
-    state.b2b_chain = static_cast<uint16_t>(std::max(0, b2b_chain));
-    state.can_hold = can_hold;
-    state.has_hold = !hold_value.is_none();
-    if (state.has_hold) {
-        state.hold = parse_piece(py::cast<std::string>(hold_value), "hold");
-    }
+    oracle::State state = parse_state(
+        rows_value,
+        current_value,
+        hold_value,
+        combo,
+        back_to_back,
+        b2b_chain,
+        can_hold
+    );
     std::vector<oracle::Piece> queue = parse_queue(queue_value);
 
     oracle::Config config;
@@ -142,6 +242,19 @@ PYBIND11_MODULE(_oracle_native, module) {
         py::arg("piece"),
         py::arg("allow_180") = false,
         py::arg("max_nodes") = 8000
+    );
+    module.def(
+        "transition",
+        &transition_native,
+        py::arg("rows"),
+        py::arg("current"),
+        py::arg("hold"),
+        py::arg("queue"),
+        py::arg("combo"),
+        py::arg("back_to_back"),
+        py::arg("b2b_chain"),
+        py::arg("can_hold"),
+        py::arg("move")
     );
     module.def(
         "search",
