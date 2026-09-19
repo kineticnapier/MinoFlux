@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -231,6 +232,22 @@ py::dict transition_native(
     return output;
 }
 
+oracle::Result run_search(
+    const oracle::State& state,
+    const std::vector<oracle::Piece>& queue,
+    int beam_width,
+    int depth,
+    bool allow_180,
+    int max_nodes
+) {
+    oracle::Config config;
+    config.beam_width = beam_width;
+    config.depth = depth;
+    config.allow_180 = allow_180;
+    config.max_nodes = max_nodes;
+    return oracle::search(state, queue, config);
+}
+
 py::object search_native(
     const py::sequence& rows_value,
     const std::string& current_value,
@@ -245,7 +262,7 @@ py::object search_native(
     bool allow_180,
     int max_nodes
 ) {
-    oracle::State state = parse_state(
+    const oracle::State state = parse_state(
         rows_value,
         current_value,
         hold_value,
@@ -254,18 +271,12 @@ py::object search_native(
         b2b_chain,
         can_hold
     );
-    std::vector<oracle::Piece> queue = parse_queue(queue_value);
-
-    oracle::Config config;
-    config.beam_width = beam_width;
-    config.depth = depth;
-    config.allow_180 = allow_180;
-    config.max_nodes = max_nodes;
+    const std::vector<oracle::Piece> queue = parse_queue(queue_value);
 
     oracle::Result result;
     {
         py::gil_scoped_release release;
-        result = oracle::search(state, queue, config);
+        result = run_search(state, queue, beam_width, depth, allow_180, max_nodes);
     }
     if (!result.found) {
         return py::none();
@@ -273,6 +284,69 @@ py::object search_native(
 
     py::dict output = move_dict(result.move);
     output["score"] = result.score;
+    return output;
+}
+
+py::dict search_profile_native(
+    const py::sequence& rows_value,
+    const std::string& current_value,
+    const py::object& hold_value,
+    const py::sequence& queue_value,
+    int combo,
+    bool back_to_back,
+    int b2b_chain,
+    bool can_hold,
+    int beam_width,
+    int depth,
+    bool allow_180,
+    int max_nodes
+) {
+    const oracle::State state = parse_state(
+        rows_value,
+        current_value,
+        hold_value,
+        combo,
+        back_to_back,
+        b2b_chain,
+        can_hold
+    );
+    const std::vector<oracle::Piece> queue = parse_queue(queue_value);
+
+    oracle::begin_reachability_profile();
+    oracle::Result result;
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        py::gil_scoped_release release;
+        result = run_search(state, queue, beam_width, depth, allow_180, max_nodes);
+    } catch (...) {
+        oracle::end_reachability_profile();
+        throw;
+    }
+    const auto stopped = std::chrono::steady_clock::now();
+    const oracle::ReachabilityProfile profile = oracle::end_reachability_profile();
+
+    py::dict output;
+    output["searchSeconds"] = std::chrono::duration<double>(stopped - started).count();
+    output["reachabilitySeconds"] = profile.total_seconds;
+    output["movegenCalls"] = profile.calls;
+    output["generatedMoves"] = profile.generated_moves;
+
+    py::dict reachability;
+    reachability["setupSeconds"] = profile.setup_seconds;
+    reachability["bfsSeconds"] = profile.bfs_seconds;
+    reachability["rotationSeconds"] = profile.rotation_seconds;
+    reachability["landingSeconds"] = profile.landing_seconds;
+    reachability["representativeSeconds"] = profile.representative_seconds;
+    reachability["placementSeconds"] = profile.placement_seconds;
+    output["reachability"] = reachability;
+
+    if (result.found) {
+        py::dict choice = move_dict(result.move);
+        choice["score"] = result.score;
+        output["choice"] = choice;
+    } else {
+        output["choice"] = py::none();
+    }
     return output;
 }
 
@@ -328,6 +402,22 @@ PYBIND11_MODULE(_oracle_native, module) {
     module.def(
         "search",
         &search_native,
+        py::arg("rows"),
+        py::arg("current"),
+        py::arg("hold"),
+        py::arg("queue"),
+        py::arg("combo"),
+        py::arg("back_to_back"),
+        py::arg("b2b_chain"),
+        py::arg("can_hold"),
+        py::arg("beam_width") = 2000,
+        py::arg("depth") = 18,
+        py::arg("allow_180") = true,
+        py::arg("max_nodes") = 8000
+    );
+    module.def(
+        "search_profile",
+        &search_profile_native,
         py::arg("rows"),
         py::arg("current"),
         py::arg("hold"),
