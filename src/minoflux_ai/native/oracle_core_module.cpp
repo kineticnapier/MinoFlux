@@ -83,6 +83,7 @@ TransitionResult transition(
     result.spin_event = event;
     result.perfect_clear = value.pc;
     result.surge_released = released;
+    result.surge_charge = state.b2b_active && state.b2b_chain >= 4 ? state.b2b_chain : 0;
     return result;
 }
 
