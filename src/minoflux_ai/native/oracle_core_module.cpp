@@ -86,6 +86,20 @@ std::vector<Move> reachable_moves(
         const auto stopped = std::chrono::steady_clock::now();
         ++g_reachability_profile.calls;
         g_reachability_profile.generated_moves += native_result.placements.size();
+        g_reachability_profile.bfs_nodes += native_result.counters.bfs_nodes;
+        g_reachability_profile.collision_checks += native_result.counters.collision_checks;
+        g_reachability_profile.collision_evaluations +=
+            native_result.counters.collision_evaluations;
+        g_reachability_profile.collision_cache_hits +=
+            native_result.counters.collision_cache_hits;
+        g_reachability_profile.kick_checks += native_result.counters.kick_checks;
+        g_reachability_profile.landing_queries += native_result.counters.landing_queries;
+        g_reachability_profile.landing_cache_hits +=
+            native_result.counters.landing_cache_hits;
+        g_reachability_profile.representative_nodes +=
+            native_result.counters.representative_nodes;
+        g_reachability_profile.representative_duplicate_skips +=
+            native_result.counters.representative_duplicate_skips;
         g_reachability_profile.total_seconds +=
             std::chrono::duration<double>(stopped - started).count();
         g_reachability_profile.setup_seconds += native_result.timings.setup_seconds;
