@@ -62,6 +62,7 @@ struct Result {
 };
 
 struct TransitionResult {
+    bool valid = false;
     State state{};
     int lines = 0;
     int attack = 0;
