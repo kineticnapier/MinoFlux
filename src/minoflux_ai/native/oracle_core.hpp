@@ -62,13 +62,13 @@ struct Result {
 };
 
 struct TransitionResult {
-    bool valid = false;
     State state{};
     int lines = 0;
     int attack = 0;
     int spin_event = 0;
     bool perfect_clear = false;
     int surge_released = 0;
+    int surge_charge = 0;
 };
 
 Piece piece_from_char(char value);
@@ -80,11 +80,7 @@ std::vector<Move> reachable_moves(
     int max_nodes,
     bool use_hold = false
 );
-TransitionResult transition(
-    const State& root,
-    std::span<const Piece> queue,
-    const Move& move
-);
+TransitionResult transition(const State& root, std::span<const Piece> queue, const Move& move);
 Result search(const State& root, std::span<const Piece> queue, const Config& config);
 
 }  // namespace minoflux::oracle
