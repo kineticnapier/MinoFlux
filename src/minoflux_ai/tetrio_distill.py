@@ -18,6 +18,7 @@ from .neural_dataset import (
     pack_board_rows,
 )
 from .reachability import reachable_placements
+from .search import SearchAction, _held_search_game
 from .tetrio_alignment import ALIGNMENT_FORMAT, CaptureAlignment
 from .tetrio_capture import CAPTURE_DATASET_FORMAT, CaptureSample, normalize_board
 
@@ -145,12 +146,7 @@ def _turn_current(sample: CaptureSample) -> str | None:
 
 
 def _future_queue(items: Sequence[CaptureSample], index: int, count: int) -> tuple[str, ...]:
-    """Reconstruct queue pops after a no-Hold turn from later observed turns.
-
-    A normal turn consumes its next current at the previous lock. A first Hold
-    from an empty slot consumes one additional queue piece during that turn;
-    the placed piece is that additional pop.
-    """
+    """Reconstruct queue pops after this turn from later observed turns."""
 
     pieces: list[str] = []
     for following in items[index + 1 :]:
@@ -169,12 +165,44 @@ def _future_queue(items: Sequence[CaptureSample], index: int, count: int) -> tup
     return tuple(pieces[:count])
 
 
+def _queue_for_sample(
+    items: Sequence[CaptureSample],
+    index: int,
+    queue_length: int,
+) -> tuple[str, ...]:
+    """Reconstruct the queue at the start of an observed turn.
+
+    Encoding a placement needs one next current plus ``queue_length`` preview
+    pieces. An empty-Hold candidate consumes one additional queue piece before
+    the lock, so empty-Hold states need one extra reconstructed pop.
+    """
+
+    sample = items[index]
+    after_lock = queue_length + 1
+    if sample.hold_before is None and sample.used_hold:
+        if sample.piece not in _PIECES:
+            return ()
+        future = _future_queue(items, index, after_lock)
+        if len(future) < after_lock:
+            return ()
+        return (sample.piece, *future)
+
+    needed = after_lock + 1 if sample.hold_before is None else after_lock
+    future = _future_queue(items, index, needed)
+    return future if len(future) >= needed else ()
+
+
 def _game_for_sample(sample: CaptureSample, queue: Sequence[str]) -> Game | None:
-    if sample.board_before is None or sample.piece not in _PIECES:
+    if sample.board_before is None:
+        return None
+    current = _turn_current(sample)
+    if current is None:
+        return None
+    if sample.hold_before is not None and sample.hold_before not in _PIECES:
         return None
     game = Game(0)
     game.board = [list(row) for row in sample.board_before]
-    game.current = sample.piece
+    game.current = current
     game.x, game.y, game.rotation = 3, 1, 0
     game.hold_piece = sample.hold_before
     game.queue = deque(queue)
@@ -198,6 +226,31 @@ def _game_for_sample(sample: CaptureSample, queue: Sequence[str]) -> Game | None
     return None if game.game_over else game
 
 
+def _legal_actions(
+    game: Game,
+    cfg: TetrioDistillConfig,
+) -> tuple[tuple[SearchAction, Game], ...]:
+    actions: list[tuple[SearchAction, Game]] = []
+    direct = reachable_placements(
+        game,
+        allow_180=cfg.allow_180,
+        max_nodes=cfg.reachability_node_limit,
+        include_paths=False,
+    )
+    actions.extend((SearchAction(False, placement), game) for placement in direct)
+
+    held = _held_search_game(game)
+    if held is not None:
+        held_placements = reachable_placements(
+            held,
+            allow_180=cfg.allow_180,
+            max_nodes=cfg.reachability_node_limit,
+            include_paths=False,
+        )
+        actions.extend((SearchAction(True, placement), held) for placement in held_placements)
+    return tuple(actions)
+
+
 def _placement_key(placement) -> tuple[object, ...]:
     return (
         placement.piece,
@@ -209,8 +262,13 @@ def _placement_key(placement) -> tuple[object, ...]:
     )
 
 
-def _alignment_key(alignment: CaptureAlignment) -> tuple[object, ...]:
+def _action_key(action: SearchAction) -> tuple[object, ...]:
+    return (bool(action.use_hold), *_placement_key(action.placement))
+
+
+def _alignment_key(alignment: CaptureAlignment, *, used_hold: bool) -> tuple[object, ...]:
     return (
+        bool(used_hold),
         alignment.piece,
         alignment.x,
         alignment.y,
@@ -239,12 +297,11 @@ def write_tetrio_ranking_dataset(
     output_path: str | Path,
     config: TetrioDistillConfig = TetrioDistillConfig(),
 ) -> dict[str, object]:
-    """Write first-pass neural ranking data from aligned TETR.IO captures.
+    """Write neural ranking data from aligned TETR.IO captures.
 
-    Hold decisions are deliberately excluded in this first pass. The locked
-    piece is treated as the current piece, while the next six queue pops are
-    reconstructed from later observations so the existing neural encoder can
-    produce a normal post-placement context.
+    The pre-turn current, Hold slot, and short queue are reconstructed from
+    neighboring observations. Direct and Hold branches are then enumerated
+    together so the observed Hold choice is part of the ranking target.
     """
 
     cfg = config.normalized()
@@ -273,16 +330,16 @@ def write_tetrio_ranking_dataset(
                 if sample.board_before is None:
                     skip("no-before-board")
                     continue
-                if sample.used_hold:
-                    skip("used-hold")
+                if sample.used_hold is None:
+                    skip("unknown-hold")
                     continue
                 alignment = alignment_by_key.get((sample.group_id, sample.sequence))
                 if alignment is None or alignment.status not in {"exact", "ambiguous"}:
                     skip("unaligned")
                     continue
 
-                queue = _future_queue(items, index, cfg.neural.queue_length + 1)
-                if len(queue) < cfg.neural.queue_length + 1:
+                queue = _queue_for_sample(items, index, cfg.neural.queue_length)
+                if not queue:
                     skip("insufficient-future-queue")
                     continue
                 game = _game_for_sample(sample, queue)
@@ -290,17 +347,15 @@ def write_tetrio_ranking_dataset(
                     skip("invalid-state")
                     continue
 
-                placements = reachable_placements(
-                    game,
-                    allow_180=cfg.allow_180,
-                    max_nodes=cfg.reachability_node_limit,
-                    include_paths=False,
-                )
-                wanted = _alignment_key(alignment)
+                action_branches = _legal_actions(game, cfg)
+                if not action_branches:
+                    skip("no-candidates")
+                    continue
+                wanted = _alignment_key(alignment, used_hold=sample.used_hold)
                 expert_indices = [
-                    placement_index
-                    for placement_index, placement in enumerate(placements)
-                    if _placement_key(placement) == wanted
+                    action_index
+                    for action_index, (action, _branch) in enumerate(action_branches)
+                    if _action_key(action) == wanted
                 ]
                 if not expert_indices:
                     skip("expert-not-reachable")
@@ -309,15 +364,22 @@ def write_tetrio_ranking_dataset(
 
                 prepared: list[NeuralRankingCandidate] = []
                 prepared_raw_indices: list[int] = []
-                for raw_index, placement in enumerate(placements):
-                    state = encode_placement_result(game, placement, cfg.neural)
+                for raw_index, (action, branch) in enumerate(action_branches):
+                    placement = action.placement
+                    state = encode_placement_result(branch, placement, cfg.neural)
                     if state is None:
                         continue
                     prepared.append(
                         NeuralRankingCandidate(
                             board_rows=pack_board_rows(state.board, cfg.neural),
                             context=state.context,
-                            move=(0, placement.piece, placement.x, placement.y, placement.rotation),
+                            move=(
+                                int(action.use_hold),
+                                placement.piece,
+                                placement.x,
+                                placement.y,
+                                placement.rotation,
+                            ),
                             sampling_bucket="tetrio-expert" if raw_index == expert_raw else "tetrio-negative",
                         )
                     )
@@ -349,6 +411,7 @@ def write_tetrio_ranking_dataset(
                     "sequence": sample.sequence,
                     "username": sample.username,
                     "split": sample.split,
+                    "usedHold": bool(sample.used_hold),
                 }
                 stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
                 written += 1
@@ -370,6 +433,6 @@ def write_tetrio_ranking_dataset(
             "reachabilityNodeLimit": cfg.reachability_node_limit,
             "randomSeed": cfg.random_seed,
             "queueLength": cfg.neural.queue_length,
-            "holdDecisions": "excluded",
+            "holdDecisions": "included",
         },
     }
