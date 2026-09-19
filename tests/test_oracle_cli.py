@@ -39,7 +39,7 @@ def test_oracle_profile_cli_reports_native_hotspots(capsys) -> None:
             "--beam",
             "16",
             "--depth",
-            "1",
+            "2",
             "--no-180",
         ]
     )
@@ -51,6 +51,9 @@ def test_oracle_profile_cli_reports_native_hotspots(capsys) -> None:
     assert 0.0 <= result["reachabilitySeconds"] <= result["searchSeconds"]
     assert result["movegenCalls"] > 0
     assert result["generatedMoves"] > 0
+    assert result["movegenCacheHits"] >= 0
+    assert result["movegenCacheMisses"] > 0
+    assert result["movegenCacheHits"] + result["movegenCacheMisses"] >= result["movegenCalls"]
     assert result["reachability"]["bfsSeconds"] >= 0.0
     assert result["reachability"]["landingSeconds"] >= 0.0
 
