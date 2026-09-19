@@ -57,6 +57,13 @@ int register_table(
     return static_cast<int>(g_tables.size() - 1);
 }
 
+const reach::Table& table_for(int table_handle) {
+    if (table_handle < 0 || static_cast<size_t>(table_handle) >= g_tables.size()) {
+        throw std::runtime_error("invalid native reachability table handle");
+    }
+    return *g_tables[static_cast<size_t>(table_handle)];
+}
+
 reach::RunResult execute_run(
     int table_handle,
     const py::sequence& row_values,
@@ -66,12 +73,22 @@ reach::RunResult execute_run(
     int max_nodes,
     bool profile
 ) {
-    if (table_handle < 0 || static_cast<size_t>(table_handle) >= g_tables.size()) {
-        throw std::runtime_error("invalid native reachability table handle");
-    }
-    const auto& table = *g_tables[static_cast<size_t>(table_handle)];
+    const auto& table = table_for(table_handle);
     const auto rows = support::rows_from_python(row_values, table.width, table.height);
     return reach::run(table, rows, start_x, start_y, start_rotation, max_nodes, profile);
+}
+
+reach::RunResult execute_reference_run(
+    int table_handle,
+    const py::sequence& row_values,
+    int start_x,
+    int start_y,
+    int start_rotation,
+    int max_nodes
+) {
+    const auto& table = table_for(table_handle);
+    const auto rows = support::rows_from_python(row_values, table.width, table.height);
+    return reach::run_reference(table, rows, start_x, start_y, start_rotation, max_nodes);
 }
 
 void add_run_metadata(py::dict& output, const reach::RunResult& native_result) {
@@ -210,6 +227,28 @@ py::tuple run_packed_fast(
         native_result.placements.size()
     );
 }
+
+py::tuple run_packed_reference(
+    int table_handle,
+    const py::sequence& rows,
+    int start_x,
+    int start_y,
+    int start_rotation,
+    int max_nodes
+) {
+    const auto native_result = execute_reference_run(
+        table_handle,
+        rows,
+        start_x,
+        start_y,
+        start_rotation,
+        max_nodes
+    );
+    return py::make_tuple(
+        py::bytes(pack_records(native_result.placements)),
+        native_result.placements.size()
+    );
+}
 }  // namespace
 
 PYBIND11_MODULE(_reachability_native, module) {
@@ -260,6 +299,16 @@ PYBIND11_MODULE(_reachability_native, module) {
     module.def(
         "run_packed_fast",
         &run_packed_fast,
+        py::arg("table_handle"),
+        py::arg("rows"),
+        py::arg("start_x"),
+        py::arg("start_y"),
+        py::arg("start_rotation"),
+        py::arg("max_nodes")
+    );
+    module.def(
+        "run_packed_reference",
+        &run_packed_reference,
         py::arg("table_handle"),
         py::arg("rows"),
         py::arg("start_x"),
