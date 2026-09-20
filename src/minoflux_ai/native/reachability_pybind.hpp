@@ -99,18 +99,8 @@ inline std::shared_ptr<Table> table_from_python(
     table->state_group_offsets.reserve(state_count + 1);
     table->state_group_offsets.push_back(0);
     table->group_kick_offsets.push_back(0);
-    size_t groups_per_state = 0;
-    bool uniform_group_count = true;
-    bool first_state = true;
     for (py::handle state_groups_handle : rotation_transitions) {
         py::sequence state_groups = py::reinterpret_borrow<py::sequence>(state_groups_handle);
-        const size_t state_group_count = static_cast<size_t>(py::len(state_groups));
-        if (first_state) {
-            groups_per_state = state_group_count;
-            first_state = false;
-        } else if (state_group_count != groups_per_state) {
-            uniform_group_count = false;
-        }
         for (py::handle kicks_handle : state_groups) {
             py::sequence kicks = py::reinterpret_borrow<py::sequence>(kicks_handle);
             for (py::handle kick_handle : kicks) {
@@ -122,51 +112,6 @@ inline std::shared_ptr<Table> table_from_python(
             table->group_kick_offsets.push_back(static_cast<uint32_t>(table->kick_targets.size()));
         }
         table->state_group_offsets.push_back(static_cast<uint32_t>(table->group_kick_offsets.size() - 1));
-    }
-
-    bool compact_ok =
-        uniform_group_count &&
-        groups_per_state <= 0xffu &&
-        state_count <= kCompactRotationStateLimit &&
-        table->kick_targets.size() <= 0xffffu;
-    if (compact_ok) {
-        for (uint32_t offset : table->group_kick_offsets) {
-            if (offset > 0xffffu) {
-                compact_ok = false;
-                break;
-            }
-        }
-    }
-    if (compact_ok) {
-        table->compact_group_kick_offsets.reserve(table->group_kick_offsets.size());
-        for (uint32_t offset : table->group_kick_offsets) {
-            table->compact_group_kick_offsets.push_back(static_cast<uint16_t>(offset));
-        }
-        table->compact_kicks.reserve(table->kick_targets.size());
-        for (size_t index = 0; index < table->kick_targets.size(); ++index) {
-            const int32_t target = table->kick_targets[index];
-            const int32_t kick = table->kick_indices[index];
-            if (
-                target < 0 ||
-                static_cast<uint32_t>(target) >= kCompactRotationStateLimit ||
-                kick < 0 ||
-                kick > kKickIndexMask
-            ) {
-                compact_ok = false;
-                break;
-            }
-            table->compact_kicks.push_back(static_cast<uint16_t>(
-                (static_cast<uint32_t>(target) << kKickIndexBits) |
-                static_cast<uint32_t>(kick)
-            ));
-        }
-    }
-    if (compact_ok) {
-        table->rotation_groups_per_state = static_cast<uint8_t>(groups_per_state);
-        table->compact_rotation = true;
-    } else {
-        table->compact_group_kick_offsets.clear();
-        table->compact_kicks.clear();
     }
     return table;
 }
