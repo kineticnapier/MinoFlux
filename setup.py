@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+import sys
+
 from setuptools import setup
 from pybind11.setup_helpers import Pybind11Extension, build_ext
+
+
+oracle_compile_args = (
+    ["/O2", "/Ob3", "/Oi", "/Ot"]
+    if sys.platform == "win32"
+    else ["-O3"]
+)
 
 
 setup(
@@ -25,6 +34,7 @@ setup(
                 "src/minoflux_ai/native/oracle_core_module.cpp",
             ],
             cxx_std=20,
+            extra_compile_args=oracle_compile_args,
             optional=True,
         ),
     ],
