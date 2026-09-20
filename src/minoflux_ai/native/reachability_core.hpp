@@ -17,6 +17,7 @@ constexpr uint8_t kCollisionClear = 1;
 constexpr uint8_t kCollisionBlocked = 2;
 constexpr int kKickIndexBits = 3;
 constexpr int kKickIndexMask = (1 << kKickIndexBits) - 1;
+constexpr uint32_t kCompactRotationStateLimit = uint32_t{1} << (16 - kKickIndexBits);
 constexpr size_t kMaskBytes = 32;
 constexpr size_t kPlacementRecordInts = 7;
 constexpr size_t kPlacementRecordBytes = kPlacementRecordInts * sizeof(int32_t);
@@ -47,6 +48,8 @@ struct Table {
     int state_count = 0;
     int limb_count = 0;
     bool piece_is_t = false;
+    bool compact_rotation = false;
+    uint8_t rotation_groups_per_state = 0;
     std::vector<int32_t> state_x;
     std::vector<int32_t> state_y;
     std::vector<int32_t> left_state;
@@ -62,6 +65,8 @@ struct Table {
     std::vector<uint32_t> group_kick_offsets;
     std::vector<int32_t> kick_targets;
     std::vector<int8_t> kick_indices;
+    std::vector<uint16_t> compact_group_kick_offsets;
+    std::vector<uint16_t> compact_kicks;
 };
 
 struct Counters {
@@ -216,7 +221,7 @@ inline bool checked_collision(const Table& table, const Mask256& board, int32_t 
     return blocked;
 }
 
-template <bool Profile>
+template <bool Profile, bool CompactRotation>
 inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes) {
     RunResult result;
     auto& counters = result.counters;
@@ -297,23 +302,46 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         if constexpr (Profile) {
             if (g_profile_detailed_timings) rotation_started = Clock::now();
         }
-        const uint32_t group_begin = table.state_group_offsets[static_cast<size_t>(state_id)];
-        const uint32_t group_end = table.state_group_offsets[static_cast<size_t>(state_id) + 1];
+        uint32_t group_begin = 0;
+        uint32_t group_end = 0;
+        if constexpr (CompactRotation) {
+            group_begin = static_cast<uint32_t>(state_id) * table.rotation_groups_per_state;
+            group_end = group_begin + table.rotation_groups_per_state;
+        } else {
+            group_begin = table.state_group_offsets[static_cast<size_t>(state_id)];
+            group_end = table.state_group_offsets[static_cast<size_t>(state_id) + 1];
+        }
         for (uint32_t group_index = group_begin; group_index < group_end; ++group_index) {
             if constexpr (Profile) ++counters.rotation_groups;
             int32_t successful_state = kNoState;
             int32_t successful_kick = -1;
-            const uint32_t kick_begin = table.group_kick_offsets[static_cast<size_t>(group_index)];
-            const uint32_t kick_end = table.group_kick_offsets[static_cast<size_t>(group_index) + 1];
+            uint32_t kick_begin = 0;
+            uint32_t kick_end = 0;
+            if constexpr (CompactRotation) {
+                kick_begin = table.compact_group_kick_offsets[static_cast<size_t>(group_index)];
+                kick_end = table.compact_group_kick_offsets[static_cast<size_t>(group_index) + 1];
+            } else {
+                kick_begin = table.group_kick_offsets[static_cast<size_t>(group_index)];
+                kick_end = table.group_kick_offsets[static_cast<size_t>(group_index) + 1];
+            }
             for (uint32_t kick_index = kick_begin; kick_index < kick_end; ++kick_index) {
                 if constexpr (Profile) {
                     ++counters.kick_checks;
                     ++counters.rotation_collision_checks;
                 }
-                const int32_t target_state = table.kick_targets[static_cast<size_t>(kick_index)];
+                int32_t target_state = kNoState;
+                int32_t decoded_kick = -1;
+                if constexpr (CompactRotation) {
+                    const uint16_t packed = table.compact_kicks[static_cast<size_t>(kick_index)];
+                    target_state = static_cast<int32_t>(packed >> kKickIndexBits);
+                    decoded_kick = static_cast<int32_t>(packed & kKickIndexMask);
+                } else {
+                    target_state = table.kick_targets[static_cast<size_t>(kick_index)];
+                    decoded_kick = table.kick_indices[static_cast<size_t>(kick_index)];
+                }
                 if (checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) continue;
                 successful_state = target_state;
-                successful_kick = table.kick_indices[static_cast<size_t>(kick_index)];
+                successful_kick = decoded_kick;
                 break;
             }
             if (successful_state == kNoState) continue;
@@ -494,8 +522,14 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
 
 inline RunResult run(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes, bool profile = false) {
     if (static_cast<int>(rows.size()) != table.height) throw std::runtime_error("board row count mismatch");
-    return profile ? run_impl<true>(table, rows, start_x, start_y, start_rotation, max_nodes)
-                   : run_impl<false>(table, rows, start_x, start_y, start_rotation, max_nodes);
+    if (profile) {
+        return table.compact_rotation
+            ? run_impl<true, true>(table, rows, start_x, start_y, start_rotation, max_nodes)
+            : run_impl<true, false>(table, rows, start_x, start_y, start_rotation, max_nodes);
+    }
+    return table.compact_rotation
+        ? run_impl<false, true>(table, rows, start_x, start_y, start_rotation, max_nodes)
+        : run_impl<false, false>(table, rows, start_x, start_y, start_rotation, max_nodes);
 }
 
 inline void finalize_table(Table& table) {
