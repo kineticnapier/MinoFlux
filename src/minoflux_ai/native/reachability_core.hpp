@@ -62,6 +62,8 @@ struct Table {
     std::vector<uint32_t> group_kick_offsets;
     std::vector<int32_t> kick_targets;
     std::vector<int8_t> kick_indices;
+    std::vector<uint64_t> flat_group_ranges;
+    std::vector<uint32_t> flat_kicks;
 };
 
 struct Counters {
@@ -202,7 +204,7 @@ inline bool checked_collision(const Table& table, const Mask256& board, int32_t 
     return blocked;
 }
 
-template <bool Profile>
+template <bool Profile, bool FlatRotation>
 inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes) {
     RunResult result;
     auto& counters = result.counters;
@@ -279,14 +281,31 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         for (uint32_t group_index = group_begin; group_index < group_end; ++group_index) {
             int32_t successful_state = kNoState;
             int32_t successful_kick = -1;
-            const uint32_t kick_begin = table.group_kick_offsets[static_cast<size_t>(group_index)];
-            const uint32_t kick_end = table.group_kick_offsets[static_cast<size_t>(group_index) + 1];
+            uint32_t kick_begin = 0;
+            uint32_t kick_end = 0;
+            if constexpr (FlatRotation) {
+                const uint64_t packed_range = table.flat_group_ranges[static_cast<size_t>(group_index)];
+                kick_begin = static_cast<uint32_t>(packed_range);
+                kick_end = static_cast<uint32_t>(packed_range >> 32);
+            } else {
+                kick_begin = table.group_kick_offsets[static_cast<size_t>(group_index)];
+                kick_end = table.group_kick_offsets[static_cast<size_t>(group_index) + 1];
+            }
             for (uint32_t kick_index = kick_begin; kick_index < kick_end; ++kick_index) {
                 if constexpr (Profile) ++counters.kick_checks;
-                const int32_t target_state = table.kick_targets[static_cast<size_t>(kick_index)];
+                int32_t target_state = kNoState;
+                int32_t candidate_kick = -1;
+                if constexpr (FlatRotation) {
+                    const uint32_t packed_kick = table.flat_kicks[static_cast<size_t>(kick_index)];
+                    target_state = static_cast<int32_t>(packed_kick >> kKickIndexBits);
+                    candidate_kick = static_cast<int32_t>(packed_kick & kKickIndexMask);
+                } else {
+                    target_state = table.kick_targets[static_cast<size_t>(kick_index)];
+                    candidate_kick = table.kick_indices[static_cast<size_t>(kick_index)];
+                }
                 if (checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) continue;
                 successful_state = target_state;
-                successful_kick = table.kick_indices[static_cast<size_t>(kick_index)];
+                successful_kick = candidate_kick;
                 break;
             }
             if (successful_state == kNoState) continue;
@@ -451,8 +470,14 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
 
 inline RunResult run(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes, bool profile = false) {
     if (static_cast<int>(rows.size()) != table.height) throw std::runtime_error("board row count mismatch");
-    return profile ? run_impl<true>(table, rows, start_x, start_y, start_rotation, max_nodes)
-                   : run_impl<false>(table, rows, start_x, start_y, start_rotation, max_nodes);
+    return profile ? run_impl<true, true>(table, rows, start_x, start_y, start_rotation, max_nodes)
+                   : run_impl<false, true>(table, rows, start_x, start_y, start_rotation, max_nodes);
+}
+
+inline RunResult run_rotation_reference(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes, bool profile = false) {
+    if (static_cast<int>(rows.size()) != table.height) throw std::runtime_error("board row count mismatch");
+    return profile ? run_impl<true, false>(table, rows, start_x, start_y, start_rotation, max_nodes)
+                   : run_impl<false, false>(table, rows, start_x, start_y, start_rotation, max_nodes);
 }
 
 inline void finalize_table(Table& table) {
@@ -467,6 +492,32 @@ inline void finalize_table(Table& table) {
         const auto inserted = geometry_lookup.emplace(mask, table.geometry_count);
         if (inserted.second) ++table.geometry_count;
         table.geometry_ids[state_id] = inserted.first->second;
+    }
+}
+
+inline void finalize_rotation_table(Table& table) {
+    if (table.group_kick_offsets.empty()) {
+        table.flat_group_ranges.clear();
+        table.flat_kicks.clear();
+        return;
+    }
+    const size_t group_count = table.group_kick_offsets.size() - 1;
+    table.flat_group_ranges.resize(group_count);
+    for (size_t group_index = 0; group_index < group_count; ++group_index) {
+        const uint32_t begin = table.group_kick_offsets[group_index];
+        const uint32_t end = table.group_kick_offsets[group_index + 1];
+        table.flat_group_ranges[group_index] = static_cast<uint64_t>(begin) |
+            (static_cast<uint64_t>(end) << 32);
+    }
+    table.flat_kicks.resize(table.kick_targets.size());
+    for (size_t kick_index = 0; kick_index < table.kick_targets.size(); ++kick_index) {
+        const int32_t target = table.kick_targets[kick_index];
+        const int32_t index = table.kick_indices[kick_index];
+        if (target < 0 || index < 0 || index > kKickIndexMask) {
+            throw std::runtime_error("rotation kick cannot be packed");
+        }
+        table.flat_kicks[kick_index] =
+            (static_cast<uint32_t>(target) << kKickIndexBits) | static_cast<uint32_t>(index);
     }
 }
 
