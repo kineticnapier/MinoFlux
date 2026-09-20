@@ -18,6 +18,7 @@ class Sample:
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTROL = ROOT.parent / "MinoFlux-group-control"
+DEFAULT_CONTROL_REF = "cadbb1b"
 
 
 def run(cmd: list[str], cwd: Path, *, env: dict[str, str] | None = None) -> None:
@@ -50,14 +51,9 @@ def native_module_path(repo: Path) -> Path | None:
     return matches[0] if matches else None
 
 
-def ensure_control_worktree(control: Path, control_ref: str | None) -> bool:
+def ensure_control_worktree(control: Path, control_ref: str) -> bool:
     if control.is_dir():
         return False
-    if control_ref is None:
-        raise SystemExit(
-            f"control worktree does not exist: {control}\n"
-            "pass --control-ref <commit-or-ref> to create it automatically"
-        )
 
     print(f"[worktree] {control_ref} -> {control}")
     run(
@@ -147,7 +143,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--control-ref",
-        help="create the control worktree from this commit/ref if it does not exist",
+        default=DEFAULT_CONTROL_REF,
+        help=f"commit/ref used when creating the control worktree (default: {DEFAULT_CONTROL_REF})",
     )
     parser.add_argument("--control-name", default="control")
     parser.add_argument("--candidate-name", default="current")
