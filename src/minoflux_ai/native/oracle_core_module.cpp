@@ -95,6 +95,20 @@ std::vector<Move> reachable_moves(
         g_reachability_profile.collision_cache_hits +=
             native_result.counters.collision_cache_hits;
         g_reachability_profile.kick_checks += native_result.counters.kick_checks;
+        g_reachability_profile.movement_edges += native_result.counters.movement_edges;
+        g_reachability_profile.movement_visited_skips +=
+            native_result.counters.movement_visited_skips;
+        g_reachability_profile.movement_collision_checks +=
+            native_result.counters.movement_collision_checks;
+        g_reachability_profile.movement_enqueues += native_result.counters.movement_enqueues;
+        g_reachability_profile.rotation_groups += native_result.counters.rotation_groups;
+        g_reachability_profile.rotation_collision_checks +=
+            native_result.counters.rotation_collision_checks;
+        g_reachability_profile.rotation_successes += native_result.counters.rotation_successes;
+        g_reachability_profile.rotation_geometry_enqueues +=
+            native_result.counters.rotation_geometry_enqueues;
+        g_reachability_profile.landing_collision_checks +=
+            native_result.counters.landing_collision_checks;
         g_reachability_profile.landing_queries += native_result.counters.landing_queries;
         g_reachability_profile.landing_cache_hits +=
             native_result.counters.landing_cache_hits;
