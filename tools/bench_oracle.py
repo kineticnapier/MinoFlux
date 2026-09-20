@@ -16,6 +16,16 @@ class Sample:
     seconds: float
 
 
+@dataclass(frozen=True)
+class PairResult:
+    control_seconds: float
+    candidate_seconds: float
+
+    @property
+    def improvement_percent(self) -> float:
+        return (1.0 - self.candidate_seconds / self.control_seconds) * 100.0
+
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTROL = ROOT.parent / "MinoFlux-group-control"
 DEFAULT_CONTROL_REF = "cadbb1b"
@@ -31,6 +41,7 @@ def build_native(repo: Path) -> None:
         [
             "uv",
             "run",
+            "--active",
             "--with",
             "pybind11",
             "--with",
@@ -63,15 +74,9 @@ def ensure_control_worktree(control: Path, control_ref: str) -> bool:
     return True
 
 
-def benchmark_once(repo: Path, name: str, args: argparse.Namespace) -> Sample:
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(repo / "src")
-
-    cmd = [
-        "uv",
-        "run",
-        "--no-sync",
-        "python",
+def oracle_command(args: argparse.Namespace) -> list[str]:
+    return [
+        sys.executable,
         "-m",
         "minoflux.neural_dispatch_cli",
         "oracle-smoke",
@@ -85,24 +90,51 @@ def benchmark_once(repo: Path, name: str, args: argparse.Namespace) -> Sample:
         str(args.depth),
     ]
 
+
+def oracle_env(repo: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    source_dir = str(repo / "src")
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = source_dir if not existing else source_dir + os.pathsep + existing
+    return env
+
+
+def run_oracle(repo: Path, args: argparse.Namespace) -> float:
+    cmd = oracle_command(args)
     started = time.perf_counter()
     completed = subprocess.run(
         cmd,
         cwd=repo,
-        env=env,
+        env=oracle_env(repo),
         stdout=subprocess.DEVNULL,
     )
     elapsed = time.perf_counter() - started
     if completed.returncode != 0:
         raise subprocess.CalledProcessError(completed.returncode, cmd)
+    return elapsed
 
+
+def benchmark_once(repo: Path, name: str, args: argparse.Namespace) -> Sample:
+    elapsed = run_oracle(repo, args)
     positions = args.games * args.max_pieces
     rate = positions / elapsed if elapsed > 0 else float("inf")
     print(f"{name:16} {elapsed:8.3f}s  {rate:8.4f} pos/s")
     return Sample(name=name, seconds=elapsed)
 
 
-def summarize(samples: list[Sample], baseline_name: str, candidate_name: str) -> None:
+def warm_up(control: Path, current: Path, args: argparse.Namespace) -> None:
+    print("[warmup] control")
+    run_oracle(control, args)
+    print("[warmup] current")
+    run_oracle(current, args)
+
+
+def summarize(
+    samples: list[Sample],
+    pairs: list[PairResult],
+    baseline_name: str,
+    candidate_name: str,
+) -> None:
     groups: dict[str, list[float]] = {}
     for sample in samples:
         groups.setdefault(sample.name, []).append(sample.seconds)
@@ -126,9 +158,15 @@ def summarize(samples: list[Sample], baseline_name: str, candidate_name: str) ->
     avg_improvement = (1.0 - candidate_avg / baseline_avg) * 100.0
     median_improvement = (1.0 - candidate_median / baseline_median) * 100.0
 
+    pair_improvements = [pair.improvement_percent for pair in pairs]
+    pair_mean = statistics.fmean(pair_improvements)
+    pair_median = statistics.median(pair_improvements)
+
     print()
     print(f"Average improvement: {avg_improvement:+.2f}%")
     print(f"Median improvement:  {median_improvement:+.2f}%")
+    print(f"Paired improvement:  mean {pair_mean:+.2f}% / median {pair_median:+.2f}%")
+    print("Pair deltas:         " + "  ".join(f"{value:+.2f}%" for value in pair_improvements))
 
 
 def parse_args() -> argparse.Namespace:
@@ -152,10 +190,11 @@ def parse_args() -> argparse.Namespace:
         "--pairs",
         type=int,
         default=5,
-        help="number of ABBA pairs; 5 gives 10 runs per version",
+        help="number of ABBA pairs; 5 gives 10 measured runs per version",
     )
     parser.add_argument("--build-current", action="store_true")
     parser.add_argument("--build-control", action="store_true")
+    parser.add_argument("--no-warmup", action="store_true")
     parser.add_argument("--games", type=int, default=1)
     parser.add_argument("--max-pieces", type=int, default=5)
     parser.add_argument("--beam", type=int, default=2000)
@@ -187,15 +226,28 @@ def main() -> int:
             )
         print(f"[{label}] {module}")
 
+    if not args.no_warmup:
+        print()
+        warm_up(control, current, args)
+
     print()
     samples: list[Sample] = []
+    pairs: list[PairResult] = []
     for _ in range(args.pairs):
-        samples.append(benchmark_once(control, args.control_name, args))
-        samples.append(benchmark_once(current, args.candidate_name, args))
-        samples.append(benchmark_once(current, args.candidate_name, args))
-        samples.append(benchmark_once(control, args.control_name, args))
+        control_a = benchmark_once(control, args.control_name, args)
+        candidate_a = benchmark_once(current, args.candidate_name, args)
+        candidate_b = benchmark_once(current, args.candidate_name, args)
+        control_b = benchmark_once(control, args.control_name, args)
 
-    summarize(samples, args.control_name, args.candidate_name)
+        samples.extend((control_a, candidate_a, candidate_b, control_b))
+        pairs.append(
+            PairResult(
+                control_seconds=(control_a.seconds + control_b.seconds) / 2.0,
+                candidate_seconds=(candidate_a.seconds + candidate_b.seconds) / 2.0,
+            )
+        )
+
+    summarize(samples, pairs, args.control_name, args.candidate_name)
     return 0
 
 
