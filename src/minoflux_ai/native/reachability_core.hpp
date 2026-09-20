@@ -76,6 +76,7 @@ struct Counters {
     uint64_t movement_enqueues = 0;
     uint64_t rotation_groups = 0;
     uint64_t rotation_collision_checks = 0;
+    uint64_t rotation_known_clear_skips = 0;
     uint64_t rotation_successes = 0;
     uint64_t rotation_geometry_enqueues = 0;
     uint64_t landing_collision_checks = 0;
@@ -306,12 +307,15 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             const uint32_t kick_begin = table.group_kick_offsets[static_cast<size_t>(group_index)];
             const uint32_t kick_end = table.group_kick_offsets[static_cast<size_t>(group_index) + 1];
             for (uint32_t kick_index = kick_begin; kick_index < kick_end; ++kick_index) {
-                if constexpr (Profile) {
-                    ++counters.kick_checks;
-                    ++counters.rotation_collision_checks;
-                }
+                if constexpr (Profile) ++counters.kick_checks;
                 const int32_t target_state = table.kick_targets[static_cast<size_t>(kick_index)];
-                if (checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) continue;
+                const bool known_clear = scratch.state_depths[static_cast<size_t>(target_state)] != kNoState;
+                if (known_clear) {
+                    if constexpr (Profile) ++counters.rotation_known_clear_skips;
+                } else {
+                    if constexpr (Profile) ++counters.rotation_collision_checks;
+                    if (checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) continue;
+                }
                 successful_state = target_state;
                 successful_kick = table.kick_indices[static_cast<size_t>(kick_index)];
                 break;
