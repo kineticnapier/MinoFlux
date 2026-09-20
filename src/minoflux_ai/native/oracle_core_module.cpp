@@ -104,6 +104,8 @@ std::vector<Move> reachable_moves(
         g_reachability_profile.rotation_groups += native_result.counters.rotation_groups;
         g_reachability_profile.rotation_collision_checks +=
             native_result.counters.rotation_collision_checks;
+        g_reachability_profile.rotation_known_clear_skips +=
+            native_result.counters.rotation_known_clear_skips;
         g_reachability_profile.rotation_successes += native_result.counters.rotation_successes;
         g_reachability_profile.rotation_geometry_enqueues +=
             native_result.counters.rotation_geometry_enqueues;
