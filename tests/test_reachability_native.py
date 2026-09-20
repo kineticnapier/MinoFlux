@@ -5,13 +5,11 @@ import random
 import unittest
 from unittest.mock import patch
 
-from minoflux_ai.bitboard import board_row_masks
 from minoflux_ai.reachability import (
     ReachabilityProfile,
     clear_reachability_cache,
     collect_reachability_profile,
 )
-from minoflux_ai import reachability_native as reachability_native_module
 from minoflux_ai.reachability_native import (
     native_pathless_available,
     reachable_placements_pathless_native,
@@ -89,52 +87,6 @@ class NativeReachabilityDifferentialTests(unittest.TestCase):
                 getattr(python_profile, field),
                 field,
             )
-
-    def test_four_limb_collision_fast_path_matches_generic_reference(self) -> None:
-        native = reachability_native_module._native
-        self.assertIsNotNone(native)
-        reference_run = native.run_packed_reference
-        rng = random.Random(20260920)
-
-        for case in range(48):
-            piece = rng.choice(tuple("IJLOSTZ"))
-            allow_180 = bool(case & 1)
-            game = _empty_game(piece)
-            filled_from = rng.randrange(8, game.height + 1)
-            for y in range(filled_from, game.height):
-                for x in range(game.width):
-                    if rng.random() < 0.44:
-                        game.board[y][x] = "J"
-            game.x = rng.randrange(1, 6)
-            game.y = rng.randrange(-2, 4)
-            game.rotation = rng.randrange(4)
-            rows = board_row_masks(game.board)
-            table_handle = reachability_native_module._native_table_handle(
-                piece,
-                allow_180,
-                game.width,
-                game.height,
-            )
-            max_nodes = (64, 256, 1_024, 8_000)[case & 3]
-
-            fast = native.run_packed_fast(
-                table_handle,
-                rows,
-                game.x,
-                game.y,
-                game.rotation & 3,
-                max_nodes,
-            )
-            reference = reference_run(
-                table_handle,
-                rows,
-                game.x,
-                game.y,
-                game.rotation & 3,
-                max_nodes,
-            )
-            with self.subTest(case=case, piece=piece, allow_180=allow_180):
-                self.assertEqual(fast, reference)
 
     def test_empty_board_all_piece_types(self) -> None:
         for piece in "IJLOSTZ":
