@@ -342,6 +342,7 @@ py::dict search_profile_native(
     const oracle::ReachabilityProfile reachability_profile = oracle::end_reachability_profile();
 
     py::dict output;
+    output["profileMode"] = "coarse-v1";
     output["searchSeconds"] = std::chrono::duration<double>(stopped - started).count();
     output["reachabilitySeconds"] = reachability_profile.total_seconds;
     output["movegenCalls"] = reachability_profile.calls;
@@ -355,6 +356,10 @@ py::dict search_profile_native(
     output["dedupReplacements"] = search_profile.dedup_replacements;
 
     py::dict reachability;
+    reachability["coarseSetupSeconds"] = reachability_profile.setup_seconds;
+    reachability["coarseBfsSeconds"] = reachability_profile.bfs_seconds;
+    reachability["coarseRepresentativeSeconds"] = reachability_profile.representative_seconds;
+    reachability["coarsePlacementSeconds"] = reachability_profile.placement_seconds;
     reachability["setupSeconds"] = reachability_profile.setup_seconds;
     reachability["bfsSeconds"] = reachability_profile.bfs_seconds;
     reachability["rotationSeconds"] = reachability_profile.rotation_seconds;
