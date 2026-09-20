@@ -47,11 +47,13 @@ void register_reachability_table(
 
 void begin_reachability_profile() {
     g_reachability_profile = ReachabilityProfile{};
+    reach::set_profile_detailed_timings(false);
     g_reachability_profile_enabled = true;
 }
 
 ReachabilityProfile end_reachability_profile() {
     g_reachability_profile_enabled = false;
+    reach::set_profile_detailed_timings(true);
     return g_reachability_profile;
 }
 
