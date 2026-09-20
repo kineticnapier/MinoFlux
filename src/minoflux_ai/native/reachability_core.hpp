@@ -265,9 +265,6 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
     size_t frontier_index = 0;
     int reachable_count = 1;
     const int budget = std::max(1, max_nodes);
-    const uint32_t rotation_groups_per_state = table.state_group_offsets.size() > 1
-        ? table.state_group_offsets[1]
-        : 0;
     if constexpr (Profile) timings.setup_seconds = seconds_between(setup_started, Clock::now());
     const auto bfs_started = Clock::now();
     while (frontier_index < scratch.frontier.size() && reachable_count <= budget) {
@@ -300,8 +297,8 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         if constexpr (Profile) {
             if (g_profile_detailed_timings) rotation_started = Clock::now();
         }
-        const uint32_t group_begin = static_cast<uint32_t>(state_id) * rotation_groups_per_state;
-        const uint32_t group_end = group_begin + rotation_groups_per_state;
+        const uint32_t group_begin = table.state_group_offsets[static_cast<size_t>(state_id)];
+        const uint32_t group_end = table.state_group_offsets[static_cast<size_t>(state_id) + 1];
         for (uint32_t group_index = group_begin; group_index < group_end; ++group_index) {
             if constexpr (Profile) ++counters.rotation_groups;
             int32_t successful_state = kNoState;
