@@ -7,7 +7,7 @@ from pybind11.setup_helpers import Pybind11Extension, build_ext
 
 
 oracle_compile_args = (
-    ["/O2", "/Ob3", "/Oi", "/Ot", "/arch:AVX2"]
+    ["/O2", "/Ob3", "/Oi", "/Ot"]
     if sys.platform == "win32"
     else ["-O3"]
 )
