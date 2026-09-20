@@ -73,6 +73,7 @@ def test_oracle_profile_cli_reports_native_hotspots(capsys) -> None:
     assert reachability["movementEnqueues"] > 0
     assert reachability["rotationGroups"] > 0
     assert reachability["rotationCollisionChecks"] >= 0
+    assert reachability["rotationKnownClearSkips"] >= 0
     assert reachability["rotationSuccesses"] >= 0
     assert reachability["rotationGeometryEnqueues"] >= 0
     assert reachability["landingCollisionChecks"] > 0
@@ -80,7 +81,10 @@ def test_oracle_profile_cli_reports_native_hotspots(capsys) -> None:
     assert reachability["landingCacheHits"] >= 0
     assert reachability["representativeNodes"] > 0
     assert reachability["representativeDuplicateSkips"] >= 0
-    assert reachability["rotationCollisionChecks"] == reachability["kickChecks"]
+    assert (
+        reachability["rotationCollisionChecks"] + reachability["rotationKnownClearSkips"]
+        == reachability["kickChecks"]
+    )
     assert reachability["movementEnqueues"] <= reachability["movementCollisionChecks"]
     assert reachability["rotationGeometryEnqueues"] <= reachability["rotationSuccesses"]
 
