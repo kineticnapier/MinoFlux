@@ -462,27 +462,15 @@ struct StateHash {
             hash ^= value;
             hash *= 1099511628211ULL;
         };
-
-        static_assert(kHeight % 6 == 0);
-        static_assert(kWidth * 6 <= 64);
-        for (size_t base = 0; base < static_cast<size_t>(kHeight); base += 6) {
-            uint64_t packed = 0;
-            for (size_t offset = 0; offset < 6; ++offset) {
-                packed |=
-                    static_cast<uint64_t>(state.rows[base + offset] & kFullRow)
-                    << (offset * kWidth);
-            }
-            mix(packed);
+        for (uint16_t row : state.rows) {
+            mix(row);
         }
-
-        uint64_t metadata =
-            (static_cast<uint64_t>(static_cast<uint8_t>(state.current) & 0x0f)) |
-            (static_cast<uint64_t>(static_cast<uint8_t>(state.hold) & 0x0f) << 4) |
-            (static_cast<uint64_t>(state.queue_index) << 8) |
-            (static_cast<uint64_t>(static_cast<uint16_t>(state.combo)) << 24) |
-            (static_cast<uint64_t>(state.b2b_chain) << 40) |
-            (static_cast<uint64_t>(state.flags) << 56);
-        mix(metadata);
+        mix(static_cast<uint8_t>(state.current));
+        mix(static_cast<uint8_t>(state.hold));
+        mix(state.queue_index);
+        mix(static_cast<uint16_t>(state.combo));
+        mix(state.b2b_chain);
+        mix(state.flags);
         return static_cast<size_t>(hash ^ (hash >> 32));
     }
 };
