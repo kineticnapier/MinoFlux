@@ -93,6 +93,15 @@ struct ReachabilityProfile {
     uint64_t collision_evaluations = 0;
     uint64_t collision_cache_hits = 0;
     uint64_t kick_checks = 0;
+    uint64_t movement_edges = 0;
+    uint64_t movement_visited_skips = 0;
+    uint64_t movement_collision_checks = 0;
+    uint64_t movement_enqueues = 0;
+    uint64_t rotation_groups = 0;
+    uint64_t rotation_collision_checks = 0;
+    uint64_t rotation_successes = 0;
+    uint64_t rotation_geometry_enqueues = 0;
+    uint64_t landing_collision_checks = 0;
     uint64_t landing_queries = 0;
     uint64_t landing_cache_hits = 0;
     uint64_t representative_nodes = 0;
