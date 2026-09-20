@@ -50,6 +50,23 @@ def native_module_path(repo: Path) -> Path | None:
     return matches[0] if matches else None
 
 
+def ensure_control_worktree(control: Path, control_ref: str | None) -> bool:
+    if control.is_dir():
+        return False
+    if control_ref is None:
+        raise SystemExit(
+            f"control worktree does not exist: {control}\n"
+            "pass --control-ref <commit-or-ref> to create it automatically"
+        )
+
+    print(f"[worktree] {control_ref} -> {control}")
+    run(
+        ["git", "worktree", "add", "--detach", str(control), control_ref],
+        ROOT,
+    )
+    return True
+
+
 def benchmark_once(repo: Path, name: str, args: argparse.Namespace) -> Sample:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(repo / "src")
@@ -128,6 +145,10 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_CONTROL,
         help=f"control worktree (default: {DEFAULT_CONTROL})",
     )
+    parser.add_argument(
+        "--control-ref",
+        help="create the control worktree from this commit/ref if it does not exist",
+    )
     parser.add_argument("--control-name", default="control")
     parser.add_argument("--candidate-name", default="current")
     parser.add_argument(
@@ -152,12 +173,12 @@ def main() -> int:
 
     if args.pairs <= 0:
         raise SystemExit("--pairs must be positive")
-    if not control.is_dir():
-        raise SystemExit(f"control worktree does not exist: {control}")
+
+    created_control = ensure_control_worktree(control, args.control_ref)
 
     if args.build_current:
         build_native(current)
-    if args.build_control:
+    if args.build_control or created_control:
         build_native(control)
 
     for label, repo in ((args.candidate_name, current), (args.control_name, control)):
