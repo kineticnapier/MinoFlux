@@ -75,12 +75,11 @@ reach::RunResult execute_run(
 }
 
 void add_run_metadata(py::dict& output, const reach::RunResult& native_result) {
-    const uint64_t logical_known_clear = native_result.counters.rotation_known_clear_skips;
     py::dict counters;
     counters["bfsNodes"] = native_result.counters.bfs_nodes;
-    counters["collisionChecks"] = native_result.counters.collision_checks + logical_known_clear;
+    counters["collisionChecks"] = native_result.counters.collision_checks;
     counters["collisionEvaluations"] = native_result.counters.collision_evaluations;
-    counters["collisionCacheHits"] = native_result.counters.collision_cache_hits + logical_known_clear;
+    counters["collisionCacheHits"] = native_result.counters.collision_cache_hits;
     counters["kickChecks"] = native_result.counters.kick_checks;
     counters["landingQueries"] = native_result.counters.landing_queries;
     counters["landingCacheHits"] = native_result.counters.landing_cache_hits;

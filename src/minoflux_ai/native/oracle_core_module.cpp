@@ -86,16 +86,14 @@ std::vector<Move> reachable_moves(
     );
     if (profiling) {
         const auto stopped = std::chrono::steady_clock::now();
-        const uint64_t logical_known_clear = native_result.counters.rotation_known_clear_skips;
         ++g_reachability_profile.calls;
         g_reachability_profile.generated_moves += native_result.placements.size();
         g_reachability_profile.bfs_nodes += native_result.counters.bfs_nodes;
-        g_reachability_profile.collision_checks +=
-            native_result.counters.collision_checks + logical_known_clear;
+        g_reachability_profile.collision_checks += native_result.counters.collision_checks;
         g_reachability_profile.collision_evaluations +=
             native_result.counters.collision_evaluations;
         g_reachability_profile.collision_cache_hits +=
-            native_result.counters.collision_cache_hits + logical_known_clear;
+            native_result.counters.collision_cache_hits;
         g_reachability_profile.kick_checks += native_result.counters.kick_checks;
         g_reachability_profile.movement_edges += native_result.counters.movement_edges;
         g_reachability_profile.movement_visited_skips +=
@@ -106,7 +104,6 @@ std::vector<Move> reachable_moves(
         g_reachability_profile.rotation_groups += native_result.counters.rotation_groups;
         g_reachability_profile.rotation_collision_checks +=
             native_result.counters.rotation_collision_checks;
-        g_reachability_profile.rotation_known_clear_skips += logical_known_clear;
         g_reachability_profile.rotation_successes += native_result.counters.rotation_successes;
         g_reachability_profile.rotation_geometry_enqueues +=
             native_result.counters.rotation_geometry_enqueues;
