@@ -47,6 +47,7 @@ def test_oracle_profile_cli_reports_native_hotspots(capsys) -> None:
     assert code == 0
     result = json.loads(capsys.readouterr().out)
     assert result["teacher"] == "minoflux-native-oracle"
+    assert result["profileMode"] == "coarse-v1"
     assert result["searchSeconds"] > 0.0
     assert 0.0 <= result["reachabilitySeconds"] <= result["searchSeconds"]
     assert result["movegenCalls"] > 0
@@ -57,8 +58,10 @@ def test_oracle_profile_cli_reports_native_hotspots(capsys) -> None:
     assert result["pruneSeconds"] >= 0.0
     assert result["expandedChildren"] > 0
     reachability = result["reachability"]
-    assert reachability["bfsSeconds"] >= 0.0
-    assert reachability["landingSeconds"] >= 0.0
+    assert reachability["coarseSetupSeconds"] >= 0.0
+    assert reachability["coarseBfsSeconds"] > 0.0
+    assert reachability["coarseRepresentativeSeconds"] > 0.0
+    assert reachability["coarsePlacementSeconds"] >= 0.0
     assert reachability["bfsNodes"] > 0
     assert reachability["collisionChecks"] > 0
     assert reachability["collisionEvaluations"] > 0
