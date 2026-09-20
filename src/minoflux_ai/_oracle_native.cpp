@@ -371,6 +371,15 @@ py::dict search_profile_native(
     reachability["collisionEvaluations"] = reachability_profile.collision_evaluations;
     reachability["collisionCacheHits"] = reachability_profile.collision_cache_hits;
     reachability["kickChecks"] = reachability_profile.kick_checks;
+    reachability["movementEdges"] = reachability_profile.movement_edges;
+    reachability["movementVisitedSkips"] = reachability_profile.movement_visited_skips;
+    reachability["movementCollisionChecks"] = reachability_profile.movement_collision_checks;
+    reachability["movementEnqueues"] = reachability_profile.movement_enqueues;
+    reachability["rotationGroups"] = reachability_profile.rotation_groups;
+    reachability["rotationCollisionChecks"] = reachability_profile.rotation_collision_checks;
+    reachability["rotationSuccesses"] = reachability_profile.rotation_successes;
+    reachability["rotationGeometryEnqueues"] = reachability_profile.rotation_geometry_enqueues;
+    reachability["landingCollisionChecks"] = reachability_profile.landing_collision_checks;
     reachability["landingQueries"] = reachability_profile.landing_queries;
     reachability["landingCacheHits"] = reachability_profile.landing_cache_hits;
     reachability["representativeNodes"] = reachability_profile.representative_nodes;
