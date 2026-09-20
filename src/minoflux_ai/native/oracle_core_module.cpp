@@ -65,10 +65,9 @@ std::vector<Move> reachable_moves(
     bool use_hold
 ) {
     const reach::Table& table = table_for(piece, allow_180);
-    std::vector<uint64_t> native_rows;
-    native_rows.reserve(kHeight);
-    for (uint16_t row : rows) {
-        native_rows.push_back(row);
+    thread_local std::vector<uint64_t> native_rows(static_cast<size_t>(kHeight));
+    for (size_t index = 0; index < static_cast<size_t>(kHeight); ++index) {
+        native_rows[index] = rows[index];
     }
 
     const bool profiling = g_reachability_profile_enabled;
