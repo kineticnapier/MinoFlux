@@ -128,6 +128,11 @@ struct Scratch {
 };
 
 inline thread_local Scratch g_scratch;
+inline thread_local bool g_profile_detailed_timings = true;
+
+inline void set_profile_detailed_timings(bool enabled) noexcept {
+    g_profile_detailed_timings = enabled;
+}
 
 inline double seconds_between(Clock::time_point start, Clock::time_point end) {
     return std::chrono::duration<double>(end - start).count();
@@ -273,7 +278,9 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             }
         }
         Clock::time_point rotation_started{};
-        if constexpr (Profile) rotation_started = Clock::now();
+        if constexpr (Profile) {
+            if (g_profile_detailed_timings) rotation_started = Clock::now();
+        }
         const uint32_t group_begin = table.state_group_offsets[static_cast<size_t>(state_id)];
         const uint32_t group_end = table.state_group_offsets[static_cast<size_t>(state_id) + 1];
         for (uint32_t group_index = group_begin; group_index < group_end; ++group_index) {
@@ -313,7 +320,11 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
                 scratch.frontier.push_back(successful_state);
             }
         }
-        if constexpr (Profile) timings.rotation_seconds += seconds_between(rotation_started, Clock::now());
+        if constexpr (Profile) {
+            if (g_profile_detailed_timings) {
+                timings.rotation_seconds += seconds_between(rotation_started, Clock::now());
+            }
+        }
         if (reachable_count > budget) break;
     }
     if constexpr (Profile) timings.bfs_seconds = seconds_between(bfs_started, Clock::now());
@@ -352,12 +363,19 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
     const auto representative_started = Clock::now();
     auto landing_for = [&](int32_t state_id) -> int32_t {
         Clock::time_point landing_started{};
-        if constexpr (Profile) { ++counters.landing_queries; landing_started = Clock::now(); }
+        if constexpr (Profile) {
+            ++counters.landing_queries;
+            if (g_profile_detailed_timings) landing_started = Clock::now();
+        }
         int32_t final_state = scratch.landing_state[static_cast<size_t>(state_id)];
         if (final_state != kNoLanding) {
             if constexpr (Profile) ++counters.landing_cache_hits;
         } else final_state = compute_landing(state_id);
-        if constexpr (Profile) timings.landing_seconds += seconds_between(landing_started, Clock::now());
+        if constexpr (Profile) {
+            if (g_profile_detailed_timings) {
+                timings.landing_seconds += seconds_between(landing_started, Clock::now());
+            }
+        }
         return final_state;
     };
     if (!table.piece_is_t) {
@@ -435,7 +453,9 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
     }
     if constexpr (Profile) {
         const double representative_total = seconds_between(representative_started, Clock::now());
-        timings.representative_seconds = std::max(0.0, representative_total - timings.landing_seconds);
+        timings.representative_seconds = g_profile_detailed_timings
+            ? std::max(0.0, representative_total - timings.landing_seconds)
+            : representative_total;
     }
     const auto placement_started = Clock::now();
     result.placements.reserve(scratch.touched_geometry_ids.size());
