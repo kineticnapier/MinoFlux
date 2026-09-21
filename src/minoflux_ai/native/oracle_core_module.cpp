@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -10,9 +11,19 @@ namespace minoflux::oracle {
 namespace {
 namespace reach = minoflux::reachability;
 
+constexpr uint64_t kDetailedProfileSampleStride = 257;
+
 std::array<std::shared_ptr<const reach::Table>, 14> g_reachability_tables{};
 thread_local bool g_reachability_profile_enabled = false;
 thread_local ReachabilityProfile g_reachability_profile{};
+thread_local uint64_t g_detailed_profile_sample_calls = 0;
+thread_local double g_sampled_rotation_seconds = 0.0;
+thread_local double g_sampled_landing_seconds = 0.0;
+thread_local double g_sampled_representative_seconds = 0.0;
+
+bool sample_detailed_profile(uint64_t call_index) noexcept {
+    return call_index % kDetailedProfileSampleStride == 0;
+}
 
 size_t table_index(Piece piece, bool allow_180) {
     const int value = static_cast<int>(piece);
@@ -47,13 +58,26 @@ void register_reachability_table(
 
 void begin_reachability_profile() {
     g_reachability_profile = ReachabilityProfile{};
-    reach::set_profile_detailed_timings(true);
+    g_detailed_profile_sample_calls = 0;
+    g_sampled_rotation_seconds = 0.0;
+    g_sampled_landing_seconds = 0.0;
+    g_sampled_representative_seconds = 0.0;
+    reach::set_profile_detailed_timings(false);
     g_reachability_profile_enabled = true;
 }
 
 ReachabilityProfile end_reachability_profile() {
     g_reachability_profile_enabled = false;
     reach::set_profile_detailed_timings(true);
+    if (g_detailed_profile_sample_calls != 0) {
+        const double scale =
+            static_cast<double>(g_reachability_profile.calls) /
+            static_cast<double>(g_detailed_profile_sample_calls);
+        g_reachability_profile.rotation_seconds = g_sampled_rotation_seconds * scale;
+        g_reachability_profile.landing_seconds = g_sampled_landing_seconds * scale;
+        g_reachability_profile.representative_seconds =
+            g_sampled_representative_seconds * scale;
+    }
     return g_reachability_profile;
 }
 
@@ -72,6 +96,11 @@ std::vector<Move> reachable_moves(
     }
 
     const bool profiling = g_reachability_profile_enabled;
+    const bool detailed_sample =
+        profiling && sample_detailed_profile(g_reachability_profile.calls);
+    if (profiling) {
+        reach::set_profile_detailed_timings(detailed_sample);
+    }
     const auto started = profiling
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
@@ -120,12 +149,15 @@ std::vector<Move> reachable_moves(
             std::chrono::duration<double>(stopped - started).count();
         g_reachability_profile.setup_seconds += native_result.timings.setup_seconds;
         g_reachability_profile.bfs_seconds += native_result.timings.bfs_seconds;
-        g_reachability_profile.rotation_seconds += native_result.timings.rotation_seconds;
-        g_reachability_profile.landing_seconds += native_result.timings.landing_seconds;
-        g_reachability_profile.representative_seconds +=
-            native_result.timings.representative_seconds;
         g_reachability_profile.placement_seconds +=
             native_result.timings.placement_seconds;
+        if (detailed_sample) {
+            ++g_detailed_profile_sample_calls;
+            g_sampled_rotation_seconds += native_result.timings.rotation_seconds;
+            g_sampled_landing_seconds += native_result.timings.landing_seconds;
+            g_sampled_representative_seconds +=
+                native_result.timings.representative_seconds;
+        }
     }
 
     std::vector<Move> result;
