@@ -304,28 +304,16 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             int32_t successful_kick = -1;
             const uint32_t kick_begin = table.group_kick_offsets[static_cast<size_t>(group_index)];
             const uint32_t kick_end = table.group_kick_offsets[static_cast<size_t>(group_index) + 1];
-            if (kick_begin < kick_end) {
+            for (uint32_t kick_index = kick_begin; kick_index < kick_end; ++kick_index) {
                 if constexpr (Profile) {
                     ++counters.kick_checks;
                     ++counters.rotation_collision_checks;
                 }
-                const int32_t first_target = table.kick_targets[static_cast<size_t>(kick_begin)];
-                if (!checked_collision<Profile>(table, board, first_target, scratch.collision_cache, counters)) {
-                    successful_state = first_target;
-                    successful_kick = table.kick_indices[static_cast<size_t>(kick_begin)];
-                } else {
-                    for (uint32_t kick_index = kick_begin + 1; kick_index < kick_end; ++kick_index) {
-                        if constexpr (Profile) {
-                            ++counters.kick_checks;
-                            ++counters.rotation_collision_checks;
-                        }
-                        const int32_t target_state = table.kick_targets[static_cast<size_t>(kick_index)];
-                        if (checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) continue;
-                        successful_state = target_state;
-                        successful_kick = table.kick_indices[static_cast<size_t>(kick_index)];
-                        break;
-                    }
-                }
+                const int32_t target_state = table.kick_targets[static_cast<size_t>(kick_index)];
+                if (checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) continue;
+                successful_state = target_state;
+                successful_kick = table.kick_indices[static_cast<size_t>(kick_index)];
+                break;
             }
             if (successful_state == kNoState) continue;
             if constexpr (Profile) ++counters.rotation_successes;
