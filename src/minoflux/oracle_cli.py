@@ -64,12 +64,13 @@ def _annotate_detailed_profile(result: dict[str, object]) -> None:
     reachability["representativeCoreSeconds"] = representative_seconds
     reachability["representativeTotalSeconds"] = representative_seconds + landing_seconds
     reachability["coarseRepresentativeSeconds"] = representative_seconds + landing_seconds
-    result["profileMode"] = "sampled-detailed-v1"
+    result["profileMode"] = "sampled-ratio-v2"
     result["timingSampleStride"] = 257
     result["timingNote"] = (
-        "Rotation, landing, and representative-core timings are extrapolated from "
-        "one detailed reachability call per 257 calls; use oracle-smoke A/B timings "
-        "for final performance decisions."
+        "Rotation/BFS and landing/representative ratios are measured on one detailed "
+        "reachability call per 257 calls, then projected onto the low-overhead coarse "
+        "BFS and representative totals. Use oracle-smoke A/B timings for final "
+        "performance decisions."
     )
 
 
