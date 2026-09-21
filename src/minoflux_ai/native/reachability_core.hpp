@@ -4,7 +4,9 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -121,7 +123,8 @@ struct BestRecord {
 struct Scratch {
     std::vector<uint8_t> collision_cache;
     std::vector<int32_t> landing_state;
-    std::vector<int32_t> state_depths;
+    std::vector<uint16_t> state_depths16;
+    std::vector<int32_t> state_depths32;
     std::vector<int32_t> state_kick_infos;
     std::vector<int32_t> rotation_depths;
     std::vector<int32_t> rotation_kick_infos;
@@ -215,7 +218,25 @@ inline bool checked_collision(const Table& table, const Mask256& board, int32_t 
     return cached == kCollisionBlocked;
 }
 
-template <bool Profile>
+template <typename DepthT>
+inline std::vector<DepthT>& state_depth_buffer(Scratch& scratch) noexcept {
+    if constexpr (std::is_same_v<DepthT, uint16_t>) {
+        return scratch.state_depths16;
+    } else {
+        return scratch.state_depths32;
+    }
+}
+
+template <typename DepthT>
+constexpr DepthT no_depth_value() noexcept {
+    if constexpr (std::is_same_v<DepthT, uint16_t>) {
+        return std::numeric_limits<uint16_t>::max();
+    } else {
+        return static_cast<DepthT>(kNoState);
+    }
+}
+
+template <bool Profile, typename DepthT>
 inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes) {
     RunResult result;
     auto& counters = result.counters;
@@ -229,9 +250,11 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
     const Mask256 board = pack_board(rows, table.width, table.height);
     Scratch& scratch = g_scratch;
     const size_t n = static_cast<size_t>(table.state_count);
+    auto& state_depths = state_depth_buffer<DepthT>(scratch);
+    constexpr DepthT no_depth = no_depth_value<DepthT>();
     scratch.collision_cache = table.collision_invalid;
     scratch.landing_state.assign(n, kNoLanding);
-    scratch.state_depths.assign(n, kNoState);
+    state_depths.assign(n, no_depth);
     scratch.state_kick_infos.assign(n, -1);
     scratch.frontier.clear();
     scratch.visited_state_ids.clear();
@@ -258,7 +281,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         if constexpr (Profile) timings.setup_seconds = seconds_between(setup_started, Clock::now());
         return result;
     }
-    scratch.state_depths[static_cast<size_t>(start_state)] = 0;
+    state_depths[static_cast<size_t>(start_state)] = DepthT{0};
     scratch.frontier.push_back(start_state);
     scratch.visited_state_ids.push_back(start_state);
     size_t frontier_index = 0;
@@ -269,7 +292,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
     while (frontier_index < scratch.frontier.size() && reachable_count <= budget) {
         const int32_t state_id = scratch.frontier[frontier_index++];
         if constexpr (Profile) ++counters.bfs_nodes;
-        const int32_t new_depth = scratch.state_depths[static_cast<size_t>(state_id)] + 1;
+        const int32_t new_depth = static_cast<int32_t>(state_depths[static_cast<size_t>(state_id)]) + 1;
         const std::array<int32_t, 3> movement_targets = {
             table.left_state[static_cast<size_t>(state_id)],
             table.right_state[static_cast<size_t>(state_id)],
@@ -278,14 +301,14 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         for (int32_t target_state : movement_targets) {
             if (target_state == kNoState) continue;
             if constexpr (Profile) ++counters.movement_edges;
-            if (scratch.state_depths[static_cast<size_t>(target_state)] != kNoState) {
+            if (state_depths[static_cast<size_t>(target_state)] != no_depth) {
                 if constexpr (Profile) ++counters.movement_visited_skips;
                 continue;
             }
             if constexpr (Profile) ++counters.movement_collision_checks;
             if (!checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) {
                 if constexpr (Profile) ++counters.movement_enqueues;
-                scratch.state_depths[static_cast<size_t>(target_state)] = new_depth;
+                state_depths[static_cast<size_t>(target_state)] = static_cast<DepthT>(new_depth);
                 scratch.state_kick_infos[static_cast<size_t>(target_state)] = -1;
                 scratch.visited_state_ids.push_back(target_state);
                 ++reachable_count;
@@ -317,7 +340,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             }
             if (successful_state == kNoState) continue;
             if constexpr (Profile) ++counters.rotation_successes;
-            const bool adds_geometry = scratch.state_depths[static_cast<size_t>(successful_state)] == kNoState;
+            const bool adds_geometry = state_depths[static_cast<size_t>(successful_state)] == no_depth;
             int32_t previous_rotation_depth = kNoState;
             bool improves_rotation = false;
             if (table.piece_is_t) {
@@ -334,7 +357,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             }
             if (adds_geometry) {
                 if constexpr (Profile) ++counters.rotation_geometry_enqueues;
-                scratch.state_depths[static_cast<size_t>(successful_state)] = new_depth;
+                state_depths[static_cast<size_t>(successful_state)] = static_cast<DepthT>(new_depth);
                 scratch.state_kick_infos[static_cast<size_t>(successful_state)] = rotation_info;
                 scratch.visited_state_ids.push_back(successful_state);
                 ++reachable_count;
@@ -410,7 +433,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             const int32_t rotation_info = scratch.state_kick_infos[static_cast<size_t>(state_id)];
             const bool last_rotation = rotation_info >= 0;
             BestRecord candidate;
-            candidate.negative_depth = -scratch.state_depths[static_cast<size_t>(state_id)];
+            candidate.negative_depth = -static_cast<int32_t>(state_depths[static_cast<size_t>(state_id)]);
             candidate.order_rank = state_id;
             candidate.placement.x = table.state_x[static_cast<size_t>(state_id)];
             candidate.placement.y = table.state_y[static_cast<size_t>(final_state)];
@@ -463,7 +486,12 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             }
             if constexpr (Profile) ++counters.representative_nodes;
         };
-        for (int32_t state_id : scratch.visited_state_ids) emit(state_id, scratch.state_depths[static_cast<size_t>(state_id)], scratch.state_kick_infos[static_cast<size_t>(state_id)], state_id);
+        for (int32_t state_id : scratch.visited_state_ids) emit(
+            state_id,
+            static_cast<int32_t>(state_depths[static_cast<size_t>(state_id)]),
+            scratch.state_kick_infos[static_cast<size_t>(state_id)],
+            state_id
+        );
         const int32_t rotation_phase_base = table.state_count;
         for (int32_t state_id : scratch.visited_rotation_ids) {
             if (scratch.rotation_is_geometry[static_cast<size_t>(state_id)] != 0) {
@@ -493,8 +521,14 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
 
 inline RunResult run(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes, bool profile = false) {
     if (static_cast<int>(rows.size()) != table.height) throw std::runtime_error("board row count mismatch");
-    return profile ? run_impl<true>(table, rows, start_x, start_y, start_rotation, max_nodes)
-                   : run_impl<false>(table, rows, start_x, start_y, start_rotation, max_nodes);
+    const bool compact_depths =
+        table.state_count <= static_cast<int>(std::numeric_limits<uint16_t>::max());
+    if (compact_depths) {
+        return profile ? run_impl<true, uint16_t>(table, rows, start_x, start_y, start_rotation, max_nodes)
+                       : run_impl<false, uint16_t>(table, rows, start_x, start_y, start_rotation, max_nodes);
+    }
+    return profile ? run_impl<true, int32_t>(table, rows, start_x, start_y, start_rotation, max_nodes)
+                   : run_impl<false, int32_t>(table, rows, start_x, start_y, start_rotation, max_nodes);
 }
 
 inline void finalize_table(Table& table) {
