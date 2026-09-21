@@ -15,7 +15,6 @@ constexpr int32_t kNoLanding = -1;
 constexpr uint8_t kCollisionUnknown = 0;
 constexpr uint8_t kCollisionClear = 1;
 constexpr uint8_t kCollisionBlocked = 2;
-constexpr uint8_t kCollisionLimbGeneric = 0x80;
 constexpr int kKickIndexBits = 3;
 constexpr int kKickIndexMask = (1 << kKickIndexBits) - 1;
 constexpr size_t kMaskBytes = 32;
@@ -54,7 +53,6 @@ struct Table {
     std::vector<int32_t> right_state;
     std::vector<int32_t> down_state;
     std::vector<uint8_t> collision_invalid;
-    std::vector<uint8_t> collision_limb_info;
     std::vector<uint8_t> geometry_invalid;
     std::vector<Mask256> collision_masks;
     std::vector<Mask256> geometry_masks;
@@ -156,15 +154,6 @@ inline bool mask_intersects(const Mask256& left, const Mask256& right, int limb_
     return false;
 }
 
-inline bool mask_intersects_compact(const Mask256& left, const Mask256& right, uint8_t limb_info, int limb_count) noexcept {
-    if ((limb_info & kCollisionLimbGeneric) != 0) return mask_intersects(left, right, limb_count);
-    const size_t first_limb = static_cast<size_t>(limb_info & 0x03);
-    if ((left.words[first_limb] & right.words[first_limb]) != 0) return true;
-    if ((limb_info & 0x04) == 0) return false;
-    const size_t second_limb = first_limb + 1;
-    return (left.words[second_limb] & right.words[second_limb]) != 0;
-}
-
 inline Mask256 pack_board(const std::vector<uint64_t>& rows, int width, int height) {
     Mask256 result{};
     for (int y = 0; y < height; ++y) {
@@ -215,17 +204,11 @@ inline bool better_t(const BestRecord& candidate, const BestRecord& current) noe
 template <bool Profile>
 inline bool checked_collision(const Table& table, const Mask256& board, int32_t state_id, std::vector<uint8_t>& collision_cache, Counters& counters) {
     if constexpr (Profile) ++counters.collision_checks;
-    const size_t state_index = static_cast<size_t>(state_id);
-    const uint8_t cached = collision_cache[state_index];
+    const uint8_t cached = collision_cache[static_cast<size_t>(state_id)];
     if (cached == kCollisionUnknown) [[unlikely]] {
         if constexpr (Profile) ++counters.collision_evaluations;
-        const bool blocked = mask_intersects_compact(
-            board,
-            table.collision_masks[state_index],
-            table.collision_limb_info[state_index],
-            table.limb_count
-        );
-        collision_cache[state_index] = blocked ? kCollisionBlocked : kCollisionClear;
+        const bool blocked = mask_intersects(board, table.collision_masks[static_cast<size_t>(state_id)], table.limb_count);
+        collision_cache[static_cast<size_t>(state_id)] = blocked ? kCollisionBlocked : kCollisionClear;
         return blocked;
     }
     if constexpr (Profile) ++counters.collision_cache_hits;
@@ -516,25 +499,10 @@ inline RunResult run(const Table& table, const std::vector<uint64_t>& rows, int 
 
 inline void finalize_table(Table& table) {
     const size_t state_count = static_cast<size_t>(table.state_count);
-    table.collision_limb_info.assign(state_count, kCollisionLimbGeneric);
     for (size_t state_id = 0; state_id < state_count; ++state_id) {
         table.collision_invalid[state_id] = table.collision_invalid[state_id] != 0
             ? kCollisionBlocked
             : kCollisionUnknown;
-
-        const Mask256& collision_mask = table.collision_masks[state_id];
-        int first_limb = -1;
-        int last_limb = -1;
-        for (int limb = 0; limb < table.limb_count; ++limb) {
-            if (collision_mask.words[static_cast<size_t>(limb)] == 0) continue;
-            if (first_limb < 0) first_limb = limb;
-            last_limb = limb;
-        }
-        if (first_limb >= 0 && last_limb - first_limb <= 1) {
-            table.collision_limb_info[state_id] = static_cast<uint8_t>(
-                first_limb | (last_limb > first_limb ? 0x04 : 0x00)
-            );
-        }
     }
     table.geometry_ids.assign(state_count, -1);
     table.geometry_count = 0;
