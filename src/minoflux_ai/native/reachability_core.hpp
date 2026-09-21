@@ -210,8 +210,7 @@ inline bool checked_collision(const Table& table, const Mask256& board, int32_t 
         return cached == kCollisionBlocked;
     }
     if constexpr (Profile) ++counters.collision_evaluations;
-    const bool blocked = table.collision_invalid[static_cast<size_t>(state_id)] != 0 ||
-        mask_intersects(board, table.collision_masks[static_cast<size_t>(state_id)], table.limb_count);
+    const bool blocked = mask_intersects(board, table.collision_masks[static_cast<size_t>(state_id)], table.limb_count);
     collision_cache[static_cast<size_t>(state_id)] = blocked ? kCollisionBlocked : kCollisionClear;
     return blocked;
 }
@@ -230,7 +229,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
     const Mask256 board = pack_board(rows, table.width, table.height);
     Scratch& scratch = g_scratch;
     const size_t n = static_cast<size_t>(table.state_count);
-    scratch.collision_cache.assign(n, kCollisionUnknown);
+    scratch.collision_cache = table.collision_invalid;
     scratch.landing_state.assign(n, kNoLanding);
     scratch.state_depths.assign(n, kNoState);
     scratch.state_kick_infos.assign(n, -1);
@@ -500,6 +499,11 @@ inline RunResult run(const Table& table, const std::vector<uint64_t>& rows, int 
 
 inline void finalize_table(Table& table) {
     const size_t state_count = static_cast<size_t>(table.state_count);
+    for (size_t state_id = 0; state_id < state_count; ++state_id) {
+        table.collision_invalid[state_id] = table.collision_invalid[state_id] != 0
+            ? kCollisionBlocked
+            : kCollisionUnknown;
+    }
     table.geometry_ids.assign(state_count, -1);
     table.geometry_count = 0;
     std::unordered_map<Mask256, int32_t, MaskHash> geometry_lookup;
