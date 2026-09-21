@@ -298,11 +298,11 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         }
         const uint32_t group_begin = table.state_group_offsets[static_cast<size_t>(state_id)];
         const uint32_t group_end = table.state_group_offsets[static_cast<size_t>(state_id) + 1];
+        uint32_t kick_begin = table.group_kick_offsets[static_cast<size_t>(group_begin)];
         for (uint32_t group_index = group_begin; group_index < group_end; ++group_index) {
             if constexpr (Profile) ++counters.rotation_groups;
             int32_t successful_state = kNoState;
             int32_t successful_kick = -1;
-            const uint32_t kick_begin = table.group_kick_offsets[static_cast<size_t>(group_index)];
             const uint32_t kick_end = table.group_kick_offsets[static_cast<size_t>(group_index) + 1];
             for (uint32_t kick_index = kick_begin; kick_index < kick_end; ++kick_index) {
                 if constexpr (Profile) {
@@ -315,6 +315,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
                 successful_kick = table.kick_indices[static_cast<size_t>(kick_index)];
                 break;
             }
+            kick_begin = kick_end;
             if (successful_state == kNoState) continue;
             if constexpr (Profile) ++counters.rotation_successes;
             const bool adds_geometry = scratch.state_depths[static_cast<size_t>(successful_state)] == kNoState;
