@@ -51,7 +51,7 @@ def resolve_commit(ref: str) -> str:
 
 
 def build_native(repo: Path) -> None:
-    print(f"[build] {repo}")
+    print(f"[build] {repo} (forced)")
     run(
         [
             "uv",
@@ -66,6 +66,7 @@ def build_native(repo: Path) -> None:
             "setup.py",
             "build_ext",
             "--inplace",
+            "--force",
         ],
         repo,
     )
