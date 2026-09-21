@@ -113,7 +113,6 @@ inline std::shared_ptr<Table> table_from_python(
         }
         table->state_group_offsets.push_back(static_cast<uint32_t>(table->group_kick_offsets.size() - 1));
     }
-    finalize_rotation_table(*table);
     return table;
 }
 
