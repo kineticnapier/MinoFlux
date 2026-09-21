@@ -52,7 +52,6 @@ struct Table {
     std::vector<int32_t> left_state;
     std::vector<int32_t> right_state;
     std::vector<int32_t> down_state;
-    std::vector<std::array<int32_t, 3>> movement_targets;
     std::vector<uint8_t> collision_invalid;
     std::vector<uint8_t> geometry_invalid;
     std::vector<Mask256> collision_masks;
@@ -118,6 +117,7 @@ struct BestRecord {
     int32_t order_rank = 0;
     PlacementRecord placement;
 };
+
 struct Scratch {
     std::vector<uint8_t> collision_cache;
     std::vector<int32_t> landing_state;
@@ -271,7 +271,11 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         const int32_t state_id = scratch.frontier[frontier_index++];
         if constexpr (Profile) ++counters.bfs_nodes;
         const int32_t new_depth = scratch.state_depths[static_cast<size_t>(state_id)] + 1;
-        const auto& movement_targets = table.movement_targets[static_cast<size_t>(state_id)];
+        const std::array<int32_t, 3> movement_targets = {
+            table.left_state[static_cast<size_t>(state_id)],
+            table.right_state[static_cast<size_t>(state_id)],
+            table.down_state[static_cast<size_t>(state_id)],
+        };
         for (int32_t target_state : movement_targets) {
             if (target_state == kNoState) continue;
             if constexpr (Profile) ++counters.movement_edges;
@@ -496,14 +500,6 @@ inline RunResult run(const Table& table, const std::vector<uint64_t>& rows, int 
 
 inline void finalize_table(Table& table) {
     const size_t state_count = static_cast<size_t>(table.state_count);
-    table.movement_targets.resize(state_count);
-    for (size_t state_id = 0; state_id < state_count; ++state_id) {
-        table.movement_targets[state_id] = {
-            table.left_state[state_id],
-            table.right_state[state_id],
-            table.down_state[state_id],
-        };
-    }
     table.geometry_ids.assign(state_count, -1);
     table.geometry_count = 0;
     std::unordered_map<Mask256, int32_t, MaskHash> geometry_lookup;
