@@ -50,10 +50,32 @@ def _smoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def _annotate_detailed_profile(result: dict[str, object]) -> None:
+    reachability = result.get("reachability")
+    if not isinstance(reachability, dict):
+        return
+
+    bfs_seconds = float(reachability.get("bfsSeconds", 0.0))
+    rotation_seconds = float(reachability.get("rotationSeconds", 0.0))
+    landing_seconds = float(reachability.get("landingSeconds", 0.0))
+    representative_seconds = float(reachability.get("representativeSeconds", 0.0))
+
+    reachability["movementSeconds"] = max(0.0, bfs_seconds - rotation_seconds)
+    reachability["representativeCoreSeconds"] = representative_seconds
+    reachability["representativeTotalSeconds"] = representative_seconds + landing_seconds
+    reachability["coarseRepresentativeSeconds"] = representative_seconds + landing_seconds
+    result["profileMode"] = "detailed-v1"
+    result["timingNote"] = (
+        "Detailed reachability timings use per-node/per-query steady_clock instrumentation; "
+        "use oracle-smoke A/B timings for final performance decisions."
+    )
+
+
 def _profile(args: argparse.Namespace) -> int:
     _require_native()
     config = _oracle_config(args)
     result = profile_oracle(Game(args.seed), config)
+    _annotate_detailed_profile(result)
     result = {
         "teacher": "minoflux-native-oracle",
         "seed": args.seed,
