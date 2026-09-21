@@ -64,10 +64,12 @@ def _annotate_detailed_profile(result: dict[str, object]) -> None:
     reachability["representativeCoreSeconds"] = representative_seconds
     reachability["representativeTotalSeconds"] = representative_seconds + landing_seconds
     reachability["coarseRepresentativeSeconds"] = representative_seconds + landing_seconds
-    result["profileMode"] = "detailed-v1"
+    result["profileMode"] = "sampled-detailed-v1"
+    result["timingSampleStride"] = 257
     result["timingNote"] = (
-        "Detailed reachability timings use per-node/per-query steady_clock instrumentation; "
-        "use oracle-smoke A/B timings for final performance decisions."
+        "Rotation, landing, and representative-core timings are extrapolated from "
+        "one detailed reachability call per 257 calls; use oracle-smoke A/B timings "
+        "for final performance decisions."
     )
 
 
