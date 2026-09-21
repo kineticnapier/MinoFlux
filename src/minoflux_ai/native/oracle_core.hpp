@@ -100,6 +100,10 @@ struct ReachabilityProfile {
     uint64_t rotation_groups = 0;
     uint64_t rotation_collision_checks = 0;
     uint64_t rotation_successes = 0;
+    uint64_t rotation_kick_first_successes = 0;
+    uint64_t rotation_kick_second_successes = 0;
+    uint64_t rotation_kick_later_successes = 0;
+    uint64_t rotation_kick_failures = 0;
     uint64_t rotation_geometry_enqueues = 0;
     uint64_t landing_collision_checks = 0;
     uint64_t landing_queries = 0;
