@@ -7,7 +7,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -435,60 +434,40 @@ double event_score(const State& state, const LockValue& value) noexcept {
         state.b2b_chain * 0.05;
 }
 
-struct StateKey {
-    std::array<uint16_t, kHeight> rows{};
-    Piece current = Piece::None;
-    Piece hold = Piece::None;
-    uint16_t queue_index = 0;
-    int16_t combo = -1;
-    uint16_t b2b_chain = 0;
-    uint8_t flags = 0;
-
-    bool operator==(const StateKey& other) const noexcept {
-        return rows == other.rows &&
-            current == other.current &&
-            hold == other.hold &&
-            queue_index == other.queue_index &&
-            combo == other.combo &&
-            b2b_chain == other.b2b_chain &&
-            flags == other.flags;
+uint64_t state_hash(const State& state) noexcept {
+    uint64_t hash = 1469598103934665603ULL;
+    auto mix = [&](uint64_t value) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    };
+    for (uint16_t row : state.rows) {
+        mix(row);
     }
-};
-
-struct StateHash {
-    size_t operator()(const StateKey& state) const noexcept {
-        uint64_t hash = 1469598103934665603ULL;
-        auto mix = [&](uint64_t value) {
-            hash ^= value;
-            hash *= 1099511628211ULL;
-        };
-        for (uint16_t row : state.rows) {
-            mix(row);
-        }
-        mix(static_cast<uint8_t>(state.current));
-        mix(static_cast<uint8_t>(state.hold));
-        mix(state.queue_index);
-        mix(static_cast<uint16_t>(state.combo));
-        mix(state.b2b_chain);
-        mix(state.flags);
-        return static_cast<size_t>(hash ^ (hash >> 32));
-    }
-};
-
-StateKey key_of(const State& state) noexcept {
-    StateKey key;
-    key.rows = state.rows;
-    key.current = state.current;
-    key.hold = state.hold;
-    key.queue_index = state.queue_index;
-    key.combo = state.combo;
-    key.b2b_chain = state.b2b_chain;
-    key.flags =
+    mix(static_cast<uint8_t>(state.current));
+    mix(static_cast<uint8_t>(state.hold));
+    mix(state.queue_index);
+    mix(static_cast<uint16_t>(state.combo));
+    mix(state.b2b_chain);
+    const uint8_t flags =
         uint8_t(state.has_hold) |
         (uint8_t(state.can_hold) << 1) |
         (uint8_t(state.b2b_active) << 2) |
         (uint8_t(state.game_over) << 3);
-    return key;
+    mix(flags);
+    return hash ^ (hash >> 32);
+}
+
+bool same_state(const State& left, const State& right) noexcept {
+    return left.rows == right.rows &&
+        left.current == right.current &&
+        left.hold == right.hold &&
+        left.queue_index == right.queue_index &&
+        left.combo == right.combo &&
+        left.b2b_chain == right.b2b_chain &&
+        left.has_hold == right.has_hold &&
+        left.can_hold == right.can_hold &&
+        left.b2b_active == right.b2b_active &&
+        left.game_over == right.game_over;
 }
 
 struct Node {
@@ -497,6 +476,97 @@ struct Node {
     double rank_score = 0.0;
     Move root{};
     bool has_root = false;
+};
+
+struct DedupSlot {
+    uint64_t hash = 0;
+    size_t child_index = 0;
+    uint32_t generation = 0;
+};
+
+class DedupTable {
+public:
+    void reserve(size_t expected_entries) {
+        size_t desired = 16;
+        const size_t target = std::max<size_t>(16, expected_entries * 2);
+        while (desired < target) {
+            desired <<= 1;
+        }
+        if (slots_.size() < desired) {
+            slots_.resize(desired);
+        }
+        mask_ = slots_.size() - 1;
+    }
+
+    void reset() {
+        size_ = 0;
+        ++generation_;
+        if (generation_ == 0) {
+            for (DedupSlot& slot : slots_) {
+                slot.generation = 0;
+            }
+            generation_ = 1;
+        }
+    }
+
+    size_t first_slot(uint64_t hash) const noexcept {
+        return static_cast<size_t>(hash) & mask_;
+    }
+
+    size_t next_slot(size_t index) const noexcept {
+        return (index + 1) & mask_;
+    }
+
+    bool occupied(const DedupSlot& slot) const noexcept {
+        return slot.generation == generation_;
+    }
+
+    bool needs_grow() const noexcept {
+        return (size_ + 1) * 10 > slots_.size() * 7;
+    }
+
+    DedupSlot& slot(size_t index) noexcept {
+        return slots_[index];
+    }
+
+    const DedupSlot& slot(size_t index) const noexcept {
+        return slots_[index];
+    }
+
+    void insert_at(size_t index, uint64_t hash, size_t child_index) noexcept {
+        DedupSlot& target = slots_[index];
+        target.hash = hash;
+        target.child_index = child_index;
+        target.generation = generation_;
+        ++size_;
+    }
+
+    void grow(const std::vector<Node>& children) {
+        const uint32_t old_generation = generation_;
+        std::vector<DedupSlot> old = std::move(slots_);
+        slots_.assign(std::max<size_t>(16, old.size() * 2), DedupSlot{});
+        mask_ = slots_.size() - 1;
+        generation_ = 1;
+        size_ = 0;
+        for (const DedupSlot& old_slot : old) {
+            if (old_slot.generation != old_generation) {
+                continue;
+            }
+            const uint64_t hash = old_slot.hash;
+            size_t index = first_slot(hash);
+            while (occupied(slots_[index])) {
+                index = next_slot(index);
+            }
+            insert_at(index, hash, old_slot.child_index);
+        }
+        (void)children;
+    }
+
+private:
+    std::vector<DedupSlot> slots_;
+    size_t mask_ = 0;
+    size_t size_ = 0;
+    uint32_t generation_ = 0;
 };
 
 bool move_less(const Move& left, const Move& right) noexcept {
@@ -519,7 +589,7 @@ bool better_node(const Node& left, const Node& right) noexcept {
 
 void insert_dedup(
     std::vector<Node>& children,
-    std::unordered_map<StateKey, size_t, StateHash>& indices,
+    DedupTable& indices,
     Node&& child
 ) {
     const bool profiling = g_search_profile_enabled;
@@ -527,26 +597,45 @@ void insert_dedup(
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
 
-    StateKey key = key_of(child.state);
-    auto [iterator, inserted] = indices.emplace(std::move(key), children.size());
-    if (inserted) {
-        children.push_back(std::move(child));
-    } else {
-        if (profiling) {
-            ++g_search_profile.dedup_hits;
-        }
-        if (better_node(child, children[iterator->second])) {
-            if (profiling) {
-                ++g_search_profile.dedup_replacements;
+    const uint64_t hash = state_hash(child.state);
+    while (true) {
+        size_t index = indices.first_slot(hash);
+        while (true) {
+            const DedupSlot& slot = indices.slot(index);
+            if (!indices.occupied(slot)) {
+                if (indices.needs_grow()) {
+                    indices.grow(children);
+                    break;
+                }
+                const size_t child_index = children.size();
+                children.push_back(std::move(child));
+                indices.insert_at(index, hash, child_index);
+                if (profiling) {
+                    const auto stopped = std::chrono::steady_clock::now();
+                    g_search_profile.dedup_seconds +=
+                        std::chrono::duration<double>(stopped - started).count();
+                }
+                return;
             }
-            children[iterator->second] = std::move(child);
+            if (slot.hash == hash && same_state(child.state, children[slot.child_index].state)) {
+                if (profiling) {
+                    ++g_search_profile.dedup_hits;
+                }
+                if (better_node(child, children[slot.child_index])) {
+                    if (profiling) {
+                        ++g_search_profile.dedup_replacements;
+                    }
+                    children[slot.child_index] = std::move(child);
+                }
+                if (profiling) {
+                    const auto stopped = std::chrono::steady_clock::now();
+                    g_search_profile.dedup_seconds +=
+                        std::chrono::duration<double>(stopped - started).count();
+                }
+                return;
+            }
+            index = indices.next_slot(index);
         }
-    }
-
-    if (profiling) {
-        const auto stopped = std::chrono::steady_clock::now();
-        g_search_profile.dedup_seconds +=
-            std::chrono::duration<double>(stopped - started).count();
     }
 }
 
@@ -558,7 +647,7 @@ void expand_branch(
     int ply,
     const Features& parent_features,
     std::vector<Node>& children,
-    std::unordered_map<StateKey, size_t, StateHash>& indices
+    DedupTable& indices
 ) {
     State branch = node.state;
     Piece placing = branch.current;
@@ -673,12 +762,13 @@ Result search(
     start.state = root;
     start.rank_score = board_score(features(root.rows), false);
     std::vector<Node> frontier{start};
+    DedupTable indices;
+    indices.reserve(static_cast<size_t>(config.beam_width) * 64);
 
     for (int ply = 0; ply < config.depth; ++ply) {
         std::vector<Node> children;
         children.reserve(static_cast<size_t>(config.beam_width) * 48);
-        std::unordered_map<StateKey, size_t, StateHash> indices;
-        indices.reserve(static_cast<size_t>(config.beam_width) * 64);
+        indices.reset();
 
         for (const Node& node : frontier) {
             if (node.state.game_over) {
