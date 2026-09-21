@@ -378,6 +378,10 @@ py::dict search_profile_native(
     reachability["rotationGroups"] = reachability_profile.rotation_groups;
     reachability["rotationCollisionChecks"] = reachability_profile.rotation_collision_checks;
     reachability["rotationSuccesses"] = reachability_profile.rotation_successes;
+    reachability["rotationKickFirstSuccesses"] = reachability_profile.rotation_kick_first_successes;
+    reachability["rotationKickSecondSuccesses"] = reachability_profile.rotation_kick_second_successes;
+    reachability["rotationKickLaterSuccesses"] = reachability_profile.rotation_kick_later_successes;
+    reachability["rotationKickFailures"] = reachability_profile.rotation_kick_failures;
     reachability["rotationGeometryEnqueues"] = reachability_profile.rotation_geometry_enqueues;
     reachability["landingCollisionChecks"] = reachability_profile.landing_collision_checks;
     reachability["landingQueries"] = reachability_profile.landing_queries;
