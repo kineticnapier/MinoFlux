@@ -3,7 +3,6 @@
 #include "reachability_core.hpp"
 
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -37,28 +36,6 @@ struct Move {
     int8_t kick_index = -1;
     int8_t rotation_from = -1;
     int8_t rotation_to = -1;
-};
-
-class MoveRange {
-public:
-    MoveRange() = default;
-    MoveRange(const Move* data, std::size_t size) noexcept : data_(data), size_(size) {}
-
-    const Move* begin() const noexcept { return data_; }
-    const Move* end() const noexcept { return size_ == 0 ? data_ : data_ + size_; }
-    std::size_t size() const noexcept { return size_; }
-    bool empty() const noexcept { return size_ == 0; }
-
-    operator std::vector<Move>() const {
-        if (size_ == 0) {
-            return {};
-        }
-        return std::vector<Move>(data_, data_ + size_);
-    }
-
-private:
-    const Move* data_ = nullptr;
-    std::size_t size_ = 0;
 };
 
 struct State {
@@ -160,7 +137,7 @@ void begin_reachability_profile();
 ReachabilityProfile end_reachability_profile();
 void begin_search_profile();
 SearchProfile end_search_profile();
-MoveRange reachable_moves(
+std::vector<Move> reachable_moves(
     const std::array<uint16_t, kHeight>& rows,
     Piece piece,
     bool allow_180,
