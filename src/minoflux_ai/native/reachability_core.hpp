@@ -121,7 +121,6 @@ struct BestRecord {
 struct Scratch {
     std::vector<uint8_t> collision_cache;
     std::vector<int32_t> landing_state;
-    std::vector<uint8_t> state_visited;
     std::vector<int32_t> state_depths;
     std::vector<int32_t> state_kick_infos;
     std::vector<int32_t> rotation_depths;
@@ -233,8 +232,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
     const size_t n = static_cast<size_t>(table.state_count);
     scratch.collision_cache.assign(n, kCollisionUnknown);
     scratch.landing_state.assign(n, kNoLanding);
-    scratch.state_visited.assign(n, uint8_t{0});
-    scratch.state_depths.resize(n);
+    scratch.state_depths.assign(n, kNoState);
     scratch.state_kick_infos.assign(n, -1);
     scratch.frontier.clear();
     scratch.visited_state_ids.clear();
@@ -261,7 +259,6 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         if constexpr (Profile) timings.setup_seconds = seconds_between(setup_started, Clock::now());
         return result;
     }
-    scratch.state_visited[static_cast<size_t>(start_state)] = 1;
     scratch.state_depths[static_cast<size_t>(start_state)] = 0;
     scratch.frontier.push_back(start_state);
     scratch.visited_state_ids.push_back(start_state);
@@ -282,14 +279,13 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         for (int32_t target_state : movement_targets) {
             if (target_state == kNoState) continue;
             if constexpr (Profile) ++counters.movement_edges;
-            if (scratch.state_visited[static_cast<size_t>(target_state)] != 0) {
+            if (scratch.state_depths[static_cast<size_t>(target_state)] != kNoState) {
                 if constexpr (Profile) ++counters.movement_visited_skips;
                 continue;
             }
             if constexpr (Profile) ++counters.movement_collision_checks;
             if (!checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) {
                 if constexpr (Profile) ++counters.movement_enqueues;
-                scratch.state_visited[static_cast<size_t>(target_state)] = 1;
                 scratch.state_depths[static_cast<size_t>(target_state)] = new_depth;
                 scratch.state_kick_infos[static_cast<size_t>(target_state)] = -1;
                 scratch.visited_state_ids.push_back(target_state);
@@ -322,7 +318,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             }
             if (successful_state == kNoState) continue;
             if constexpr (Profile) ++counters.rotation_successes;
-            const bool adds_geometry = scratch.state_visited[static_cast<size_t>(successful_state)] == 0;
+            const bool adds_geometry = scratch.state_depths[static_cast<size_t>(successful_state)] == kNoState;
             int32_t previous_rotation_depth = kNoState;
             bool improves_rotation = false;
             if (table.piece_is_t) {
@@ -339,7 +335,6 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             }
             if (adds_geometry) {
                 if constexpr (Profile) ++counters.rotation_geometry_enqueues;
-                scratch.state_visited[static_cast<size_t>(successful_state)] = 1;
                 scratch.state_depths[static_cast<size_t>(successful_state)] = new_depth;
                 scratch.state_kick_infos[static_cast<size_t>(successful_state)] = rotation_info;
                 scratch.visited_state_ids.push_back(successful_state);
