@@ -13,6 +13,8 @@ namespace reach = minoflux::reachability;
 std::array<std::shared_ptr<const reach::Table>, 14> g_reachability_tables{};
 thread_local bool g_reachability_profile_enabled = false;
 thread_local ReachabilityProfile g_reachability_profile{};
+thread_local std::vector<uint64_t> g_native_rows;
+thread_local std::vector<Move> g_move_buffer;
 
 size_t table_index(Piece piece, bool allow_180) {
     const int value = static_cast<int>(piece);
@@ -57,7 +59,7 @@ ReachabilityProfile end_reachability_profile() {
     return g_reachability_profile;
 }
 
-std::vector<Move> reachable_moves(
+MoveRange reachable_moves(
     const std::array<uint16_t, kHeight>& rows,
     Piece piece,
     bool allow_180,
@@ -65,10 +67,11 @@ std::vector<Move> reachable_moves(
     bool use_hold
 ) {
     const reach::Table& table = table_for(piece, allow_180);
-    std::vector<uint64_t> native_rows;
-    native_rows.reserve(kHeight);
-    for (uint16_t row : rows) {
-        native_rows.push_back(row);
+    if (g_native_rows.size() != kHeight) {
+        g_native_rows.resize(kHeight);
+    }
+    for (size_t index = 0; index < kHeight; ++index) {
+        g_native_rows[index] = rows[index];
     }
 
     const bool profiling = g_reachability_profile_enabled;
@@ -77,7 +80,7 @@ std::vector<Move> reachable_moves(
         : std::chrono::steady_clock::time_point{};
     const reach::RunResult native_result = reach::run(
         table,
-        native_rows,
+        g_native_rows,
         3,
         1,
         0,
@@ -128,8 +131,10 @@ std::vector<Move> reachable_moves(
             native_result.timings.placement_seconds;
     }
 
-    std::vector<Move> result;
-    result.reserve(native_result.placements.size());
+    g_move_buffer.clear();
+    if (g_move_buffer.capacity() < native_result.placements.size()) {
+        g_move_buffer.reserve(native_result.placements.size());
+    }
     for (const reach::PlacementRecord& placement : native_result.placements) {
         Move move;
         move.piece = piece;
@@ -141,9 +146,9 @@ std::vector<Move> reachable_moves(
         move.kick_index = static_cast<int8_t>(placement.kick_index);
         move.rotation_from = static_cast<int8_t>(placement.rotation_from);
         move.rotation_to = static_cast<int8_t>(placement.rotation_to);
-        result.push_back(move);
+        g_move_buffer.push_back(move);
     }
-    return result;
+    return MoveRange(g_move_buffer.data(), g_move_buffer.size());
 }
 
 TransitionResult transition(
