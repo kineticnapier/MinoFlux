@@ -12,6 +12,13 @@ oracle_compile_args = (
     else ["-O3"]
 )
 
+oracle_dependencies = [
+    "src/minoflux_ai/native/oracle_core.hpp",
+    "src/minoflux_ai/native/oracle_search_core.cpp",
+    "src/minoflux_ai/native/reachability_core.hpp",
+    "src/minoflux_ai/native/reachability_pybind.hpp",
+]
+
 
 setup(
     ext_modules=[
@@ -35,6 +42,7 @@ setup(
             ],
             cxx_std=20,
             extra_compile_args=oracle_compile_args,
+            depends=oracle_dependencies,
             optional=True,
         ),
     ],
