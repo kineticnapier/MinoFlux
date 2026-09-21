@@ -47,7 +47,8 @@ def test_oracle_profile_cli_reports_native_hotspots(capsys) -> None:
     assert code == 0
     result = json.loads(capsys.readouterr().out)
     assert result["teacher"] == "minoflux-native-oracle"
-    assert result["profileMode"] == "coarse-v1"
+    assert result["profileMode"] == "sampled-ratio-v2"
+    assert result["timingSampleStride"] == 257
     assert result["searchSeconds"] > 0.0
     assert 0.0 <= result["reachabilitySeconds"] <= result["searchSeconds"]
     assert result["movegenCalls"] > 0
@@ -83,6 +84,13 @@ def test_oracle_profile_cli_reports_native_hotspots(capsys) -> None:
     assert reachability["rotationCollisionChecks"] == reachability["kickChecks"]
     assert reachability["movementEnqueues"] <= reachability["movementCollisionChecks"]
     assert reachability["rotationGeometryEnqueues"] <= reachability["rotationSuccesses"]
+    assert 0.0 <= reachability["rotationSeconds"] <= reachability["bfsSeconds"]
+    assert reachability["movementSeconds"] >= 0.0
+    assert (
+        reachability["representativeCoreSeconds"]
+        + reachability["landingSeconds"]
+        == reachability["representativeTotalSeconds"]
+    )
 
 
 def test_oracle_dataset_cli_writes_trainable_ranking_jsonl(tmp_path, capsys) -> None:
