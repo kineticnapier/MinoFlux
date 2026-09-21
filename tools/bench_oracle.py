@@ -28,11 +28,26 @@ class PairResult:
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTROL = ROOT.parent / "MinoFlux-group-control"
-DEFAULT_CONTROL_REF = "cadbb1b"
+DEFAULT_CONTROL_REF = "5f0622352697d9a610b9bb3c0da89ce35d652a1c"
 
 
 def run(cmd: list[str], cwd: Path, *, env: dict[str, str] | None = None) -> None:
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
+
+
+def output(cmd: list[str], cwd: Path) -> str:
+    completed = subprocess.run(
+        cmd,
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def resolve_commit(ref: str) -> str:
+    return output(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], ROOT)
 
 
 def build_native(repo: Path) -> None:
@@ -62,16 +77,37 @@ def native_module_path(repo: Path) -> Path | None:
     return matches[0] if matches else None
 
 
-def ensure_control_worktree(control: Path, control_ref: str) -> bool:
-    if control.is_dir():
-        return False
+def ensure_control_worktree(control: Path, control_ref: str) -> tuple[bool, str]:
+    resolved_ref = resolve_commit(control_ref)
+    if not control.is_dir():
+        print(f"[worktree] create {resolved_ref[:12]} -> {control}")
+        run(
+            ["git", "worktree", "add", "--detach", str(control), resolved_ref],
+            ROOT,
+        )
+        return True, resolved_ref
 
-    print(f"[worktree] {control_ref} -> {control}")
-    run(
-        ["git", "worktree", "add", "--detach", str(control), control_ref],
-        ROOT,
+    try:
+        current_ref = output(["git", "rev-parse", "HEAD"], control)
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(f"control path is not a usable git worktree: {control}") from exc
+
+    if current_ref == resolved_ref:
+        print(f"[worktree] control already at {resolved_ref[:12]}")
+        return False, resolved_ref
+
+    print(
+        f"[worktree] move control {current_ref[:12]} -> {resolved_ref[:12]} "
+        f"({control_ref})"
     )
-    return True
+    run(["git", "reset", "--hard"], control)
+    run(["git", "checkout", "--detach", resolved_ref], control)
+    actual_ref = output(["git", "rev-parse", "HEAD"], control)
+    if actual_ref != resolved_ref:
+        raise SystemExit(
+            f"control worktree checkout mismatch: expected {resolved_ref}, got {actual_ref}"
+        )
+    return True, resolved_ref
 
 
 def oracle_command(args: argparse.Namespace) -> list[str]:
@@ -182,7 +218,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--control-ref",
         default=DEFAULT_CONTROL_REF,
-        help=f"commit/ref used when creating the control worktree (default: {DEFAULT_CONTROL_REF})",
+        help=(
+            "commit/ref for the control worktree; an existing worktree is moved to this "
+            f"commit automatically (default: {DEFAULT_CONTROL_REF})"
+        ),
     )
     parser.add_argument("--control-name", default="control")
     parser.add_argument("--candidate-name", default="current")
@@ -210,11 +249,14 @@ def main() -> int:
     if args.pairs <= 0:
         raise SystemExit("--pairs must be positive")
 
-    created_control = ensure_control_worktree(control, args.control_ref)
+    current_ref = resolve_commit("HEAD")
+    control_changed, control_ref = ensure_control_worktree(control, args.control_ref)
+    print(f"[candidate-ref] {current_ref}")
+    print(f"[control-ref]   {control_ref}")
 
     if args.build_current:
         build_native(current)
-    if args.build_control or created_control:
+    if args.build_control or control_changed:
         build_native(control)
 
     for label, repo in ((args.candidate_name, current), (args.control_name, control)):
