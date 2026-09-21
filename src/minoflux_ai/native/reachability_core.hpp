@@ -205,14 +205,14 @@ template <bool Profile>
 inline bool checked_collision(const Table& table, const Mask256& board, int32_t state_id, std::vector<uint8_t>& collision_cache, Counters& counters) {
     if constexpr (Profile) ++counters.collision_checks;
     const uint8_t cached = collision_cache[static_cast<size_t>(state_id)];
-    if (cached != kCollisionUnknown) {
-        if constexpr (Profile) ++counters.collision_cache_hits;
-        return cached == kCollisionBlocked;
+    if (cached == kCollisionUnknown) [[unlikely]] {
+        if constexpr (Profile) ++counters.collision_evaluations;
+        const bool blocked = mask_intersects(board, table.collision_masks[static_cast<size_t>(state_id)], table.limb_count);
+        collision_cache[static_cast<size_t>(state_id)] = blocked ? kCollisionBlocked : kCollisionClear;
+        return blocked;
     }
-    if constexpr (Profile) ++counters.collision_evaluations;
-    const bool blocked = mask_intersects(board, table.collision_masks[static_cast<size_t>(state_id)], table.limb_count);
-    collision_cache[static_cast<size_t>(state_id)] = blocked ? kCollisionBlocked : kCollisionClear;
-    return blocked;
+    if constexpr (Profile) ++counters.collision_cache_hits;
+    return cached == kCollisionBlocked;
 }
 
 template <bool Profile>
