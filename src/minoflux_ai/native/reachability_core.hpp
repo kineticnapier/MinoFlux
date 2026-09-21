@@ -278,7 +278,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         for (int32_t target_state : movement_targets) {
             if (target_state == kNoState) continue;
             if constexpr (Profile) ++counters.movement_edges;
-            if (scratch.state_depths[static_cast<size_t>(target_state)] != kNoState) [[likely]] {
+            if (scratch.state_depths[static_cast<size_t>(target_state)] != kNoState) {
                 if constexpr (Profile) ++counters.movement_visited_skips;
                 continue;
             }
