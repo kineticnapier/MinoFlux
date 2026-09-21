@@ -4,7 +4,9 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -12,15 +14,27 @@ namespace minoflux::reachability {
 
 constexpr int32_t kNoState = -1;
 constexpr int32_t kNoLanding = -1;
+constexpr uint16_t kNoState16 = std::numeric_limits<uint16_t>::max();
 constexpr uint8_t kCollisionUnknown = 0;
 constexpr uint8_t kCollisionClear = 1;
 constexpr uint8_t kCollisionBlocked = 2;
 constexpr int kKickIndexBits = 3;
 constexpr int kKickIndexMask = (1 << kKickIndexBits) - 1;
+constexpr uint32_t kPackedKickCountBits = 8;
+constexpr uint32_t kPackedKickCountMask = (uint32_t{1} << kPackedKickCountBits) - 1;
+constexpr uint32_t kPackedKickBeginMax = std::numeric_limits<uint32_t>::max() >> kPackedKickCountBits;
 constexpr size_t kMaskBytes = 32;
 constexpr size_t kPlacementRecordInts = 7;
 constexpr size_t kPlacementRecordBytes = kPlacementRecordInts * sizeof(int32_t);
 using Clock = std::chrono::steady_clock;
+
+#if defined(__GNUC__) || defined(__clang__)
+#define MINOFLUX_LIKELY(expr) (__builtin_expect(!!(expr), 1))
+#define MINOFLUX_UNLIKELY(expr) (__builtin_expect(!!(expr), 0))
+#else
+#define MINOFLUX_LIKELY(expr) (expr)
+#define MINOFLUX_UNLIKELY(expr) (expr)
+#endif
 
 struct Mask256 {
     std::array<uint64_t, 4> words{};
@@ -47,6 +61,7 @@ struct Table {
     int state_count = 0;
     int limb_count = 0;
     bool piece_is_t = false;
+    bool compact_rotation_table = false;
     std::vector<int32_t> state_x;
     std::vector<int32_t> state_y;
     std::vector<int32_t> left_state;
@@ -62,6 +77,8 @@ struct Table {
     std::vector<uint32_t> group_kick_offsets;
     std::vector<int32_t> kick_targets;
     std::vector<int8_t> kick_indices;
+    std::vector<uint32_t> packed_group_kicks;
+    std::vector<uint16_t> compact_kick_targets;
 };
 
 struct Counters {
@@ -78,6 +95,15 @@ struct Counters {
     uint64_t rotation_collision_checks = 0;
     uint64_t rotation_successes = 0;
     uint64_t rotation_geometry_enqueues = 0;
+    uint64_t rotation_first_kick_successes = 0;
+    uint64_t rotation_second_kick_successes = 0;
+    uint64_t rotation_later_kick_successes = 0;
+    uint64_t rotation_failed_groups = 0;
+    uint64_t rotation_group_size_1 = 0;
+    uint64_t rotation_group_size_2 = 0;
+    uint64_t rotation_group_size_3 = 0;
+    uint64_t rotation_group_size_4 = 0;
+    uint64_t rotation_group_size_5_plus = 0;
     uint64_t landing_collision_checks = 0;
     uint64_t landing_queries = 0;
     uint64_t landing_cache_hits = 0;
@@ -122,11 +148,13 @@ struct Scratch {
     std::vector<uint8_t> collision_cache;
     std::vector<int32_t> landing_state;
     std::vector<int32_t> state_depths;
+    std::vector<uint16_t> state_depths16;
     std::vector<int32_t> state_kick_infos;
     std::vector<int32_t> rotation_depths;
     std::vector<int32_t> rotation_kick_infos;
     std::vector<uint8_t> rotation_is_geometry;
     std::vector<int32_t> frontier;
+    std::vector<uint16_t> frontier16;
     std::vector<int32_t> visited_state_ids;
     std::vector<int32_t> visited_rotation_ids;
     std::vector<int32_t> landing_trail;
@@ -201,22 +229,43 @@ inline bool better_t(const BestRecord& candidate, const BestRecord& current) noe
     return candidate.order_rank < current.order_rank;
 }
 
-template <bool Profile>
-inline bool checked_collision(const Table& table, const Mask256& board, int32_t state_id, std::vector<uint8_t>& collision_cache, Counters& counters) {
-    if constexpr (Profile) ++counters.collision_checks;
-    const uint8_t cached = collision_cache[static_cast<size_t>(state_id)];
-    if (cached != kCollisionUnknown) {
-        if constexpr (Profile) ++counters.collision_cache_hits;
-        return cached == kCollisionBlocked;
+template <typename DepthT>
+constexpr DepthT no_depth_value() noexcept {
+    if constexpr (std::is_same_v<DepthT, uint16_t>) {
+        return kNoState16;
+    } else {
+        return static_cast<DepthT>(kNoState);
     }
-    if constexpr (Profile) ++counters.collision_evaluations;
-    const bool blocked = mask_intersects(board, table.collision_masks[static_cast<size_t>(state_id)], table.limb_count);
-    collision_cache[static_cast<size_t>(state_id)] = blocked ? kCollisionBlocked : kCollisionClear;
-    return blocked;
 }
 
 template <bool Profile>
+inline bool checked_collision(
+    const Mask256& board,
+    int limb_count,
+    const Mask256* collision_masks,
+    int32_t state_id,
+    uint8_t* collision_cache,
+    Counters& counters
+) noexcept {
+    if constexpr (Profile) ++counters.collision_checks;
+    const size_t index = static_cast<size_t>(state_id);
+    const uint8_t cached = collision_cache[index];
+    if (MINOFLUX_UNLIKELY(cached == kCollisionUnknown)) {
+        if constexpr (Profile) ++counters.collision_evaluations;
+        const bool blocked = mask_intersects(board, collision_masks[index], limb_count);
+        collision_cache[index] = blocked ? kCollisionBlocked : kCollisionClear;
+        return blocked;
+    }
+    if constexpr (Profile) ++counters.collision_cache_hits;
+    return cached == kCollisionBlocked;
+}
+
+template <bool Profile, bool CompactState, bool CompactRotation>
 inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes) {
+    using DepthT = std::conditional_t<CompactState, uint16_t, int32_t>;
+    using FrontierT = std::conditional_t<CompactState, uint16_t, int32_t>;
+    constexpr DepthT kNoDepth = no_depth_value<DepthT>();
+
     RunResult result;
     auto& counters = result.counters;
     auto& timings = result.timings;
@@ -225,19 +274,29 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         if constexpr (Profile) timings.setup_seconds = seconds_between(setup_started, Clock::now());
         return result;
     }
+
     const int32_t start_state = static_cast<int32_t>(((((start_y - table.y_min) * table.x_count) + (start_x - table.x_min)) << 2) | (start_rotation & 3));
     const Mask256 board = pack_board(rows, table.width, table.height);
     Scratch& scratch = g_scratch;
     const size_t n = static_cast<size_t>(table.state_count);
+    auto& state_depths = [&]() -> auto& {
+        if constexpr (CompactState) return scratch.state_depths16;
+        else return scratch.state_depths;
+    }();
+    auto& frontier = [&]() -> auto& {
+        if constexpr (CompactState) return scratch.frontier16;
+        else return scratch.frontier;
+    }();
+
     scratch.collision_cache = table.collision_invalid;
     scratch.landing_state.assign(n, kNoLanding);
-    scratch.state_depths.assign(n, kNoState);
+    state_depths.assign(n, kNoDepth);
     scratch.state_kick_infos.assign(n, -1);
-    scratch.frontier.clear();
+    frontier.clear();
     scratch.visited_state_ids.clear();
     scratch.visited_rotation_ids.clear();
     scratch.landing_trail.clear();
-    scratch.frontier.reserve(n);
+    frontier.reserve(n);
     scratch.visited_state_ids.reserve(n);
     scratch.visited_rotation_ids.reserve(n);
     scratch.landing_trail.reserve(n);
@@ -250,74 +309,150 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         scratch.rotation_kick_infos.clear();
         scratch.rotation_is_geometry.clear();
     }
-    if constexpr (Profile) { counters.collision_checks = 1; counters.collision_evaluations = 1; }
-    const bool start_blocked = table.collision_invalid[static_cast<size_t>(start_state)] != 0 ||
-        mask_intersects(board, table.collision_masks[static_cast<size_t>(start_state)], table.limb_count);
-    scratch.collision_cache[static_cast<size_t>(start_state)] = start_blocked ? kCollisionBlocked : kCollisionClear;
+
+    uint8_t* const collision_cache = scratch.collision_cache.data();
+    const Mask256* const collision_masks = table.collision_masks.data();
+    const int32_t* const left_states = table.left_state.data();
+    const int32_t* const right_states = table.right_state.data();
+    const int32_t* const down_states = table.down_state.data();
+    const uint32_t* const state_group_offsets = table.state_group_offsets.data();
+    const uint32_t* const group_kick_offsets = table.group_kick_offsets.data();
+    const uint32_t* const packed_group_kicks = table.packed_group_kicks.data();
+    const int32_t* const kick_targets = table.kick_targets.data();
+    const uint16_t* const compact_kick_targets = table.compact_kick_targets.data();
+    const int8_t* const kick_indices = table.kick_indices.data();
+    DepthT* const depths = state_depths.data();
+
+    const bool start_blocked = checked_collision<Profile>(
+        board,
+        table.limb_count,
+        collision_masks,
+        start_state,
+        collision_cache,
+        counters
+    );
     if (start_blocked) {
         if constexpr (Profile) timings.setup_seconds = seconds_between(setup_started, Clock::now());
         return result;
     }
-    scratch.state_depths[static_cast<size_t>(start_state)] = 0;
-    scratch.frontier.push_back(start_state);
+
+    depths[static_cast<size_t>(start_state)] = DepthT{0};
+    frontier.push_back(static_cast<FrontierT>(start_state));
     scratch.visited_state_ids.push_back(start_state);
     size_t frontier_index = 0;
     int reachable_count = 1;
     const int budget = std::max(1, max_nodes);
     if constexpr (Profile) timings.setup_seconds = seconds_between(setup_started, Clock::now());
+
     const auto bfs_started = Clock::now();
-    while (frontier_index < scratch.frontier.size() && reachable_count <= budget) {
-        const int32_t state_id = scratch.frontier[frontier_index++];
+    while (frontier_index < frontier.size() && reachable_count <= budget) {
+        const int32_t state_id = static_cast<int32_t>(frontier[frontier_index++]);
         if constexpr (Profile) ++counters.bfs_nodes;
-        const int32_t new_depth = scratch.state_depths[static_cast<size_t>(state_id)] + 1;
+        const int32_t new_depth = static_cast<int32_t>(depths[static_cast<size_t>(state_id)]) + 1;
         const std::array<int32_t, 3> movement_targets = {
-            table.left_state[static_cast<size_t>(state_id)],
-            table.right_state[static_cast<size_t>(state_id)],
-            table.down_state[static_cast<size_t>(state_id)],
+            left_states[static_cast<size_t>(state_id)],
+            right_states[static_cast<size_t>(state_id)],
+            down_states[static_cast<size_t>(state_id)],
         };
         for (int32_t target_state : movement_targets) {
             if (target_state == kNoState) continue;
             if constexpr (Profile) ++counters.movement_edges;
-            if (scratch.state_depths[static_cast<size_t>(target_state)] != kNoState) {
+            if (MINOFLUX_LIKELY(depths[static_cast<size_t>(target_state)] != kNoDepth)) {
                 if constexpr (Profile) ++counters.movement_visited_skips;
                 continue;
             }
             if constexpr (Profile) ++counters.movement_collision_checks;
-            if (!checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) {
+            if (!checked_collision<Profile>(
+                    board,
+                    table.limb_count,
+                    collision_masks,
+                    target_state,
+                    collision_cache,
+                    counters
+                )) {
                 if constexpr (Profile) ++counters.movement_enqueues;
-                scratch.state_depths[static_cast<size_t>(target_state)] = new_depth;
+                depths[static_cast<size_t>(target_state)] = static_cast<DepthT>(new_depth);
                 scratch.state_kick_infos[static_cast<size_t>(target_state)] = -1;
                 scratch.visited_state_ids.push_back(target_state);
                 ++reachable_count;
-                scratch.frontier.push_back(target_state);
+                frontier.push_back(static_cast<FrontierT>(target_state));
             }
         }
+
         Clock::time_point rotation_started{};
         if constexpr (Profile) {
             if (g_profile_detailed_timings) rotation_started = Clock::now();
         }
-        const uint32_t group_begin = table.state_group_offsets[static_cast<size_t>(state_id)];
-        const uint32_t group_end = table.state_group_offsets[static_cast<size_t>(state_id) + 1];
+        const uint32_t group_begin = state_group_offsets[static_cast<size_t>(state_id)];
+        const uint32_t group_end = state_group_offsets[static_cast<size_t>(state_id) + 1];
+        uint32_t rolling_kick_begin = 0;
+        if constexpr (!CompactRotation) {
+            if (group_begin < group_end) rolling_kick_begin = group_kick_offsets[static_cast<size_t>(group_begin)];
+        }
         for (uint32_t group_index = group_begin; group_index < group_end; ++group_index) {
             if constexpr (Profile) ++counters.rotation_groups;
             int32_t successful_state = kNoState;
             int32_t successful_kick = -1;
-            const uint32_t kick_begin = table.group_kick_offsets[static_cast<size_t>(group_index)];
-            const uint32_t kick_end = table.group_kick_offsets[static_cast<size_t>(group_index) + 1];
+            uint32_t successful_position = std::numeric_limits<uint32_t>::max();
+            uint32_t kick_begin = 0;
+            uint32_t kick_end = 0;
+            if constexpr (CompactRotation) {
+                const uint32_t packed = packed_group_kicks[static_cast<size_t>(group_index)];
+                kick_begin = packed >> kPackedKickCountBits;
+                kick_end = kick_begin + (packed & kPackedKickCountMask);
+            } else {
+                kick_begin = rolling_kick_begin;
+                kick_end = group_kick_offsets[static_cast<size_t>(group_index) + 1];
+                rolling_kick_begin = kick_end;
+            }
+            if constexpr (Profile) {
+                const uint32_t group_size = kick_end - kick_begin;
+                switch (group_size) {
+                    case 1: ++counters.rotation_group_size_1; break;
+                    case 2: ++counters.rotation_group_size_2; break;
+                    case 3: ++counters.rotation_group_size_3; break;
+                    case 4: ++counters.rotation_group_size_4; break;
+                    default:
+                        if (group_size >= 5) ++counters.rotation_group_size_5_plus;
+                        break;
+                }
+            }
             for (uint32_t kick_index = kick_begin; kick_index < kick_end; ++kick_index) {
                 if constexpr (Profile) {
                     ++counters.kick_checks;
                     ++counters.rotation_collision_checks;
                 }
-                const int32_t target_state = table.kick_targets[static_cast<size_t>(kick_index)];
-                if (checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) continue;
+                const int32_t target_state = [&]() -> int32_t {
+                    if constexpr (CompactRotation) {
+                        return static_cast<int32_t>(compact_kick_targets[static_cast<size_t>(kick_index)]);
+                    } else {
+                        return kick_targets[static_cast<size_t>(kick_index)];
+                    }
+                }();
+                if (checked_collision<Profile>(
+                        board,
+                        table.limb_count,
+                        collision_masks,
+                        target_state,
+                        collision_cache,
+                        counters
+                    )) continue;
                 successful_state = target_state;
-                successful_kick = table.kick_indices[static_cast<size_t>(kick_index)];
+                successful_kick = kick_indices[static_cast<size_t>(kick_index)];
+                successful_position = kick_index - kick_begin;
                 break;
             }
-            if (successful_state == kNoState) continue;
-            if constexpr (Profile) ++counters.rotation_successes;
-            const bool adds_geometry = scratch.state_depths[static_cast<size_t>(successful_state)] == kNoState;
+            if (successful_state == kNoState) {
+                if constexpr (Profile) ++counters.rotation_failed_groups;
+                continue;
+            }
+            if constexpr (Profile) {
+                ++counters.rotation_successes;
+                if (successful_position == 0) ++counters.rotation_first_kick_successes;
+                else if (successful_position == 1) ++counters.rotation_second_kick_successes;
+                else ++counters.rotation_later_kick_successes;
+            }
+            const bool adds_geometry = depths[static_cast<size_t>(successful_state)] == kNoDepth;
             int32_t previous_rotation_depth = kNoState;
             bool improves_rotation = false;
             if (table.piece_is_t) {
@@ -334,11 +469,11 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             }
             if (adds_geometry) {
                 if constexpr (Profile) ++counters.rotation_geometry_enqueues;
-                scratch.state_depths[static_cast<size_t>(successful_state)] = new_depth;
+                depths[static_cast<size_t>(successful_state)] = static_cast<DepthT>(new_depth);
                 scratch.state_kick_infos[static_cast<size_t>(successful_state)] = rotation_info;
                 scratch.visited_state_ids.push_back(successful_state);
                 ++reachable_count;
-                scratch.frontier.push_back(successful_state);
+                frontier.push_back(static_cast<FrontierT>(successful_state));
             }
         }
         if constexpr (Profile) {
@@ -349,16 +484,24 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         if (reachable_count > budget) break;
     }
     if constexpr (Profile) timings.bfs_seconds = seconds_between(bfs_started, Clock::now());
+
     auto compute_landing = [&](int32_t state_id) -> int32_t {
         scratch.landing_trail.clear();
         scratch.landing_trail.push_back(state_id);
         int32_t current_id = state_id;
         int32_t landing = state_id;
         while (true) {
-            const int32_t target_id = table.down_state[static_cast<size_t>(current_id)];
+            const int32_t target_id = down_states[static_cast<size_t>(current_id)];
             if (target_id == kNoState) { landing = current_id; break; }
             if constexpr (Profile) ++counters.landing_collision_checks;
-            if (checked_collision<Profile>(table, board, target_id, scratch.collision_cache, counters)) { landing = current_id; break; }
+            if (checked_collision<Profile>(
+                    board,
+                    table.limb_count,
+                    collision_masks,
+                    target_id,
+                    collision_cache,
+                    counters
+                )) { landing = current_id; break; }
             current_id = target_id;
             const int32_t cached_landing = scratch.landing_state[static_cast<size_t>(current_id)];
             if (cached_landing != kNoLanding) {
@@ -371,6 +514,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         for (int32_t cached_id : scratch.landing_trail) scratch.landing_state[static_cast<size_t>(cached_id)] = landing;
         return landing;
     };
+
     const size_t geometry_count = static_cast<size_t>(table.geometry_count);
     if (scratch.best_records.size() < geometry_count) scratch.best_records.resize(geometry_count);
     if (scratch.best_generations.size() < geometry_count) scratch.best_generations.resize(geometry_count, 0);
@@ -400,6 +544,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
         }
         return final_state;
     };
+
     if (!table.piece_is_t) {
         for (int32_t state_id : scratch.visited_state_ids) {
             const int32_t final_state = landing_for(state_id);
@@ -410,7 +555,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             const int32_t rotation_info = scratch.state_kick_infos[static_cast<size_t>(state_id)];
             const bool last_rotation = rotation_info >= 0;
             BestRecord candidate;
-            candidate.negative_depth = -scratch.state_depths[static_cast<size_t>(state_id)];
+            candidate.negative_depth = -static_cast<int32_t>(depths[static_cast<size_t>(state_id)]);
             candidate.order_rank = state_id;
             candidate.placement.x = table.state_x[static_cast<size_t>(state_id)];
             candidate.placement.y = table.state_y[static_cast<size_t>(final_state)];
@@ -463,16 +608,29 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
             }
             if constexpr (Profile) ++counters.representative_nodes;
         };
-        for (int32_t state_id : scratch.visited_state_ids) emit(state_id, scratch.state_depths[static_cast<size_t>(state_id)], scratch.state_kick_infos[static_cast<size_t>(state_id)], state_id);
+        for (int32_t state_id : scratch.visited_state_ids) {
+            emit(
+                state_id,
+                static_cast<int32_t>(depths[static_cast<size_t>(state_id)]),
+                scratch.state_kick_infos[static_cast<size_t>(state_id)],
+                state_id
+            );
+        }
         const int32_t rotation_phase_base = table.state_count;
         for (int32_t state_id : scratch.visited_rotation_ids) {
             if (scratch.rotation_is_geometry[static_cast<size_t>(state_id)] != 0) {
                 if constexpr (Profile) ++counters.representative_duplicate_skips;
                 continue;
             }
-            emit(state_id, scratch.rotation_depths[static_cast<size_t>(state_id)], scratch.rotation_kick_infos[static_cast<size_t>(state_id)], rotation_phase_base + state_id);
+            emit(
+                state_id,
+                scratch.rotation_depths[static_cast<size_t>(state_id)],
+                scratch.rotation_kick_infos[static_cast<size_t>(state_id)],
+                rotation_phase_base + state_id
+            );
         }
     }
+
     if constexpr (Profile) {
         const double representative_total = seconds_between(representative_started, Clock::now());
         timings.representative_seconds = g_profile_detailed_timings
@@ -491,10 +649,36 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
     return result;
 }
 
+template <bool Profile>
+inline RunResult run_dispatch(
+    const Table& table,
+    const std::vector<uint64_t>& rows,
+    int start_x,
+    int start_y,
+    int start_rotation,
+    int max_nodes
+) {
+    const bool compact_state =
+        table.state_count > 0 &&
+        table.state_count <= static_cast<int>(kNoState16 - 1) &&
+        max_nodes <= static_cast<int>(kNoState16 - 2);
+    if (compact_state) {
+        if (table.compact_rotation_table) {
+            return run_impl<Profile, true, true>(table, rows, start_x, start_y, start_rotation, max_nodes);
+        }
+        return run_impl<Profile, true, false>(table, rows, start_x, start_y, start_rotation, max_nodes);
+    }
+    if (table.compact_rotation_table) {
+        return run_impl<Profile, false, true>(table, rows, start_x, start_y, start_rotation, max_nodes);
+    }
+    return run_impl<Profile, false, false>(table, rows, start_x, start_y, start_rotation, max_nodes);
+}
+
 inline RunResult run(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes, bool profile = false) {
     if (static_cast<int>(rows.size()) != table.height) throw std::runtime_error("board row count mismatch");
-    return profile ? run_impl<true>(table, rows, start_x, start_y, start_rotation, max_nodes)
-                   : run_impl<false>(table, rows, start_x, start_y, start_rotation, max_nodes);
+    return profile
+        ? run_dispatch<true>(table, rows, start_x, start_y, start_rotation, max_nodes)
+        : run_dispatch<false>(table, rows, start_x, start_y, start_rotation, max_nodes);
 }
 
 inline void finalize_table(Table& table) {
@@ -516,5 +700,46 @@ inline void finalize_table(Table& table) {
         table.geometry_ids[state_id] = inserted.first->second;
     }
 }
+
+inline void finalize_rotation_table(Table& table) {
+    table.compact_rotation_table = false;
+    table.packed_group_kicks.clear();
+    table.compact_kick_targets.clear();
+    if (table.group_kick_offsets.empty()) return;
+    if (table.group_kick_offsets.back() != table.kick_targets.size()) return;
+    if (table.kick_targets.size() > static_cast<size_t>(kPackedKickBeginMax)) return;
+
+    table.compact_kick_targets.reserve(table.kick_targets.size());
+    for (int32_t target : table.kick_targets) {
+        if (target < 0 || target >= static_cast<int32_t>(kNoState16)) {
+            table.compact_kick_targets.clear();
+            return;
+        }
+        table.compact_kick_targets.push_back(static_cast<uint16_t>(target));
+    }
+
+    const size_t group_count = table.group_kick_offsets.size() - 1;
+    table.packed_group_kicks.reserve(group_count);
+    for (size_t group_index = 0; group_index < group_count; ++group_index) {
+        const uint32_t begin = table.group_kick_offsets[group_index];
+        const uint32_t end = table.group_kick_offsets[group_index + 1];
+        if (end < begin) {
+            table.packed_group_kicks.clear();
+            table.compact_kick_targets.clear();
+            return;
+        }
+        const uint32_t count = end - begin;
+        if (begin > kPackedKickBeginMax || count > kPackedKickCountMask) {
+            table.packed_group_kicks.clear();
+            table.compact_kick_targets.clear();
+            return;
+        }
+        table.packed_group_kicks.push_back((begin << kPackedKickCountBits) | count);
+    }
+    table.compact_rotation_table = true;
+}
+
+#undef MINOFLUX_LIKELY
+#undef MINOFLUX_UNLIKELY
 
 }  // namespace minoflux::reachability
