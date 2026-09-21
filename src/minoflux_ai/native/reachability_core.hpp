@@ -217,18 +217,8 @@ inline bool checked_collision(const Table& table, const Mask256& board, int32_t 
 }
 
 template <bool Profile>
-inline RunResult run_impl(
-    const Table& table,
-    const std::vector<uint64_t>& rows,
-    int start_x,
-    int start_y,
-    int start_rotation,
-    int max_nodes,
-    std::vector<PlacementRecord>* placement_buffer = nullptr
-) {
+inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows, int start_x, int start_y, int start_rotation, int max_nodes) {
     RunResult result;
-    std::vector<PlacementRecord>& placements = placement_buffer ? *placement_buffer : result.placements;
-    placements.clear();
     auto& counters = result.counters;
     auto& timings = result.timings;
     const auto setup_started = Clock::now();
@@ -491,9 +481,9 @@ inline RunResult run_impl(
             : representative_total;
     }
     const auto placement_started = Clock::now();
-    placements.reserve(scratch.touched_geometry_ids.size());
-    for (int32_t geometry_id : scratch.touched_geometry_ids) placements.push_back(scratch.best_records[static_cast<size_t>(geometry_id)].placement);
-    std::sort(placements.begin(), placements.end(), [](const PlacementRecord& a, const PlacementRecord& b) {
+    result.placements.reserve(scratch.touched_geometry_ids.size());
+    for (int32_t geometry_id : scratch.touched_geometry_ids) result.placements.push_back(scratch.best_records[static_cast<size_t>(geometry_id)].placement);
+    std::sort(result.placements.begin(), result.placements.end(), [](const PlacementRecord& a, const PlacementRecord& b) {
         if (a.rotation != b.rotation) return a.rotation < b.rotation;
         if (a.x != b.x) return a.x < b.x;
         return a.y < b.y;
@@ -506,22 +496,6 @@ inline RunResult run(const Table& table, const std::vector<uint64_t>& rows, int 
     if (static_cast<int>(rows.size()) != table.height) throw std::runtime_error("board row count mismatch");
     return profile ? run_impl<true>(table, rows, start_x, start_y, start_rotation, max_nodes)
                    : run_impl<false>(table, rows, start_x, start_y, start_rotation, max_nodes);
-}
-
-inline RunResult run_into(
-    const Table& table,
-    const std::vector<uint64_t>& rows,
-    int start_x,
-    int start_y,
-    int start_rotation,
-    int max_nodes,
-    std::vector<PlacementRecord>& placements,
-    bool profile = false
-) {
-    if (static_cast<int>(rows.size()) != table.height) throw std::runtime_error("board row count mismatch");
-    return profile
-        ? run_impl<true>(table, rows, start_x, start_y, start_rotation, max_nodes, &placements)
-        : run_impl<false>(table, rows, start_x, start_y, start_rotation, max_nodes, &placements);
 }
 
 inline void finalize_table(Table& table) {

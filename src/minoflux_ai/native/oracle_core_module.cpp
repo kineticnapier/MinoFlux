@@ -13,7 +13,6 @@ namespace reach = minoflux::reachability;
 std::array<std::shared_ptr<const reach::Table>, 14> g_reachability_tables{};
 thread_local bool g_reachability_profile_enabled = false;
 thread_local ReachabilityProfile g_reachability_profile{};
-thread_local std::vector<reach::PlacementRecord> g_placement_buffer;
 
 size_t table_index(Piece piece, bool allow_180) {
     const int value = static_cast<int>(piece);
@@ -76,20 +75,19 @@ std::vector<Move> reachable_moves(
     const auto started = profiling
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
-    const reach::RunResult native_result = reach::run_into(
+    const reach::RunResult native_result = reach::run(
         table,
         native_rows,
         3,
         1,
         0,
         max_nodes,
-        g_placement_buffer,
         profiling
     );
     if (profiling) {
         const auto stopped = std::chrono::steady_clock::now();
         ++g_reachability_profile.calls;
-        g_reachability_profile.generated_moves += g_placement_buffer.size();
+        g_reachability_profile.generated_moves += native_result.placements.size();
         g_reachability_profile.bfs_nodes += native_result.counters.bfs_nodes;
         g_reachability_profile.collision_checks += native_result.counters.collision_checks;
         g_reachability_profile.collision_evaluations +=
@@ -131,8 +129,8 @@ std::vector<Move> reachable_moves(
     }
 
     std::vector<Move> result;
-    result.reserve(g_placement_buffer.size());
-    for (const reach::PlacementRecord& placement : g_placement_buffer) {
+    result.reserve(native_result.placements.size());
+    for (const reach::PlacementRecord& placement : native_result.placements) {
         Move move;
         move.piece = piece;
         move.x = static_cast<int8_t>(placement.x);
