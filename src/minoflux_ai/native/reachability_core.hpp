@@ -314,7 +314,7 @@ inline RunResult run_impl(const Table& table, const std::vector<uint64_t>& rows,
                     ++counters.rotation_collision_checks;
                 }
                 const int32_t target_state = table.kick_targets[static_cast<size_t>(kick_index)];
-                if (checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) continue;
+                if (checked_collision<Profile>(table, board, target_state, scratch.collision_cache, counters)) [[unlikely]] continue;
                 if constexpr (Profile) {
                     const uint32_t kick_position = kick_index - kick_begin;
                     if (kick_position == 0) ++counters.rotation_kick_first_successes;
