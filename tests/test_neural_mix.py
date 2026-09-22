@@ -46,6 +46,33 @@ class NeuralMixTests(unittest.TestCase):
             self.assertEqual(by_key[(1, 2)]["marker"], "new")
             self.assertEqual(by_key[(2, 3)]["marker"], "keep")
 
+    def test_input_weights_are_written_and_compose_with_existing_weight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.jsonl"
+            second = root / "second.jsonl"
+            output = root / "weighted.jsonl"
+            first.write_text(json.dumps(_record(11, 0, "gold")) + "\n", encoding="utf-8")
+            dagger = _record(22, 0, "dagger")
+            dagger["trainingWeight"] = 0.5
+            second.write_text(json.dumps(dagger) + "\n", encoding="utf-8")
+
+            result = merge_neural_datasets(
+                output,
+                [first, second],
+                input_weights=[1.0, 0.25],
+            )
+            records = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+            by_marker = {record["marker"]: record for record in records}
+            self.assertEqual(result["inputWeights"], [1.0, 0.25])
+            self.assertEqual(by_marker["gold"]["trainingWeight"], 1.0)
+            self.assertEqual(by_marker["dagger"]["trainingWeight"], 0.125)
+
+            metadata = json.loads(
+                output.with_suffix(output.suffix + ".meta.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["inputWeights"], [1.0, 0.25])
+
 
 if __name__ == "__main__":
     unittest.main()

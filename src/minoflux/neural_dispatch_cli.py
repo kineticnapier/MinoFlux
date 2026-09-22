@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from . import neural_cli, oracle_cli
+from . import neural_cli, oracle_cli, weighted_train_cli
 
 _ORACLE_COMMANDS = frozenset({"oracle-smoke", "oracle-profile", "oracle-dataset", "oracle-dagger"})
 
@@ -11,6 +11,8 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] in _ORACLE_COMMANDS:
         return oracle_cli.main(raw_argv)
+    if raw_argv and raw_argv[0] == "train-weighted":
+        return weighted_train_cli.main(raw_argv[1:])
     return neural_cli.main(raw_argv)
 
 
