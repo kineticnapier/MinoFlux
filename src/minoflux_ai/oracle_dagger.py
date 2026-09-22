@@ -40,6 +40,8 @@ def write_oracle_dagger_dataset(
     danger_height: int = 12,
     danger_holes: int = 4,
     max_samples: int = 500,
+    max_samples_per_game: int = 0,
+    min_query_gap: int = 0,
     progress: Callable[[int, int, int, int], None] | None = None,
     progress_every: int = 10,
 ) -> dict[str, object]:
@@ -47,8 +49,9 @@ def write_oracle_dagger_dataset(
 
     Unlike the heuristic DAgger collector, this gates the teacher call itself.
     Low-margin, dangerous, and random-control states are selected first, then only
-    those states pay for a native oracle search. The learner action always advances
-    the game so the collected states stay on the learner's own distribution.
+    those states pay for a native oracle search. Optional per-game and spacing
+    limits spread expensive labels across trajectories. The learner action always
+    advances the game so collected states stay on the learner's own distribution.
     """
 
     cfg = config.normalized()
@@ -58,6 +61,8 @@ def write_oracle_dagger_dataset(
     danger_height = max(1, int(danger_height))
     danger_holes = max(0, int(danger_holes))
     sample_limit = max(0, int(max_samples))
+    per_game_limit = max(0, int(max_samples_per_game))
+    query_gap = max(0, int(min_query_gap))
     report_every = max(1, int(progress_every))
     rng = random.Random(int(cfg.seed_base) ^ 0x0DA66E7)
 
@@ -70,9 +75,14 @@ def write_oracle_dagger_dataset(
     visited = 0
     oracle_queries = 0
     oracle_disagreements = 0
+    games_started = 0
+    queried_games = 0
+    sampled_games = 0
+    max_samples_in_game = 0
     topouts = 0
     completed = 0
     skipped: Counter[str] = Counter()
+    selection_skips: Counter[str] = Counter()
 
     with temporary.open("w", encoding="utf-8") as stream:
         for game_index in range(cfg.games):
@@ -81,6 +91,11 @@ def write_oracle_dagger_dataset(
 
             seed = cfg.seed_base + game_index * cfg.seed_step
             game = Game(seed)
+            games_started += 1
+            game_queries = 0
+            game_samples = 0
+            last_query_piece: int | None = None
+
             while not game.game_over and game.pieces_placed < cfg.max_pieces:
                 learner_ranked = rank_search_actions(
                     game,
@@ -112,58 +127,73 @@ def write_oracle_dagger_dataset(
                     reasons.append("random_control")
 
                 if reasons and (not sample_limit or samples < sample_limit):
-                    oracle_queries += 1
-                    choice = search_oracle(game, cfg.oracle)
-                    if choice is None:
-                        skipped["oracle-no-choice"] += 1
+                    piece_index = int(game.pieces_placed)
+                    if per_game_limit and game_samples >= per_game_limit:
+                        selection_skips["per_game_cap"] += 1
+                    elif (
+                        last_query_piece is not None
+                        and piece_index - last_query_piece < query_gap
+                    ):
+                        selection_skips["min_query_gap"] += 1
                     else:
-                        disagreed = _action_key(learner_action) != _action_key(choice.action)
-                        if disagreed:
-                            oracle_disagreements += 1
-                            reasons.append("nn_oracle_disagree")
-
-                        selected = _selected_actions(game, choice.action, cfg)
-                        if selected is None:
-                            skipped["oracle-action-unmatched"] += 1
+                        oracle_queries += 1
+                        game_queries += 1
+                        last_query_piece = piece_index
+                        choice = search_oracle(game, cfg.oracle)
+                        if choice is None:
+                            skipped["oracle-no-choice"] += 1
                         else:
-                            actions, expert_index = selected
-                            ranking_candidates = tuple(
-                                _candidate_state(
-                                    game,
-                                    action,
-                                    cfg.neural_config,
-                                    sampling_bucket=(
-                                        "expert" if index == expert_index else "negative"
-                                    ),
+                            disagreed = _action_key(learner_action) != _action_key(choice.action)
+                            if disagreed:
+                                oracle_disagreements += 1
+                                reasons.append("nn_oracle_disagree")
+
+                            selected = _selected_actions(game, choice.action, cfg)
+                            if selected is None:
+                                skipped["oracle-action-unmatched"] += 1
+                            else:
+                                actions, expert_index = selected
+                                ranking_candidates = tuple(
+                                    _candidate_state(
+                                        game,
+                                        action,
+                                        cfg.neural_config,
+                                        sampling_bucket=(
+                                            "expert" if index == expert_index else "negative"
+                                        ),
+                                    )
+                                    for index, action in enumerate(actions)
                                 )
-                                for index, action in enumerate(actions)
-                            )
-                            sample = NeuralRankingSample(
-                                seed=seed,
-                                piece_index=game.pieces_placed,
-                                expert_index=expert_index,
-                                expert_indices=(expert_index,),
-                                candidates=ranking_candidates,
-                            )
-                            payload = sample.to_dict()
-                            payload["source"] = "oracle_dagger"
-                            payload["teacher"] = ORACLE_TEACHER_NAME
-                            payload["daggerReasons"] = sorted(set(reasons))
-                            payload["learnerMargin"] = (
-                                None if learner_margin == float("inf") else learner_margin
-                            )
-                            payload["learnerMatchedOracle"] = not disagreed
-                            stream.write(json.dumps(payload, separators=(",", ":")) + "\n")
-                            samples += 1
-                            candidates += len(ranking_candidates)
-                            if progress is not None and samples % report_every == 0:
-                                progress(samples, candidates, visited, oracle_queries)
+                                sample = NeuralRankingSample(
+                                    seed=seed,
+                                    piece_index=game.pieces_placed,
+                                    expert_index=expert_index,
+                                    expert_indices=(expert_index,),
+                                    candidates=ranking_candidates,
+                                )
+                                payload = sample.to_dict()
+                                payload["source"] = "oracle_dagger"
+                                payload["teacher"] = ORACLE_TEACHER_NAME
+                                payload["daggerReasons"] = sorted(set(reasons))
+                                payload["learnerMargin"] = (
+                                    None if learner_margin == float("inf") else learner_margin
+                                )
+                                payload["learnerMatchedOracle"] = not disagreed
+                                stream.write(json.dumps(payload, separators=(",", ":")) + "\n")
+                                samples += 1
+                                game_samples += 1
+                                candidates += len(ranking_candidates)
+                                if progress is not None and samples % report_every == 0:
+                                    progress(samples, candidates, visited, oracle_queries)
 
                 apply_search_action(game, learner_action)
                 visited += 1
                 if sample_limit and samples >= sample_limit:
                     break
 
+            queried_games += int(game_queries > 0)
+            sampled_games += int(game_samples > 0)
+            max_samples_in_game = max(max_samples_in_game, game_samples)
             topouts += int(game.game_over)
             completed += int(
                 not game.game_over and game.pieces_placed >= cfg.max_pieces
@@ -177,20 +207,27 @@ def write_oracle_dagger_dataset(
         "source": "oracle_dagger",
         "path": str(target),
         "games": cfg.games,
+        "gamesStarted": games_started,
+        "queriedGames": queried_games,
+        "sampledGames": sampled_games,
         "samples": samples,
         "candidates": candidates,
         "visitedStates": visited,
         "oracleQueries": oracle_queries,
         "oracleDisagreements": oracle_disagreements,
+        "maxSamplesInGame": max_samples_in_game,
         "topouts": topouts,
         "completed": completed,
         "skipped": dict(sorted(skipped.items())),
+        "selectionSkips": dict(sorted(selection_skips.items())),
         "selection": {
             "sampleRate": rate,
             "uncertaintyMargin": uncertainty,
             "dangerHeight": danger_height,
             "dangerHoles": danger_holes,
             "maxSamples": sample_limit,
+            "maxSamplesPerGame": per_game_limit,
+            "minQueryGap": query_gap,
         },
         "config": {
             "games": cfg.games,

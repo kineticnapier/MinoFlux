@@ -236,6 +236,8 @@ def _dagger(args: argparse.Namespace) -> int:
             danger_height=args.danger_height,
             danger_holes=args.danger_holes,
             max_samples=args.max_samples,
+            max_samples_per_game=args.max_samples_per_game,
+            min_query_gap=args.min_query_gap,
             progress=progress,
             progress_every=args.progress_every,
         )
@@ -320,6 +322,18 @@ def build_parser() -> argparse.ArgumentParser:
     dagger.add_argument("--seed-base", type=int, default=7_000_001)
     dagger.add_argument("--seed-step", type=int, default=97)
     dagger.add_argument("--max-samples", type=int, default=500, help="0 means unlimited")
+    dagger.add_argument(
+        "--max-samples-per-game",
+        type=int,
+        default=0,
+        help="Maximum successful labels retained from one game; 0 means unlimited",
+    )
+    dagger.add_argument(
+        "--min-query-gap",
+        type=int,
+        default=0,
+        help="Minimum placed-piece distance between native oracle queries within one game",
+    )
     dagger.add_argument("--sample-rate", type=float, default=0.05)
     dagger.add_argument("--uncertainty-margin", type=float, default=0.08)
     dagger.add_argument("--danger-height", type=int, default=12)
