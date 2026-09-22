@@ -4,6 +4,8 @@ import argparse
 import json
 import sys
 
+from tqdm.auto import tqdm
+
 from minoflux_ai.oracle import OracleConfig, oracle_native_available, profile_oracle
 from minoflux_ai.oracle_dataset import OracleDatasetConfig, run_oracle_smoke, write_oracle_ranking_dataset
 from minoflux_engine import Game
@@ -96,28 +98,48 @@ def _profile(args: argparse.Namespace) -> int:
 
 def _dataset(args: argparse.Namespace) -> int:
     _require_native()
+    total_samples = max(1, int(args.games)) * max(1, int(args.max_pieces))
+    progress_bar = tqdm(
+        total=total_samples,
+        desc="oracle dataset",
+        unit="sample",
+        dynamic_ncols=True,
+        disable=None,
+        file=sys.stderr,
+    )
+    last_samples = 0
 
     def progress(samples: int, candidates: int) -> None:
-        print(
-            f"generated {samples:,} oracle samples / {candidates:,} candidate states",
-            file=sys.stderr,
-            flush=True,
-        )
+        nonlocal last_samples
+        if samples > last_samples:
+            progress_bar.update(samples - last_samples)
+            last_samples = samples
+        progress_bar.set_postfix_str(f"candidates={candidates:,}", refresh=True)
 
-    result = write_oracle_ranking_dataset(
-        args.output,
-        OracleDatasetConfig(
-            games=args.games,
-            max_pieces=args.max_pieces,
-            seed_base=args.seed_base,
-            seed_step=args.seed_step,
-            max_candidates=args.max_candidates,
-            oracle=_oracle_config(args),
-        ),
-        progress=progress,
-        progress_every=args.progress_every,
-        workers=args.workers,
-    )
+    try:
+        result = write_oracle_ranking_dataset(
+            args.output,
+            OracleDatasetConfig(
+                games=args.games,
+                max_pieces=args.max_pieces,
+                seed_base=args.seed_base,
+                seed_step=args.seed_step,
+                max_candidates=args.max_candidates,
+                oracle=_oracle_config(args),
+            ),
+            progress=progress,
+            progress_every=args.progress_every,
+            workers=args.workers,
+        )
+        final_samples = int(result.get("samples", last_samples))
+        final_candidates = int(result.get("candidates", 0))
+        if final_samples > last_samples:
+            progress_bar.update(final_samples - last_samples)
+            last_samples = final_samples
+        progress_bar.set_postfix_str(f"candidates={final_candidates:,}", refresh=True)
+    finally:
+        progress_bar.close()
+
     print(json.dumps(result, indent=2))
     return 0
 
