@@ -4,7 +4,10 @@ import argparse
 import json
 import sys
 
-from tqdm.auto import tqdm
+try:
+    from tqdm.auto import tqdm as _tqdm
+except ImportError:  # Optional convenience only.
+    _tqdm = None
 
 from minoflux_ai.oracle import OracleConfig, oracle_native_available, profile_oracle
 from minoflux_ai.oracle_dataset import OracleDatasetConfig, run_oracle_smoke, write_oracle_ranking_dataset
@@ -14,7 +17,8 @@ from minoflux_engine import Game
 def _require_native() -> None:
     if not oracle_native_available():
         raise SystemExit(
-            "MinoFlux native oracle extension is unavailable. Rebuild the environment with `uv sync`."
+            "MinoFlux native oracle extension is unavailable. Rebuild it with "
+            "`uv run --with pybind11 --with setuptools --no-sync python setup.py build_ext --inplace --force`."
         )
 
 
@@ -99,18 +103,29 @@ def _profile(args: argparse.Namespace) -> int:
 def _dataset(args: argparse.Namespace) -> int:
     _require_native()
     total_samples = max(1, int(args.games)) * max(1, int(args.max_pieces))
-    progress_bar = tqdm(
-        total=total_samples,
-        desc="oracle dataset",
-        unit="sample",
-        dynamic_ncols=True,
-        disable=None,
-        file=sys.stderr,
-    )
+    progress_bar = None
     last_samples = 0
+
+    if _tqdm is not None:
+        progress_bar = _tqdm(
+            total=total_samples,
+            desc="oracle dataset",
+            unit="sample",
+            dynamic_ncols=True,
+            disable=None,
+            file=sys.stderr,
+        )
 
     def progress(samples: int, candidates: int) -> None:
         nonlocal last_samples
+        if progress_bar is None:
+            print(
+                f"generated {samples:,} oracle samples / {candidates:,} candidate states",
+                file=sys.stderr,
+                flush=True,
+            )
+            last_samples = samples
+            return
         if samples > last_samples:
             progress_bar.update(samples - last_samples)
             last_samples = samples
@@ -133,12 +148,14 @@ def _dataset(args: argparse.Namespace) -> int:
         )
         final_samples = int(result.get("samples", last_samples))
         final_candidates = int(result.get("candidates", 0))
-        if final_samples > last_samples:
-            progress_bar.update(final_samples - last_samples)
-            last_samples = final_samples
-        progress_bar.set_postfix_str(f"candidates={final_candidates:,}", refresh=True)
+        if progress_bar is not None:
+            if final_samples > last_samples:
+                progress_bar.update(final_samples - last_samples)
+                last_samples = final_samples
+            progress_bar.set_postfix_str(f"candidates={final_candidates:,}", refresh=True)
     finally:
-        progress_bar.close()
+        if progress_bar is not None:
+            progress_bar.close()
 
     print(json.dumps(result, indent=2))
     return 0
