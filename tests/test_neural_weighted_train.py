@@ -50,6 +50,19 @@ class NeuralWeightedDeterminismTests(unittest.TestCase):
         self.assertFalse(cudnn.allow_tf32)
         self.assertFalse(matmul.allow_tf32)
 
+    def test_zero_weight_records_are_removed_before_training(self) -> None:
+        from minoflux_ai.neural_weighted_train import _positive_weight_records
+
+        records = [
+            {"seed": 1},
+            {"seed": 2, "trainingWeight": 0.0},
+            {"seed": 3, "trainingWeight": 0.25},
+        ]
+
+        filtered = _positive_weight_records(records)
+
+        self.assertEqual([record["seed"] for record in filtered], [1, 3])
+
 
 @unittest.skipUnless(importlib.util.find_spec("torch") is not None, "PyTorch optional dependency not installed")
 class NeuralWeightedTrainTests(unittest.TestCase):

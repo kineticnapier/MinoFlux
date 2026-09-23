@@ -65,6 +65,13 @@ def _record_training_weights(records: list[dict[str, object]]) -> tuple[float, .
     return tuple(_record_training_weight(record) for record in records)
 
 
+def _positive_weight_records(
+    records: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Remove zero-weight records before splitting, batching, and optimizer scheduling."""
+    return [record for record in records if _record_training_weight(record) > 0.0]
+
+
 def _weighted_loss_only_vectorized(
     values: Any,
     groups: Any,
@@ -139,7 +146,9 @@ def train_weighted_neural_value_model(
         torch.cuda.manual_seed_all(cfg.seed)
     rng = random.Random(cfg.seed)
 
-    records = _load_jsonl(dataset_path)
+    records = _positive_weight_records(_load_jsonl(dataset_path))
+    if not records:
+        raise ValueError("Training dataset contains no positive-weight records")
     neural_config = _infer_config(records[0])
     train_records, validation_records = _split_by_game(
         records,
@@ -153,7 +162,7 @@ def train_weighted_neural_value_model(
 
     human_records: list[dict[str, object]] = []
     if human_dataset_path is not None:
-        human_records = _load_jsonl(human_dataset_path)
+        human_records = _positive_weight_records(_load_jsonl(human_dataset_path))
         for record in human_records:
             if _infer_config(record) != neural_config:
                 raise ValueError("Human review dataset neural config does not match the base dataset")
