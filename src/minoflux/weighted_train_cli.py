@@ -28,6 +28,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--device", default="auto")
     parser.add_argument(
+        "--samples-per-epoch",
+        type=int,
+        default=None,
+        help=(
+            "Fixed number of weighted samples drawn per epoch. "
+            "Defaults to the rounded sum of trainingWeight values. "
+            "Use the same value across A/B experiments to keep optimizer steps fixed."
+        ),
+    )
+    parser.add_argument(
         "--deterministic",
         action="store_true",
         help=(
@@ -64,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         resume_from=args.resume,
         progress=progress,
         deterministic=args.deterministic,
+        samples_per_epoch=args.samples_per_epoch,
     )
     print(json.dumps(result.to_dict(), indent=2))
     return 0

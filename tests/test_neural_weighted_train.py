@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections import Counter
 import importlib.util
 import os
+import random
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -11,8 +13,14 @@ class NeuralWeightedDeterminismTests(unittest.TestCase):
     def test_weighted_train_cli_deterministic_flag_is_opt_in(self) -> None:
         from minoflux.weighted_train_cli import build_parser
 
-        self.assertFalse(build_parser().parse_args([]).deterministic)
-        self.assertTrue(build_parser().parse_args(["--deterministic"]).deterministic)
+        parser = build_parser()
+        self.assertFalse(parser.parse_args([]).deterministic)
+        self.assertTrue(parser.parse_args(["--deterministic"]).deterministic)
+        self.assertIsNone(parser.parse_args([]).samples_per_epoch)
+        self.assertEqual(
+            parser.parse_args(["--samples-per-epoch", "2304"]).samples_per_epoch,
+            2304,
+        )
 
     def test_deterministic_environment_sets_cublas_workspace(self) -> None:
         from minoflux_ai.neural_weighted_train import (
@@ -62,6 +70,34 @@ class NeuralWeightedDeterminismTests(unittest.TestCase):
         filtered = _positive_weight_records(records)
 
         self.assertEqual([record["seed"] for record in filtered], [1, 3])
+
+    def test_weighted_epoch_sampler_uses_weight_as_frequency(self) -> None:
+        from minoflux_ai.neural_weighted_train import _weighted_epoch_indices
+
+        sampled = _weighted_epoch_indices(
+            (4.0, 2.0, 1.0),
+            7,
+            random.Random(12345),
+        )
+
+        self.assertEqual(len(sampled), 7)
+        self.assertEqual(Counter(sampled), Counter({0: 4, 1: 2, 2: 1}))
+
+    def test_weighted_epoch_sampler_is_reproducible(self) -> None:
+        from minoflux_ai.neural_weighted_train import _weighted_epoch_indices
+
+        left = _weighted_epoch_indices((1.0, 0.5, 0.25), 64, random.Random(7))
+        right = _weighted_epoch_indices((1.0, 0.5, 0.25), 64, random.Random(7))
+
+        self.assertEqual(left, right)
+
+    def test_samples_per_epoch_defaults_to_effective_weight_mass(self) -> None:
+        from minoflux_ai.neural_weighted_train import _resolve_samples_per_epoch
+
+        self.assertEqual(_resolve_samples_per_epoch((1.0, 0.5, 0.25), None), 2)
+        self.assertEqual(_resolve_samples_per_epoch((1.0, 0.5, 0.25), 2304), 2304)
+        with self.assertRaises(ValueError):
+            _resolve_samples_per_epoch((1.0,), 0)
 
 
 @unittest.skipUnless(importlib.util.find_spec("torch") is not None, "PyTorch optional dependency not installed")
