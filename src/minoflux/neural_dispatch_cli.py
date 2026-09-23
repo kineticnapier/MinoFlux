@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 
 from . import (
+    coupled_sweep_cli,
     coupled_train_cli,
     duel_cli,
     neural_cli,
@@ -22,6 +23,8 @@ def main(argv: list[str] | None = None) -> int:
         return weighted_train_cli.main(raw_argv[1:])
     if raw_argv and raw_argv[0] == "train-coupled":
         return coupled_train_cli.main(raw_argv[1:])
+    if raw_argv and raw_argv[0] == "coupled-sweep":
+        return coupled_sweep_cli.main(raw_argv[1:])
     if raw_argv and raw_argv[0] == "sampling-overlap":
         return weighted_sampling_cli.main(raw_argv[1:])
     if raw_argv and raw_argv[0] == "duel":
