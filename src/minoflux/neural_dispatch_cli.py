@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import sys
 
-from . import duel_cli, neural_cli, oracle_cli, weighted_sampling_cli, weighted_train_cli
+from . import (
+    coupled_train_cli,
+    duel_cli,
+    neural_cli,
+    oracle_cli,
+    weighted_sampling_cli,
+    weighted_train_cli,
+)
 
 _ORACLE_COMMANDS = frozenset({"oracle-smoke", "oracle-profile", "oracle-dataset", "oracle-dagger"})
 
@@ -13,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
         return oracle_cli.main(raw_argv)
     if raw_argv and raw_argv[0] == "train-weighted":
         return weighted_train_cli.main(raw_argv[1:])
+    if raw_argv and raw_argv[0] == "train-coupled":
+        return coupled_train_cli.main(raw_argv[1:])
     if raw_argv and raw_argv[0] == "sampling-overlap":
         return weighted_sampling_cli.main(raw_argv[1:])
     if raw_argv and raw_argv[0] == "duel":
