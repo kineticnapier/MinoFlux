@@ -22,6 +22,7 @@ from .neural_train import (
     _prepare_cached_batch,
     _require_torch,
     _resolve_device,
+    _split_by_game,
 )
 
 _DETERMINISTIC_CUBLAS_WORKSPACE_CONFIG = ":4096:8"
