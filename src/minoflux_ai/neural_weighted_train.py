@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import math
+import os
 from pathlib import Path
 import random
 import time
@@ -21,8 +22,35 @@ from .neural_train import (
     _prepare_cached_batch,
     _require_torch,
     _resolve_device,
-    _split_by_game,
 )
+
+_DETERMINISTIC_CUBLAS_WORKSPACE_CONFIG = ":4096:8"
+
+
+def _prepare_deterministic_environment(enabled: bool) -> None:
+    """Configure process-level CUDA determinism before PyTorch initializes CUDA."""
+    if enabled:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = _DETERMINISTIC_CUBLAS_WORKSPACE_CONFIG
+
+
+def _configure_deterministic_torch(torch: Any, enabled: bool) -> None:
+    """Enable deterministic PyTorch kernels and disable nondeterministic fast paths."""
+    if not enabled:
+        return
+
+    torch.use_deterministic_algorithms(True)
+
+    cudnn = getattr(torch.backends, "cudnn", None)
+    if cudnn is not None:
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+        if hasattr(cudnn, "allow_tf32"):
+            cudnn.allow_tf32 = False
+
+    cuda = getattr(torch.backends, "cuda", None)
+    matmul = getattr(cuda, "matmul", None) if cuda is not None else None
+    if matmul is not None and hasattr(matmul, "allow_tf32"):
+        matmul.allow_tf32 = False
 
 
 def _record_training_weight(record: dict[str, object]) -> float:
@@ -96,12 +124,15 @@ def train_weighted_neural_value_model(
     human_dataset_path: str | Path | None = None,
     resume_from: str | Path | None = None,
     progress: Callable[[int, float], None] | None = None,
+    deterministic: bool = False,
 ) -> NeuralTrainResult:
     """Train a neural value model while honoring per-record ``trainingWeight``."""
 
     started = time.perf_counter()
     cfg = config.normalized()
+    _prepare_deterministic_environment(deterministic)
     torch, F = _require_torch()
+    _configure_deterministic_torch(torch, deterministic)
     torch.manual_seed(cfg.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(cfg.seed)
@@ -253,6 +284,9 @@ def train_weighted_neural_value_model(
     )
 
     elapsed_seconds = time.perf_counter() - started
+    checkpoint_cache_seconds = 0.0 if deterministic else cache_seconds
+    checkpoint_epoch_seconds: list[float] = [] if deterministic else epoch_seconds
+    checkpoint_elapsed_seconds = 0.0 if deterministic else elapsed_seconds
     saved = save_neural_value_checkpoint(
         checkpoint_path,
         model,
@@ -265,6 +299,12 @@ def train_weighted_neural_value_model(
             "rolloutWeight": cfg.rollout_weight,
             "resumeFrom": None if resume_from is None else str(resume_from),
             "weightedTraining": True,
+            "deterministicTraining": bool(deterministic),
+            "cublasWorkspaceConfig": (
+                os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+                if deterministic
+                else None
+            ),
             "trainWeightSum": sum(train_weights),
             "validationWeightSum": sum(validation_weights),
             "humanRecordWeightSum": sum(human_weights),
@@ -274,9 +314,9 @@ def train_weighted_neural_value_model(
             "humanMetrics": None if human_metrics is None else human_metrics.to_dict(),
             "epochLosses": epoch_losses,
             "cacheDevice": device,
-            "cacheSeconds": cache_seconds,
-            "epochSeconds": epoch_seconds,
-            "elapsedSeconds": elapsed_seconds,
+            "cacheSeconds": checkpoint_cache_seconds,
+            "epochSeconds": checkpoint_epoch_seconds,
+            "elapsedSeconds": checkpoint_elapsed_seconds,
         },
     )
     return NeuralTrainResult(

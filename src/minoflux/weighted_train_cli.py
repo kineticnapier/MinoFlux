@@ -27,6 +27,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--margin", type=float, default=0.20)
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help=(
+            "Force deterministic PyTorch/CUDA training. "
+            "This may be slower and fails if an operation has no deterministic implementation."
+        ),
+    )
     return parser
 
 
@@ -55,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         human_dataset_path=args.human_dataset,
         resume_from=args.resume,
         progress=progress,
+        deterministic=args.deterministic,
     )
     print(json.dumps(result.to_dict(), indent=2))
     return 0
