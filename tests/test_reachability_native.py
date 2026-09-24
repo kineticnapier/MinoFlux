@@ -23,8 +23,6 @@ _COUNTER_FIELDS = (
     "calls",
     "bfs_nodes",
     "collision_checks",
-    "collision_evaluations",
-    "collision_cache_hits",
     "kick_checks",
     "landing_queries",
     "landing_cache_hits",
@@ -87,6 +85,26 @@ class NativeReachabilityDifferentialTests(unittest.TestCase):
                 getattr(python_profile, field),
                 field,
             )
+
+        # The native table pre-seeds board-independent invalid states as blocked.
+        # Those checks are cache hits rather than collision evaluations, so the
+        # evaluation/hit split is implementation-specific while total checks stay equal.
+        self.assertEqual(
+            native_profile.collision_evaluations + native_profile.collision_cache_hits,
+            native_profile.collision_checks,
+        )
+        self.assertEqual(
+            python_profile.collision_evaluations + python_profile.collision_cache_hits,
+            python_profile.collision_checks,
+        )
+        self.assertLessEqual(
+            native_profile.collision_evaluations,
+            python_profile.collision_evaluations,
+        )
+        self.assertGreaterEqual(
+            native_profile.collision_cache_hits,
+            python_profile.collision_cache_hits,
+        )
 
     def test_empty_board_all_piece_types(self) -> None:
         for piece in "IJLOSTZ":
